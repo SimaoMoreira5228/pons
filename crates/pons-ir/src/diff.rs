@@ -35,16 +35,21 @@ impl Diff {
 
 impl Document {
     pub fn diff(&self, newer: &Self) -> Diff {
+        let mut old = self.clone();
+        let mut new = newer.clone();
+        old.canonicalize();
+        new.canonicalize();
+
         let mut diff = Diff::default();
-        diff_types(&mut diff, self, newer);
-        diff_auth_schemes(&mut diff, self, newer);
+        diff_types(&mut diff, &old, &new);
+        diff_auth_schemes(&mut diff, &old, &new);
         diff_errors(
             &mut diff,
             "common_errors",
-            &self.common_errors,
-            &newer.common_errors,
+            &old.common_errors,
+            &new.common_errors,
         );
-        diff_operations(&mut diff, self, newer);
+        diff_operations(&mut diff, &old, &new);
         diff
     }
 }
@@ -632,6 +637,50 @@ mod tests {
             .find(|change| change.path == path)
             .unwrap()
             .level
+    }
+
+    #[test]
+    fn equivalent_orderings_have_no_diff() {
+        let mut old: Document = serde_json::from_value(fixture()).unwrap();
+        let event = old
+            .operations
+            .iter_mut()
+            .find(|operation| operation.stream.is_some())
+            .unwrap();
+        event.auth.alternatives = vec![vec!["session".into()], vec!["tenant".into()]];
+        let mut second_header = event.responses[0].headers[0].clone();
+        second_header.wire = "X-Second".into();
+        event.responses[0].headers.push(second_header);
+        let flow = |kind| crate::OAuthFlow {
+            kind,
+            authorization_url: None,
+            token_url: Some("https://identity.example.test/token".into()),
+            scopes: Default::default(),
+            ext: Default::default(),
+        };
+        old.auth_schemes.insert(
+            "oauth".into(),
+            crate::AuthScheme::OAuth2 {
+                flows: vec![
+                    flow(crate::OAuthFlowKind::Password),
+                    flow(crate::OAuthFlowKind::ClientCredentials),
+                ],
+            },
+        );
+
+        let mut new = old.clone();
+        new.operations.reverse();
+        let event = &mut new.operations[0];
+        event.auth.alternatives.reverse();
+        event.responses[0].headers.reverse();
+        let crate::AuthScheme::OAuth2 { flows } = new.auth_schemes.get_mut("oauth").unwrap() else {
+            unreachable!()
+        };
+        flows.reverse();
+        old.validate().unwrap();
+        new.validate().unwrap();
+
+        assert_eq!(old.diff(&new), Diff::default());
     }
 
     #[test]

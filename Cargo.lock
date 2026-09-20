@@ -247,6 +247,7 @@ dependencies = [
 name = "pons-cli"
 version = "0.1.0"
 dependencies = [
+ "pons-emit-openapi",
  "pons-emit-ts",
  "pons-ir",
  "pons-plugin",
@@ -271,6 +272,14 @@ dependencies = [
  "quote",
  "serde_derive_internals",
  "syn",
+]
+
+[[package]]
+name = "pons-emit-openapi"
+version = "0.1.0"
+dependencies = [
+ "pons-ir",
+ "serde_json",
 ]
 
 [[package]]

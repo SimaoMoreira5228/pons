@@ -9,7 +9,7 @@ use std::process::ExitCode;
 
 use pons_ir::{ChangeLevel, Document};
 
-const HELP: &str = "Usage: pons <command> <ir.json> [arguments]\n\nCommands:\n  check <ir.json>                              Validate an IR document\n  fmt <ir.json>                                Rewrite an IR document in canonical form\n  diff <old.json> <new.json>                   Classify changes between two IR documents\n  emit --target <name> <ir.json> <output-dir>  Generate client files with an emitter\n      --strict                                 Fail if the emitter lacks IR capabilities\n";
+const HELP: &str = "Usage: pons <command> <ir.json> [arguments]\n\nCommands:\n  check <ir.json>                              Validate an IR document\n  fmt <ir.json>                                Rewrite an IR document in canonical form\n  diff <old.json> <new.json>                   Classify changes between two IR documents\n  emit --target <name> <ir.json> <output-dir>  Generate files (built-in: ts, openapi)\n      --strict                                 Fail if the emitter lacks IR capabilities\n";
 
 fn main() -> ExitCode {
     match run(env::args_os().skip(1).collect()) {

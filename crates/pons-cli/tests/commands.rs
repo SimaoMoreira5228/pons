@@ -137,6 +137,7 @@ if [ "$1" = describe ]; then
   printf '%s' '{"name":"fixture","version":"1.0.0","protocol":{"min":"1.0","max":"1.0"},"ir_version":{"min":"0.1","max":"0.1"},"capabilities":{"streaming":["sse"],"enum_reprs":["string","external","internal","adjacent","untagged"],"direction_split":true,"provides":true,"flattened":true}}'
 elif [ "$1" = emit ]; then
   request=$(cat)
+  printf '%s' "$request" > "$PONS_REQUEST"
   printf '%s\n' 'plugin log' >&2
   case "$request" in
     *'"target":"fixture"'*) printf '%s' '{"protocol":1,"files":[{"path":"nested/client.ts","content":"generated"}]}' ;;
@@ -157,7 +158,16 @@ fi
     .unwrap();
     let input = directory.path().join("api.json");
     let output_dir = directory.path().join("generated");
-    fs::write(&input, FIXTURE).unwrap();
+    let request_path = directory.path().join("request.json");
+    let mut contract: Value = serde_json::from_str(FIXTURE).unwrap();
+    contract["operations"][1]["auth"]["alternatives"] =
+        serde_json::json!([["tenant"], ["session"]]);
+    contract["operations"].as_array_mut().unwrap().reverse();
+    contract["types"]["User"]["fields"]
+        .as_array_mut()
+        .unwrap()
+        .reverse();
+    fs::write(&input, serde_json::to_vec(&contract).unwrap()).unwrap();
 
     let output = pons()
         .args(["emit", "--target", "fixture"])
@@ -165,6 +175,7 @@ fi
         .arg(&output_dir)
         .arg("--strict")
         .env("PATH", path)
+        .env("PONS_REQUEST", &request_path)
         .output()
         .unwrap();
 
@@ -178,4 +189,66 @@ fi
         "generated"
     );
     assert!(String::from_utf8_lossy(&output.stderr).contains("plugin log"));
+
+    let request: Value = serde_json::from_slice(&fs::read(request_path).unwrap()).unwrap();
+    let actual: pons_ir::Document = serde_json::from_value(request["ir"].clone()).unwrap();
+    let mut expected: pons_ir::Document = serde_json::from_value(contract).unwrap();
+    expected.canonicalize();
+    assert_eq!(actual, expected);
+}
+
+#[test]
+fn openapi_emit_failure_does_not_create_output() {
+    let directory = tempfile::tempdir().unwrap();
+    let input = directory.path().join("api.json");
+    let output_dir = directory.path().join("generated");
+    let mut contract: Value = serde_json::from_str(FIXTURE).unwrap();
+    contract["operations"][0]["path"] = serde_json::json!([
+        {"lit": "events"},
+        {"param": "id", "ty": {"kind": "string"}}
+    ]);
+    contract["operations"][1]["path"] = serde_json::json!([
+        {"lit": "events"},
+        {"param": "name", "ty": {"kind": "string"}}
+    ]);
+    fs::write(&input, serde_json::to_vec(&contract).unwrap()).unwrap();
+
+    let output = pons()
+        .args(["emit", "--target", "openapi"])
+        .arg(&input)
+        .arg(&output_dir)
+        .output()
+        .unwrap();
+
+    assert!(!output.status.success());
+    assert!(
+        String::from_utf8_lossy(&output.stderr)
+            .contains("OpenAPI route pattern /events/{} uses conflicting parameter names")
+    );
+    assert!(!output_dir.exists());
+}
+
+#[test]
+fn emit_writes_an_openapi_31_document() {
+    let directory = tempfile::tempdir().unwrap();
+    let input = directory.path().join("api.json");
+    let output_dir = directory.path().join("generated");
+    fs::write(&input, FIXTURE).unwrap();
+
+    let output = pons()
+        .args(["emit", "--target", "openapi"])
+        .arg(&input)
+        .arg(&output_dir)
+        .output()
+        .unwrap();
+
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let document: Value =
+        serde_json::from_slice(&fs::read(output_dir.join("openapi.json")).unwrap()).unwrap();
+    assert_eq!(document["openapi"], "3.1.1");
+    assert!(document["paths"]["/auth/login"]["post"].is_object());
 }

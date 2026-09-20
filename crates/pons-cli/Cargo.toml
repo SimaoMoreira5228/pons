@@ -14,5 +14,6 @@ path = "src/main.rs"
 pons-ir = { path = "../pons-ir" }
 pons-plugin = { path = "../pons-plugin" }
 pons-emit-ts = { path = "../pons-emit-ts" }
+pons-emit-openapi = { path = "../pons-emit-openapi" }
 serde_json.workspace = true
 tempfile = "3.27.0"

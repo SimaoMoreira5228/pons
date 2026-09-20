@@ -36,7 +36,7 @@ pub(crate) fn build(path: &str, description: RouteDescription) -> BuiltOperation
         method,
         path: segments,
         query: description.cx.query,
-        headers: Vec::new(),
+        headers: description.cx.headers,
         body: description.cx.body,
         responses: description.cx.responses,
         errors: description.cx.errors,

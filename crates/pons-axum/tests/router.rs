@@ -1,7 +1,8 @@
-use pons_axum::Router;
+use axum::response::IntoResponse;
 use pons_axum::extract::{Path, Query, State};
 use pons_axum::http::StatusCode;
-use pons_axum::routing::get;
+use pons_axum::routing::{get, post};
+use pons_axum::{Header, HeaderSpec, OptionalHeader, Router, WithStatus};
 use pons_core::Schema;
 use pons_ir::{AuthScheme, ContentKind, Info, InlineType, PathSegment, TypeKind, TypeRef};
 use serde::{Deserialize, Serialize};
@@ -37,6 +38,20 @@ struct CreateUser {
     name: String,
 }
 
+struct RequestId;
+
+impl HeaderSpec for RequestId {
+    type Value = String;
+    const NAME: &'static str = "X-Request-ID";
+}
+
+struct Retry;
+
+impl HeaderSpec for Retry {
+    type Value = u16;
+    const NAME: &'static str = "X-Retry";
+}
+
 #[derive(Clone)]
 struct AppState;
 
@@ -57,6 +72,17 @@ async fn list_users(State(_state): State<AppState>) -> pons_axum::extract::Json<
         id: 1,
         name: "Ada".into(),
     }])
+}
+
+async fn headers(
+    Header(request_id): Header<RequestId>,
+    OptionalHeader(retry): OptionalHeader<Retry>,
+) -> pons_axum::extract::Json<User> {
+    let _ = (request_id, retry);
+    pons_axum::extract::Json(User {
+        id: 1,
+        name: "Ada".into(),
+    })
 }
 
 async fn health() {}
@@ -85,12 +111,19 @@ async fn typed_user() -> Result<pons_axum::extract::Json<User>, UserError> {
 
 async fn create_user(
     pons_axum::extract::Json(input): pons_axum::extract::Json<CreateUser>,
-) -> (StatusCode, pons_axum::extract::Json<User>) {
+) -> WithStatus<201, pons_axum::extract::Json<User>> {
     let name = input.name;
-    (
-        StatusCode::CREATED,
-        pons_axum::extract::Json(User { id: 1, name }),
-    )
+    WithStatus::new(pons_axum::extract::Json(User { id: 1, name }))
+}
+
+async fn created_user(
+    pons_axum::extract::Json(input): pons_axum::extract::Json<CreateUser>,
+) -> Result<WithStatus<201, pons_axum::extract::Json<User>>, UserError> {
+    let name = input.name;
+    Ok(WithStatus::new(pons_axum::extract::Json(User {
+        id: 1,
+        name,
+    })))
 }
 
 fn info() -> Info {
@@ -108,6 +141,8 @@ fn router_describes_path_query_body_response_and_state() {
     let document = Router::<AppState>::new(info())
         .route("/users/{id}", get(get_user))
         .route("/users", get(list_users).post(create_user))
+        .route("/headers", get(headers))
+        .route("/created", post(created_user))
         .route("/", get(health))
         .route("/typed", get(typed_user))
         .route("/events", get(user_events))
@@ -141,18 +176,64 @@ fn router_describes_path_query_body_response_and_state() {
             .any(|response| matches!(response.body, Some(TypeRef::Named(_))))
     );
 
+    let headers = document
+        .operations
+        .iter()
+        .find(|operation| {
+            operation
+                .path
+                .iter()
+                .any(|segment| matches!(segment, PathSegment::Literal { lit } if lit == "headers"))
+        })
+        .unwrap();
+    assert_eq!(headers.headers[0].wire, "X-Request-ID");
+    assert_eq!(
+        headers.headers[0].ident,
+        vec!["request".to_owned(), "id".to_owned()]
+    );
+    assert_eq!(headers.headers[0].presence, pons_ir::Presence::Required);
+    assert!(matches!(
+        headers.headers[0].ty,
+        TypeRef::Inline(InlineType::String { .. })
+    ));
+    assert_eq!(headers.headers[1].wire, "X-Retry");
+    assert_eq!(headers.headers[1].presence, pons_ir::Presence::Optional);
+    assert!(matches!(
+        headers.headers[1].ty,
+        TypeRef::Inline(InlineType::Int { bits: 16, .. })
+    ));
+
     let post = document
         .operations
         .iter()
         .find(|operation| operation.method == pons_ir::Method::Post)
         .unwrap();
     assert_eq!(post.body.as_ref().unwrap().content, ContentKind::Json);
-    assert_eq!(post.responses[0].status, 200);
+    assert_eq!(post.responses[0].status, 201);
     assert!(
-        post.diagnostics
+        !post
+            .diagnostics
             .iter()
             .any(|diagnostic| diagnostic.code == "PONS-W101")
     );
+    let response = WithStatus::<201, _>::new(pons_axum::extract::Json(User {
+        id: 1,
+        name: "Ada".into(),
+    }))
+    .into_response();
+    assert_eq!(response.status(), StatusCode::CREATED);
+    let created = document
+        .operations
+        .iter()
+        .find(|operation| {
+            operation
+                .path
+                .iter()
+                .any(|segment| matches!(segment, PathSegment::Literal { lit } if lit == "created"))
+        })
+        .unwrap();
+    assert_eq!(created.responses[0].status, 201);
+    assert_eq!(created.errors[0].status, pons_ir::ErrorStatus::Exact(404));
     assert!(document.types.values().any(|definition| {
         matches!(&definition.definition, TypeKind::Struct { fields, .. } if fields.iter().any(|field| field.wire == "name"))
     }));

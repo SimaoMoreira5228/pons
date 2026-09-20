@@ -1272,6 +1272,9 @@
           "type": "object",
           "additionalProperties": true
         },
+        "presence": {
+          "$ref": "#/$defs/Presence"
+        },
         "ty": {
           "$ref": "#/$defs/TypeRef"
         },
@@ -1281,7 +1284,8 @@
       },
       "required": [
         "wire",
-        "ty"
+        "ty",
+        "presence"
       ]
     },
     "StreamDescription": {

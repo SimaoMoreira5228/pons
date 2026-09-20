@@ -40,6 +40,18 @@ pub(super) fn run(
             })
             .collect();
         (files, Vec::new(), Vec::new(), Vec::new())
+    } else if target == "openapi" {
+        let content = pons_emit_openapi::emit(document)
+            .map_err(|error| CliError::Failure(error.to_string()))?;
+        (
+            vec![OutputFile {
+                path: "openapi.json".into(),
+                content,
+            }],
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+        )
     } else {
         let mut executable = OsString::from("pons-emit-");
         executable.push(target);

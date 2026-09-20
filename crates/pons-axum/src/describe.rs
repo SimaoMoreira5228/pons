@@ -1,13 +1,15 @@
 use pons_core::{ErrorSpec, Schema, TypeCx};
 use pons_ir::{
     AuthRequirement, Body, ContentKind, Diagnostic, DiagnosticSeverity, Direction, ErrorResponse,
-    InlineType, Response, StreamDescription, StreamKind, StreamMessage, TypeRef,
+    HeaderParameter, InlineType, Presence, Response, StreamDescription, StreamKind, StreamMessage,
+    TypeRef,
 };
 
 #[derive(Debug, Default)]
 pub struct OperationCx {
     pub(crate) types: TypeCx,
     pub(crate) path_types: Vec<TypeRef>,
+    pub(crate) headers: Vec<HeaderParameter>,
     pub(crate) query: Option<TypeRef>,
     pub(crate) body: Option<Body>,
     pub(crate) responses: Vec<Response>,
@@ -25,6 +27,162 @@ pub trait DescribeResponse {
     fn describe(cx: &mut OperationCx);
 }
 
+pub trait StatusResponse: DescribeResponse + axum::response::IntoResponse {}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HeaderRejection {
+    Missing,
+    Repeated,
+    Invalid,
+}
+
+pub trait HeaderSpec {
+    type Value: Schema + std::str::FromStr;
+    const NAME: &'static str;
+}
+
+pub struct Header<S: HeaderSpec>(pub S::Value);
+
+pub struct OptionalHeader<S: HeaderSpec>(pub Option<S::Value>);
+
+impl axum::response::IntoResponse for HeaderRejection {
+    fn into_response(self) -> axum::response::Response {
+        let message = match self {
+            Self::Missing => "required header is missing",
+            Self::Repeated => "header must not be repeated",
+            Self::Invalid => "header value is invalid",
+        };
+        (axum::http::StatusCode::BAD_REQUEST, message).into_response()
+    }
+}
+
+fn valid_header_name(name: &str) -> bool {
+    !name.is_empty()
+        && name.as_bytes().iter().all(|byte| {
+            byte.is_ascii_alphanumeric()
+                || matches!(
+                    byte,
+                    b'!' | b'#'
+                        | b'$'
+                        | b'%'
+                        | b'&'
+                        | b'\''
+                        | b'*'
+                        | b'+'
+                        | b'-'
+                        | b'.'
+                        | b'^'
+                        | b'_'
+                        | b'`'
+                        | b'|'
+                        | b'~'
+                )
+        })
+}
+
+fn parse_header<T: std::str::FromStr>(
+    headers: &axum::http::HeaderMap,
+    name: &str,
+) -> Result<Option<T>, HeaderRejection> {
+    if !valid_header_name(name) {
+        return Err(HeaderRejection::Invalid);
+    }
+    let mut values = headers.get_all(name).iter();
+    let Some(value) = values.next() else {
+        return Ok(None);
+    };
+    if values.next().is_some() {
+        return Err(HeaderRejection::Repeated);
+    }
+    let value = value.to_str().map_err(|_| HeaderRejection::Invalid)?;
+    T::from_str(value)
+        .map(Some)
+        .map_err(|_| HeaderRejection::Invalid)
+}
+
+impl<S, T> axum::extract::FromRequestParts<S> for Header<T>
+where
+    S: Send + Sync,
+    T: HeaderSpec,
+{
+    type Rejection = HeaderRejection;
+
+    async fn from_request_parts(
+        parts: &mut axum::http::request::Parts,
+        _: &S,
+    ) -> Result<Self, Self::Rejection> {
+        parse_header::<T::Value>(&parts.headers, T::NAME)?
+            .map(Self)
+            .ok_or(HeaderRejection::Missing)
+    }
+}
+
+impl<S, T> axum::extract::FromRequestParts<S> for OptionalHeader<T>
+where
+    S: Send + Sync,
+    T: HeaderSpec,
+{
+    type Rejection = HeaderRejection;
+
+    async fn from_request_parts(
+        parts: &mut axum::http::request::Parts,
+        _: &S,
+    ) -> Result<Self, Self::Rejection> {
+        parse_header::<T::Value>(&parts.headers, T::NAME).map(Self)
+    }
+}
+
+impl<T: HeaderSpec> DescribeRequest for Header<T> {
+    fn describe(cx: &mut OperationCx) {
+        cx.request_header::<T::Value>(T::NAME, Presence::Required);
+    }
+}
+
+impl<T: HeaderSpec> DescribeRequest for OptionalHeader<T> {
+    fn describe(cx: &mut OperationCx) {
+        cx.request_header::<T::Value>(T::NAME, Presence::Optional);
+    }
+}
+
+pub struct WithStatus<const STATUS: u16, R>(pub R);
+
+impl<const STATUS: u16, R> WithStatus<STATUS, R> {
+    pub fn new(body: R) -> Self {
+        Self(body)
+    }
+}
+
+impl<const STATUS: u16, R> axum::response::IntoResponse for WithStatus<STATUS, R>
+where
+    R: StatusResponse,
+{
+    fn into_response(self) -> axum::response::Response {
+        assert!(
+            (100..=599).contains(&STATUS),
+            "WithStatus requires an HTTP status representable by Pons IR"
+        );
+        (
+            axum::http::StatusCode::from_u16(STATUS)
+                .expect("WithStatus requires a valid HTTP status"),
+            self.0,
+        )
+            .into_response()
+    }
+}
+
+impl<const STATUS: u16, R> DescribeResponse for WithStatus<STATUS, R>
+where
+    R: StatusResponse,
+{
+    fn describe(cx: &mut OperationCx) {
+        let first_response = cx.responses.len();
+        R::describe(cx);
+        for response in &mut cx.responses[first_response..] {
+            response.status = STATUS;
+        }
+    }
+}
+
 impl OperationCx {
     pub fn type_ref<T: Schema>(&mut self, direction: Direction) -> TypeRef {
         T::schema(&mut self.types, direction)
@@ -33,6 +191,34 @@ impl OperationCx {
     pub fn path_type<T: Schema>(&mut self) {
         self.path_types
             .push(T::schema(&mut self.types, Direction::Input));
+    }
+
+    pub fn request_header<T: Schema>(&mut self, wire: &str, presence: Presence) {
+        let base = if wire.len() >= 2
+            && matches!(
+                (wire.as_bytes()[0], wire.as_bytes()[1]),
+                (b'x' | b'X', b'-' | b'_')
+            ) {
+            &wire[2..]
+        } else {
+            wire
+        };
+        let ident = base
+            .split(['-', '_'])
+            .filter(|part| !part.is_empty())
+            .map(str::to_ascii_lowercase)
+            .collect::<Vec<_>>();
+        self.headers.push(HeaderParameter {
+            wire: wire.to_owned(),
+            ident: if ident.is_empty() {
+                vec!["header".to_owned()]
+            } else {
+                ident
+            },
+            ty: T::schema(&mut self.types, Direction::Input),
+            presence,
+            ext: Default::default(),
+        });
     }
 
     pub fn query_type<T: Schema>(&mut self) {
@@ -216,15 +402,19 @@ where
     }
 }
 
-impl<R: DescribeResponse> DescribeResponse for (axum::http::StatusCode, R) {
-    fn describe(cx: &mut OperationCx) {
-        let first_response = cx.responses.len();
-        R::describe(cx);
-        for response in &mut cx.responses[first_response..] {
-            response.status = 200;
-        }
-        cx.diagnostic("PONS-W101", "runtime response status is represented as 200");
-    }
+impl<T> StatusResponse for axum::Json<T> where T: Schema + serde::Serialize {}
+
+impl StatusResponse for String {}
+
+impl StatusResponse for () {}
+
+impl StatusResponse for axum::body::Bytes {}
+
+impl<T, S> StatusResponse for crate::Sse<T, S>
+where
+    T: crate::SseEvent + Send + 'static,
+    S: futures_util::Stream<Item = T> + Send + 'static,
+{
 }
 
 impl DescribeResponse for axum::body::Bytes {
@@ -252,5 +442,44 @@ impl Schema for ByteArray {
         TypeRef::Inline(InlineType::Bytes {
             encoding: pons_ir::ByteEncoding::Base64,
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use axum::response::IntoResponse;
+
+    #[test]
+    fn parses_headers_case_insensitively_and_rejects_invalid_values() {
+        let mut headers = axum::http::HeaderMap::new();
+        headers.insert("x-request-id", axum::http::HeaderValue::from_static("abc"));
+        assert_eq!(
+            parse_header::<String>(&headers, "X-Request-ID").unwrap(),
+            Some("abc".to_owned())
+        );
+        assert_eq!(parse_header::<u16>(&headers, "X-Retry").unwrap(), None);
+
+        headers.insert("X-Retry", axum::http::HeaderValue::from_static("bad"));
+        assert_eq!(
+            parse_header::<u16>(&headers, "X-Retry"),
+            Err(HeaderRejection::Invalid)
+        );
+        headers.insert("X-Retry", axum::http::HeaderValue::from_static("2"));
+        headers.append("X-Retry", axum::http::HeaderValue::from_static("3"));
+        assert_eq!(
+            parse_header::<u16>(&headers, "X-Retry"),
+            Err(HeaderRejection::Repeated)
+        );
+        assert_eq!(
+            parse_header::<String>(&headers, "X Request ID"),
+            Err(HeaderRejection::Invalid)
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "representable by Pons IR")]
+    fn rejects_statuses_outside_the_ir_range() {
+        let _ = WithStatus::<600, String>::new("body".to_owned()).into_response();
     }
 }

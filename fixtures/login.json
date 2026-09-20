@@ -127,7 +127,13 @@
         {
           "status": 200,
           "content": "stream",
-          "headers": [{"wire": "X-Trace-ID", "ty": {"kind": "string"}}]
+          "headers": [
+            {
+              "wire": "X-Trace-ID",
+              "ty": {"kind": "string"},
+              "presence": "required"
+            }
+          ]
         }
       ],
       "stream": {"kind": "sse", "events": [{"event": "user", "data": {"ref": "User"}}]}

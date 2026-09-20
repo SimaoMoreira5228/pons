@@ -36,6 +36,19 @@ pub fn invoke(
     options: BTreeMap<String, Value>,
     strict: bool,
 ) -> Result<PluginResult, PluginError> {
+    let mut canonical = ir.clone();
+    canonical.canonicalize();
+    canonical.validate().map_err(|errors| {
+        PluginError(
+            errors
+                .iter()
+                .map(ToString::to_string)
+                .collect::<Vec<_>>()
+                .join("\n"),
+        )
+    })?;
+    let ir = &canonical;
+
     let manifest_output = Command::new(executable)
         .arg("describe")
         .output()
@@ -144,4 +157,27 @@ fn ensure_success(
             executable.to_string_lossy()
         )
     }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn rejects_invalid_ir_before_starting_plugin() {
+        let ir: Document = serde_json::from_str(
+            r#"{"ir_version":"9.0","info":{"title":"Example","version":"1"}}"#,
+        )
+        .unwrap();
+        let error = invoke(
+            OsStr::new("plugin-does-not-exist"),
+            "fixture",
+            &ir,
+            BTreeMap::new(),
+            true,
+        )
+        .unwrap_err();
+
+        assert!(error.0.contains("unsupported IR version 9.0"));
+    }
 }

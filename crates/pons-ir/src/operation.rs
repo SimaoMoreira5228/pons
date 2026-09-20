@@ -65,6 +65,10 @@ impl Operation {
             if let Some(body) = &response.body {
                 body.visit_refs(visit);
             }
+            response
+                .headers
+                .iter()
+                .for_each(|header| header.ty.visit_refs(visit));
         });
         self.errors.iter().for_each(|error| {
             if let Some(body) = &error.body {
@@ -167,6 +171,7 @@ pub struct Response {
 pub struct ResponseHeader {
     pub wire: String,
     pub ty: TypeRef,
+    pub presence: Presence,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub ext: BTreeMap<String, Value>,
 }
@@ -309,6 +314,14 @@ pub enum AuthScheme {
     },
 }
 
+impl AuthScheme {
+    pub(crate) fn canonicalize(&mut self) {
+        if let Self::OAuth2 { flows } = self {
+            flows.sort_by_key(|flow| flow.kind);
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum ApiKeyLocation {
@@ -330,7 +343,9 @@ pub struct OAuthFlow {
     pub ext: BTreeMap<String, Value>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize, schemars::JsonSchema,
+)]
 #[serde(rename_all = "snake_case")]
 pub enum OAuthFlowKind {
     AuthorizationCode,
