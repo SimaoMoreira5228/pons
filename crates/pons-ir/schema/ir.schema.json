@@ -1,0 +1,1621 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Document",
+  "type": "object",
+  "properties": {
+    "auth_schemes": {
+      "type": "object",
+      "additionalProperties": {
+        "$ref": "#/$defs/AuthScheme"
+      },
+      "default": {}
+    },
+    "common_errors": {
+      "type": "array",
+      "default": [],
+      "items": {
+        "$ref": "#/$defs/ErrorResponse"
+      }
+    },
+    "diagnostics": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/Diagnostic"
+      }
+    },
+    "ext": {
+      "type": "object",
+      "additionalProperties": true
+    },
+    "info": {
+      "$ref": "#/$defs/Info"
+    },
+    "ir_version": {
+      "type": "string",
+      "pattern": "^0\\.1$"
+    },
+    "operations": {
+      "type": "array",
+      "default": [],
+      "items": {
+        "$ref": "#/$defs/Operation"
+      }
+    },
+    "types": {
+      "type": "object",
+      "additionalProperties": {
+        "$ref": "#/$defs/TypeDef"
+      },
+      "default": {}
+    }
+  },
+  "required": [
+    "ir_version",
+    "info"
+  ],
+  "$defs": {
+    "Access": {
+      "type": "string",
+      "enum": [
+        "read_write",
+        "read_only",
+        "write_only"
+      ]
+    },
+    "ApiKeyLocation": {
+      "type": "string",
+      "enum": [
+        "header",
+        "query",
+        "cookie"
+      ]
+    },
+    "AuthRequirement": {
+      "type": "object",
+      "properties": {
+        "alternatives": {
+          "type": "array",
+          "default": [],
+          "items": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          }
+        },
+        "ext": {
+          "type": "object",
+          "additionalProperties": true
+        },
+        "optional": {
+          "type": "boolean",
+          "default": false
+        }
+      }
+    },
+    "AuthScheme": {
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "format": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "kind": {
+              "type": "string",
+              "const": "bearer"
+            }
+          },
+          "required": [
+            "kind"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "basic"
+            }
+          },
+          "required": [
+            "kind"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "in": {
+              "$ref": "#/$defs/ApiKeyLocation"
+            },
+            "kind": {
+              "type": "string",
+              "const": "api_key"
+            },
+            "name": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "in",
+            "name"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "cookie": {
+              "type": "string"
+            },
+            "kind": {
+              "type": "string",
+              "const": "cookie_session"
+            }
+          },
+          "required": [
+            "kind",
+            "cookie"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "flows": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/OAuthFlow"
+              }
+            },
+            "kind": {
+              "type": "string",
+              "const": "o_auth2"
+            }
+          },
+          "required": [
+            "kind",
+            "flows"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "description": {
+              "type": "string"
+            },
+            "ext": {
+              "type": "object",
+              "additionalProperties": true
+            },
+            "kind": {
+              "type": "string",
+              "const": "custom"
+            }
+          },
+          "required": [
+            "kind",
+            "description"
+          ]
+        }
+      ]
+    },
+    "Body": {
+      "type": "object",
+      "properties": {
+        "content": {
+          "$ref": "#/$defs/ContentKind"
+        },
+        "ext": {
+          "type": "object",
+          "additionalProperties": true
+        },
+        "ty": {
+          "$ref": "#/$defs/TypeRef"
+        }
+      },
+      "required": [
+        "ty",
+        "content"
+      ]
+    },
+    "ByteEncoding": {
+      "type": "string",
+      "enum": [
+        "base64",
+        "base64url",
+        "hex",
+        "array"
+      ]
+    },
+    "ContentKind": {
+      "type": "string",
+      "enum": [
+        "json",
+        "form",
+        "multipart",
+        "text",
+        "bytes",
+        "stream",
+        "problem_json",
+        "empty"
+      ]
+    },
+    "CredentialLocator": {
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "from": {
+              "type": "string",
+              "const": "body"
+            },
+            "pointer": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "from",
+            "pointer"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "from": {
+              "type": "string",
+              "const": "header"
+            },
+            "name": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "from",
+            "name"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "from": {
+              "type": "string",
+              "const": "set_cookie"
+            },
+            "name": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "from",
+            "name"
+          ]
+        }
+      ]
+    },
+    "CredentialProvision": {
+      "type": "object",
+      "properties": {
+        "expires_at": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/CredentialLocator"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "ext": {
+          "type": "object",
+          "additionalProperties": true
+        },
+        "scheme": {
+          "type": "string"
+        },
+        "value": {
+          "$ref": "#/$defs/CredentialLocator"
+        }
+      },
+      "required": [
+        "scheme",
+        "value"
+      ]
+    },
+    "DecimalWire": {
+      "type": "string",
+      "enum": [
+        "number",
+        "string"
+      ]
+    },
+    "Diagnostic": {
+      "type": "object",
+      "properties": {
+        "code": {
+          "type": "string"
+        },
+        "ext": {
+          "type": "object",
+          "additionalProperties": true
+        },
+        "message": {
+          "type": "string"
+        },
+        "origin": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Origin"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "severity": {
+          "$ref": "#/$defs/DiagnosticSeverity"
+        }
+      },
+      "required": [
+        "severity",
+        "code",
+        "message"
+      ]
+    },
+    "DiagnosticSeverity": {
+      "type": "string",
+      "enum": [
+        "error",
+        "warning",
+        "info"
+      ]
+    },
+    "Direction": {
+      "type": "string",
+      "enum": [
+        "input",
+        "output",
+        "both"
+      ]
+    },
+    "Doc": {
+      "type": "object",
+      "properties": {
+        "deprecated": {
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "description": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "summary": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "tags": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      }
+    },
+    "EnumRepr": {
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "string"
+            }
+          },
+          "required": [
+            "kind"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "external"
+            }
+          },
+          "required": [
+            "kind"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "internal"
+            },
+            "tag": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "tag"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "content": {
+              "type": "string"
+            },
+            "kind": {
+              "type": "string",
+              "const": "adjacent"
+            },
+            "tag": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "tag",
+            "content"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "untagged"
+            }
+          },
+          "required": [
+            "kind"
+          ]
+        }
+      ]
+    },
+    "ErrorContent": {
+      "type": "string",
+      "enum": [
+        "json",
+        "problem_json",
+        "text",
+        "empty"
+      ]
+    },
+    "ErrorResponse": {
+      "type": "object",
+      "properties": {
+        "body": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/TypeRef"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "content": {
+          "$ref": "#/$defs/ErrorContent"
+        },
+        "doc": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Doc"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "ext": {
+          "type": "object",
+          "additionalProperties": true
+        },
+        "name": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "retryable": {
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "status": {
+          "$ref": "#/$defs/ErrorStatus"
+        }
+      },
+      "required": [
+        "status",
+        "name",
+        "content"
+      ]
+    },
+    "ErrorStatus": {
+      "oneOf": [
+        {
+          "type": "integer",
+          "maximum": 599,
+          "minimum": 100
+        },
+        {
+          "type": "string",
+          "enum": [
+            "1xx",
+            "2xx",
+            "3xx",
+            "4xx",
+            "5xx",
+            "default"
+          ]
+        }
+      ]
+    },
+    "Field": {
+      "type": "object",
+      "properties": {
+        "access": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Access"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "default": true,
+        "diagnostics": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/Diagnostic"
+          }
+        },
+        "doc": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Doc"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "ext": {
+          "type": "object",
+          "additionalProperties": true
+        },
+        "ident": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "presence": {
+          "$ref": "#/$defs/Presence"
+        },
+        "ty": {
+          "$ref": "#/$defs/TypeRef"
+        },
+        "wire": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "wire",
+        "ident",
+        "ty",
+        "presence"
+      ]
+    },
+    "FieldFormat": {
+      "type": "string",
+      "enum": [
+        "uuid",
+        "date-time",
+        "date",
+        "time",
+        "duration",
+        "uri",
+        "email",
+        "ipv4",
+        "ipv6"
+      ]
+    },
+    "HeaderParameter": {
+      "type": "object",
+      "properties": {
+        "ext": {
+          "type": "object",
+          "additionalProperties": true
+        },
+        "ident": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "presence": {
+          "$ref": "#/$defs/Presence"
+        },
+        "ty": {
+          "$ref": "#/$defs/TypeRef"
+        },
+        "wire": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "wire",
+        "ident",
+        "ty",
+        "presence"
+      ]
+    },
+    "Info": {
+      "type": "object",
+      "properties": {
+        "description": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "ext": {
+          "type": "object",
+          "additionalProperties": true
+        },
+        "servers": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "title": {
+          "type": "string"
+        },
+        "version": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "title",
+        "version"
+      ]
+    },
+    "InlineType": {
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "bool"
+            }
+          },
+          "required": [
+            "kind"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "bits": {
+              "type": "integer",
+              "format": "uint16",
+              "maximum": 65535,
+              "minimum": 0
+            },
+            "kind": {
+              "type": "string",
+              "const": "int"
+            },
+            "maximum": true,
+            "minimum": true,
+            "multiple_of": true,
+            "signed": {
+              "type": "boolean"
+            },
+            "wire": {
+              "$ref": "#/$defs/IntegerWire"
+            }
+          },
+          "required": [
+            "kind",
+            "bits",
+            "signed",
+            "wire"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "bits": {
+              "type": "integer",
+              "format": "uint8",
+              "maximum": 255,
+              "minimum": 0
+            },
+            "kind": {
+              "type": "string",
+              "const": "float"
+            }
+          },
+          "required": [
+            "kind",
+            "bits"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "decimal"
+            },
+            "wire": {
+              "$ref": "#/$defs/DecimalWire"
+            }
+          },
+          "required": [
+            "kind",
+            "wire"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "format": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/FieldFormat"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "kind": {
+              "type": "string",
+              "const": "string"
+            },
+            "max_length": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "format": "uint64",
+              "minimum": 0
+            },
+            "min_length": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "format": "uint64",
+              "minimum": 0
+            },
+            "pattern": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "kind"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "encoding": {
+              "$ref": "#/$defs/ByteEncoding"
+            },
+            "kind": {
+              "type": "string",
+              "const": "bytes"
+            }
+          },
+          "required": [
+            "kind",
+            "encoding"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "null"
+            }
+          },
+          "required": [
+            "kind"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "any"
+            }
+          },
+          "required": [
+            "kind"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "inner": {
+              "$ref": "#/$defs/TypeRef"
+            },
+            "kind": {
+              "type": "string",
+              "const": "nullable"
+            }
+          },
+          "required": [
+            "kind",
+            "inner"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "item": {
+              "$ref": "#/$defs/TypeRef"
+            },
+            "kind": {
+              "type": "string",
+              "const": "array"
+            },
+            "unique": {
+              "type": [
+                "boolean",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "kind",
+            "item"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "key": {
+              "$ref": "#/$defs/TypeRef"
+            },
+            "kind": {
+              "type": "string",
+              "const": "map"
+            },
+            "value": {
+              "$ref": "#/$defs/TypeRef"
+            }
+          },
+          "required": [
+            "kind",
+            "key",
+            "value"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "items": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/TypeRef"
+              }
+            },
+            "kind": {
+              "type": "string",
+              "const": "tuple"
+            }
+          },
+          "required": [
+            "kind",
+            "items"
+          ]
+        }
+      ]
+    },
+    "IntegerWire": {
+      "type": "string",
+      "enum": [
+        "number",
+        "string"
+      ]
+    },
+    "Method": {
+      "type": "string",
+      "enum": [
+        "GET",
+        "POST",
+        "PUT",
+        "PATCH",
+        "DELETE",
+        "HEAD",
+        "OPTIONS"
+      ]
+    },
+    "NamedRef": {
+      "type": "object",
+      "properties": {
+        "ref": {
+          "type": "string"
+        },
+        "variant": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "ref"
+      ]
+    },
+    "OAuthFlow": {
+      "type": "object",
+      "properties": {
+        "authorization_url": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "ext": {
+          "type": "object",
+          "additionalProperties": true
+        },
+        "kind": {
+          "$ref": "#/$defs/OAuthFlowKind"
+        },
+        "scopes": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "string"
+          }
+        },
+        "token_url": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "kind"
+      ]
+    },
+    "OAuthFlowKind": {
+      "type": "string",
+      "enum": [
+        "authorization_code",
+        "client_credentials",
+        "password",
+        "implicit"
+      ]
+    },
+    "Operation": {
+      "type": "object",
+      "properties": {
+        "auth": {
+          "$ref": "#/$defs/AuthRequirement"
+        },
+        "body": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Body"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "diagnostics": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/Diagnostic"
+          }
+        },
+        "doc": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Doc"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "errors": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/ErrorResponse"
+          }
+        },
+        "errors_inherit": {
+          "type": "boolean",
+          "default": true
+        },
+        "ext": {
+          "type": "object",
+          "additionalProperties": true
+        },
+        "headers": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/HeaderParameter"
+          }
+        },
+        "id": {
+          "type": "array",
+          "items": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          }
+        },
+        "method": {
+          "$ref": "#/$defs/Method"
+        },
+        "origin": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Origin"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "path": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/PathSegment"
+          }
+        },
+        "provides": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/CredentialProvision"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "query": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/TypeRef"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "responses": {
+          "type": "array",
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/Response"
+          }
+        },
+        "semantics": {
+          "$ref": "#/$defs/OperationSemantics"
+        },
+        "stream": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/StreamDescription"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "id",
+        "method",
+        "path",
+        "auth",
+        "semantics"
+      ]
+    },
+    "OperationSemantics": {
+      "type": "object",
+      "properties": {
+        "idempotent": {
+          "type": "boolean"
+        },
+        "pagination": true,
+        "safe": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "safe",
+        "idempotent"
+      ]
+    },
+    "Origin": {
+      "type": "object",
+      "properties": {
+        "column": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint32",
+          "minimum": 0
+        },
+        "line": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint32",
+          "minimum": 0
+        },
+        "source": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      }
+    },
+    "PathSegment": {
+      "anyOf": [
+        {
+          "type": "object",
+          "properties": {
+            "lit": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "lit"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "param": {
+              "type": "string"
+            },
+            "ty": {
+              "$ref": "#/$defs/TypeRef"
+            }
+          },
+          "required": [
+            "param",
+            "ty"
+          ]
+        }
+      ]
+    },
+    "Presence": {
+      "type": "string",
+      "enum": [
+        "required",
+        "optional"
+      ]
+    },
+    "Response": {
+      "type": "object",
+      "properties": {
+        "body": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/TypeRef"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "content": {
+          "$ref": "#/$defs/ContentKind"
+        },
+        "ext": {
+          "type": "object",
+          "additionalProperties": true
+        },
+        "headers": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/ResponseHeader"
+          }
+        },
+        "status": {
+          "type": "integer",
+          "format": "uint16",
+          "maximum": 65535,
+          "minimum": 0
+        }
+      },
+      "required": [
+        "status",
+        "content"
+      ]
+    },
+    "ResponseHeader": {
+      "type": "object",
+      "properties": {
+        "ext": {
+          "type": "object",
+          "additionalProperties": true
+        },
+        "ty": {
+          "$ref": "#/$defs/TypeRef"
+        },
+        "wire": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "wire",
+        "ty"
+      ]
+    },
+    "StreamDescription": {
+      "type": "object",
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "events": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/StreamMessage"
+              }
+            },
+            "kind": {
+              "type": "string",
+              "const": "sse"
+            }
+          },
+          "required": [
+            "kind",
+            "events"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "item": {
+              "$ref": "#/$defs/TypeRef"
+            },
+            "kind": {
+              "type": "string",
+              "const": "ndjson"
+            }
+          },
+          "required": [
+            "kind",
+            "item"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "content_type": {
+              "type": "string"
+            },
+            "kind": {
+              "type": "string",
+              "const": "bytes"
+            }
+          },
+          "required": [
+            "kind",
+            "content_type"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "client": {
+              "$ref": "#/$defs/TypeRef"
+            },
+            "kind": {
+              "type": "string",
+              "const": "websocket"
+            },
+            "server": {
+              "$ref": "#/$defs/TypeRef"
+            }
+          },
+          "required": [
+            "kind",
+            "client",
+            "server"
+          ]
+        }
+      ]
+    },
+    "StreamMessage": {
+      "type": "object",
+      "properties": {
+        "data": {
+          "$ref": "#/$defs/TypeRef"
+        },
+        "event": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "event",
+        "data"
+      ]
+    },
+    "TypeDef": {
+      "type": "object",
+      "properties": {
+        "diagnostics": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/Diagnostic"
+          }
+        },
+        "direction": {
+          "$ref": "#/$defs/Direction"
+        },
+        "doc": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Doc"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "ext": {
+          "type": "object",
+          "additionalProperties": true
+        },
+        "name": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "origin": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "additional": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/TypeRef"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "fields": {
+              "type": "array",
+              "default": [],
+              "items": {
+                "$ref": "#/$defs/Field"
+              }
+            },
+            "flattened": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/TypeRef"
+              }
+            },
+            "kind": {
+              "type": "string",
+              "const": "struct"
+            }
+          },
+          "required": [
+            "kind"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "enum"
+            },
+            "repr": {
+              "$ref": "#/$defs/EnumRepr"
+            },
+            "variants": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/Variant"
+              }
+            }
+          },
+          "required": [
+            "kind",
+            "repr",
+            "variants"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "inner": {
+              "$ref": "#/$defs/TypeRef"
+            },
+            "kind": {
+              "type": "string",
+              "const": "newtype"
+            }
+          },
+          "required": [
+            "kind",
+            "inner"
+          ]
+        }
+      ],
+      "required": [
+        "name",
+        "direction"
+      ]
+    },
+    "TypeRef": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/NamedRef"
+        },
+        {
+          "$ref": "#/$defs/InlineType"
+        }
+      ]
+    },
+    "Variant": {
+      "type": "object",
+      "properties": {
+        "diagnostics": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/Diagnostic"
+          }
+        },
+        "doc": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Doc"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "ext": {
+          "type": "object",
+          "additionalProperties": true
+        },
+        "ident": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "payload": {
+          "$ref": "#/$defs/VariantPayload"
+        },
+        "wire": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "wire",
+        "ident",
+        "payload"
+      ]
+    },
+    "VariantPayload": {
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "unit"
+            }
+          },
+          "required": [
+            "kind"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "newtype"
+            },
+            "ty": {
+              "$ref": "#/$defs/TypeRef"
+            }
+          },
+          "required": [
+            "kind",
+            "ty"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "items": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/TypeRef"
+              }
+            },
+            "kind": {
+              "type": "string",
+              "const": "tuple"
+            }
+          },
+          "required": [
+            "kind",
+            "items"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "fields": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/Field"
+              }
+            },
+            "kind": {
+              "type": "string",
+              "const": "struct"
+            }
+          },
+          "required": [
+            "kind",
+            "fields"
+          ]
+        }
+      ]
+    }
+  }
+}
