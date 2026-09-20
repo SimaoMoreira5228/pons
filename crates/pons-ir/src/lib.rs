@@ -1,7 +1,9 @@
+mod diff;
 mod document;
 mod operation;
 mod types;
 
+pub use diff::{Change, ChangeLevel, Diff};
 pub use document::{Document, Info, ValidationError};
 pub use operation::{
     ApiKeyLocation, AuthRequirement, AuthScheme, Body, ContentKind, CredentialLocator,

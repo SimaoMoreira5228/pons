@@ -1,0 +1,18 @@
+[package]
+name = "pons-cli"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+default-run = "pons"
+
+[[bin]]
+name = "pons"
+path = "src/main.rs"
+
+[dependencies]
+pons-ir = { path = "../pons-ir" }
+pons-plugin = { path = "../pons-plugin" }
+pons-emit-ts = { path = "../pons-emit-ts" }
+serde_json.workspace = true
+tempfile = "3.27.0"

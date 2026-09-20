@@ -87,13 +87,13 @@ impl Document {
 
             let mut path_parameters = BTreeSet::new();
             for segment in &operation.path {
-                if let crate::operation::PathSegment::Param { param, .. } = segment {
-                    if !path_parameters.insert(param) {
-                        errors.push(ValidationError::InvalidValue {
-                            path: owner.clone(),
-                            message: format!("duplicate path parameter {param}"),
-                        });
-                    }
+                if let crate::operation::PathSegment::Param { param, .. } = segment
+                    && !path_parameters.insert(param)
+                {
+                    errors.push(ValidationError::InvalidValue {
+                        path: owner.clone(),
+                        message: format!("duplicate path parameter {param}"),
+                    });
                 }
             }
             self.visit_operation_refs(&owner, operation, &mut errors);
@@ -108,13 +108,13 @@ impl Document {
                     }
                 }
             }
-            if let Some(provides) = &operation.provides {
-                if !self.auth_schemes.contains_key(&provides.scheme) {
-                    errors.push(ValidationError::UnknownAuthScheme {
-                        owner: owner.clone(),
-                        scheme: provides.scheme.clone(),
-                    });
-                }
+            if let Some(provides) = &operation.provides
+                && !self.auth_schemes.contains_key(&provides.scheme)
+            {
+                errors.push(ValidationError::UnknownAuthScheme {
+                    owner: owner.clone(),
+                    scheme: provides.scheme.clone(),
+                });
             }
 
             let mut response_statuses = BTreeSet::new();
@@ -184,16 +184,12 @@ impl Document {
                         _ => None,
                     };
                     if let (Some(tag), VariantPayload::Struct { fields }) = (tag, &variant.payload)
+                        && fields.iter().any(|field| field.wire == *tag)
                     {
-                        if fields.iter().any(|field| field.wire == *tag) {
-                            errors.push(ValidationError::InvalidValue {
-                                path: owner.clone(),
-                                message: format!(
-                                    "variant {} uses enum tag field {tag}",
-                                    variant.wire
-                                ),
-                            });
-                        }
+                        errors.push(ValidationError::InvalidValue {
+                            path: owner.clone(),
+                            message: format!("variant {} uses enum tag field {tag}", variant.wire),
+                        });
                     }
                     if let VariantPayload::Struct { fields } = &variant.payload {
                         self.validate_fields(&owner, fields, errors);
@@ -273,21 +269,21 @@ impl Document {
         error: &ErrorResponse,
         errors: &mut Vec<ValidationError>,
     ) {
-        if let ErrorStatus::Exact(status) = error.status {
-            if !(100..=599).contains(&status) {
-                errors.push(ValidationError::InvalidValue {
-                    path: owner.into(),
-                    message: format!("invalid error status {status}"),
-                });
-            }
+        if let ErrorStatus::Exact(status) = error.status
+            && !(100..=599).contains(&status)
+        {
+            errors.push(ValidationError::InvalidValue {
+                path: owner.into(),
+                message: format!("invalid error status {status}"),
+            });
         }
-        if let ErrorStatus::Class(class) = error.status {
-            if !(1..=5).contains(&class) {
-                errors.push(ValidationError::InvalidValue {
-                    path: owner.into(),
-                    message: format!("invalid HTTP status class {class}xx"),
-                });
-            }
+        if let ErrorStatus::Class(class) = error.status
+            && !(1..=5).contains(&class)
+        {
+            errors.push(ValidationError::InvalidValue {
+                path: owner.into(),
+                message: format!("invalid HTTP status class {class}xx"),
+            });
         }
     }
 

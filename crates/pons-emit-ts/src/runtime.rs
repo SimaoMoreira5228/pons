@@ -1,0 +1,357 @@
+pub(super) fn render() -> &'static str {
+    r#"async function request<T, E>(
+  client: ClientOptions,
+  method: string,
+  path: string,
+  query: unknown,
+  requestHeaders: Record<string, unknown> | undefined,
+  body: unknown,
+  content: string | undefined,
+  authGroups: string[][],
+  bodySchema: unknown,
+  responses: Array<{ status: number; content: string; schema?: unknown; events?: Array<{ event: string; schema: unknown }> }>,
+  errors: Array<{ status: number | string; content: string; schema?: unknown; events?: Array<{ event: string; schema: unknown }> }>,
+  authOptional: boolean,
+  provides: { scheme: string; value: { from: string; pointer?: string; name?: string } } | undefined,
+): Promise<Result<T, E | ClientFailure>> {
+  try {
+    const baseUrl = client.baseUrl.endsWith("/") ? client.baseUrl : `${client.baseUrl}/`;
+    const url = new URL(path.replace(/^\/+/, ""), baseUrl);
+    if (query && typeof query === "object") {
+      for (const [key, value] of Object.entries(query)) {
+        if (value === undefined || value === null) continue;
+        for (const item of Array.isArray(value) ? value : [value]) {
+          url.searchParams.append(key, String(item));
+        }
+      }
+    }
+    const headers = new Headers(client.headers);
+    for (const [key, value] of Object.entries(requestHeaders ?? {})) {
+      if (value !== undefined && value !== null) headers.set(key, String(value));
+    }
+    let credentials: RequestCredentials | undefined;
+    const activeGroup = authGroups.find((group) => group.every((scheme) =>
+      (client.auth?.[scheme] !== undefined || authSchemes[scheme]?.kind === "cookie") &&
+      authSchemes[scheme]?.kind !== "custom"
+    ));
+    if (authGroups.length && !activeGroup && !authOptional) {
+      return err({ kind: "auth", schemes: authGroups.flat() });
+    }
+    for (const scheme of activeGroup ?? []) {
+      const value = client.auth?.[scheme];
+      const definition = authSchemes[scheme];
+      if (definition === undefined) continue;
+      if (definition.kind === "cookie") {
+        credentials = "include";
+        continue;
+      }
+      if (value === undefined) continue;
+      if (definition.kind === "bearer") headers.set("authorization", `Bearer ${value}`);
+      else if (definition.kind === "basic") {
+        const bytes = new TextEncoder().encode(value);
+        const binary = Array.from(bytes, (byte) => String.fromCharCode(byte)).join("");
+        headers.set("authorization", `Basic ${btoa(binary)}`);
+      }
+      else if (definition.kind === "api_key" && definition.location === "header") headers.set(definition.name!, value);
+      else if (definition.kind === "api_key" && definition.location === "query") url.searchParams.set(definition.name!, value);
+      else if (definition.kind === "api_key" && definition.location === "cookie") headers.set("cookie", `${definition.name}=${value}`);
+    }
+    const init: RequestInit = { method, headers, credentials };
+    if (body !== undefined) {
+      const encodedBody = ["json", "problem_json", "form", "multipart"].includes(content ?? "")
+        ? encodeWire(body, bodySchema)
+        : body;
+      if (content === "json" || content === "problem_json") {
+        headers.set("content-type", content === "problem_json" ? "application/problem+json" : "application/json");
+        init.body = JSON.stringify(encodedBody);
+      } else if (content === "form") {
+        const form = new URLSearchParams();
+        for (const [key, value] of Object.entries(encodeWire(body, bodySchema) as Record<string, unknown>)) {
+          if (value !== undefined && value !== null) form.set(key, String(value));
+        }
+        headers.set("content-type", "application/x-www-form-urlencoded");
+        init.body = form;
+      } else if (content === "multipart") {
+        const form = new FormData();
+        for (const [key, value] of Object.entries(encodedBody as Record<string, unknown>)) {
+          if (value !== undefined && value !== null) form.set(key, value as string | Blob);
+        }
+        init.body = form;
+      } else if (content === "text") {
+        headers.set("content-type", "text/plain; charset=utf-8");
+        init.body = String(body);
+      } else {
+        init.body = body as BodyInit;
+      }
+    }
+    const response = await (client.fetch ?? fetch)(url, init);
+    const responseContent = response.headers.get("content-type") ?? "";
+    const declaredError = errors.find((error) => error.status === response.status ||
+      error.status === "default" ||
+      (typeof error.status === "string" && error.status === `${Math.floor(response.status / 100)}xx`));
+    const responseSchema = response.ok
+      ? responses.find((entry) => entry.status === response.status)
+      : declaredError;
+    const responseKind = responseSchema?.content;
+    if (response.ok && responseSchema?.content === "stream") {
+      if (!responseContent.includes("text/event-stream")) {
+        return err({ kind: "protocol", message: `expected text/event-stream, received ${responseContent || "no content type"}` });
+      }
+      if (!response.body) return err({ kind: "protocol", message: "the event stream has no response body" });
+      return ok(readSse(response.body, responseSchema.events ?? []) as T);
+    }
+    const jsonResponse = responseKind === "json" || responseKind === "problem_json" ||
+      (!responseKind && responseContent.includes("json"));
+    const textResponse = responseKind === "text" ||
+      (!responseKind && responseContent.startsWith("text/"));
+    const rawValue: unknown = response.status === 204 || response.status === 304 || responseKind === "empty"
+      ? undefined
+      : jsonResponse
+        ? await response.json()
+        : textResponse
+          ? await response.text()
+          : new Uint8Array(await response.arrayBuffer());
+    const value = jsonResponse && responseSchema?.schema
+      ? decodeWire(rawValue, responseSchema.schema)
+      : rawValue;
+    if (!response.ok) {
+      return declaredError
+        ? err({ kind: "http", status: response.status, body: value } as E)
+      : err({ kind: "unexpected_http", status: response.status, body: value });
+    }
+    if (provides) {
+      const locator = provides.value;
+      const credential = locator.from === "body"
+        ? pointerValue(value, locator.pointer ?? "")
+        : locator.from === "header" ? response.headers.get(locator.name ?? "")
+          : locator.from === "set_cookie" ? cookieValue(response.headers.get("set-cookie"), locator.name ?? "")
+            : undefined;
+      if (credential !== undefined && credential !== null) client.auth![provides.scheme] = String(credential);
+    }
+    return ok(value as T);
+  } catch (cause) {
+    return err({ kind: "network", cause });
+  }
+}
+
+type SseStreamFailure = { kind: "stream_error"; cause: unknown } | { kind: "unknown_event"; event: string } | { kind: "invalid_event"; event: string; cause: unknown } | { kind: "server_error"; body: unknown };
+
+async function* readSse<EventValue>(
+  body: ReadableStream<Uint8Array>,
+  events: Array<{ event: string; schema: unknown }>,
+): AsyncIterable<Result<EventValue, SseStreamFailure>> {
+  const reader = body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = "";
+  let eventName = "";
+  let data: string[] = [];
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      buffer += decoder.decode(value, { stream: !done });
+      if (done) buffer += "\n\n";
+      let lineEnd = buffer.indexOf("\n");
+      while (lineEnd >= 0) {
+        let line = buffer.slice(0, lineEnd);
+        buffer = buffer.slice(lineEnd + 1);
+        if (line.endsWith("\r")) line = line.slice(0, -1);
+        if (line === "") {
+          if (data.length) {
+            const name = eventName || "message";
+            const descriptor = events.find((entry) => entry.event === name);
+            if (!descriptor) {
+              yield err({ kind: "unknown_event", event: name });
+            } else {
+              try {
+                const parsed = JSON.parse(data.join("\n"));
+                const decoded = decodeWire(parsed, descriptor.schema);
+                if (name === "error") yield err({ kind: "server_error", body: decoded });
+                else yield ok({ event: name, data: decoded } as EventValue);
+              } catch (cause) {
+                yield err({ kind: "invalid_event", event: name, cause });
+              }
+            }
+          }
+          eventName = "";
+          data = [];
+        } else if (!line.startsWith(":")) {
+          const separator = line.indexOf(":");
+          const field = separator < 0 ? line : line.slice(0, separator);
+          const value = separator < 0 ? "" : line.slice(separator + 1).replace(/^ /, "");
+          if (field === "event") eventName = value;
+          if (field === "data") data.push(value);
+        }
+        lineEnd = buffer.indexOf("\n");
+      }
+      if (done) break;
+    }
+  } catch (cause) {
+    yield err({ kind: "stream_error", cause });
+  } finally {
+    try {
+      await reader.cancel();
+    } catch {}
+    reader.releaseLock();
+  }
+}
+
+function encodeWire(value: any, schema: any): any {
+  if (value == null || schema == null) return value;
+  if (schema.ref) {
+    const definition = typeDefinitions[schema.ref];
+    if (!definition) return value;
+    if (schema.variant && definition.kind === "enum") {
+      return transformVariant(value, definition, definition.variants.find((variant: any) => variant.wire === schema.variant), "encode");
+    }
+    if (definition.kind === "struct") return transformStruct(value, definition, "encode");
+    if (definition.kind === "enum") return transformEnum(value, definition, "encode");
+    if (definition.kind === "newtype") return encodeWire(value, definition.inner);
+    return value;
+  }
+  if (schema.kind === "bytes") return encodeBytes(value, schema.encoding);
+  if (schema.kind === "nullable") return encodeWire(value, schema.inner);
+  if (schema.kind === "array") return value.map((item: unknown) => encodeWire(item, schema.item));
+  if (schema.kind === "tuple") return schema.items.map((item: unknown, index: number) => encodeWire(value[index], item));
+  if (schema.kind === "map") return Object.fromEntries(Object.entries(value).map(([key, item]) => [key, encodeWire(item, schema.value)]));
+  return value;
+}
+
+function decodeWire(value: any, schema: any): any {
+  if (value == null || schema == null) return value;
+  if (schema.ref) {
+    const definition = typeDefinitions[schema.ref];
+    if (!definition) return value;
+    if (schema.variant && definition.kind === "enum") {
+      return transformVariant(value, definition, definition.variants.find((variant: any) => variant.wire === schema.variant), "decode");
+    }
+    if (definition.kind === "struct") return transformStruct(value, definition, "decode");
+    if (definition.kind === "enum") return transformEnum(value, definition, "decode");
+    if (definition.kind === "newtype") return decodeWire(value, definition.inner);
+    return value;
+  }
+  if (schema.kind === "bytes") return decodeBytes(value, schema.encoding);
+  if (schema.kind === "nullable") return decodeWire(value, schema.inner);
+  if (schema.kind === "array") return value.map((item: unknown) => decodeWire(item, schema.item));
+  if (schema.kind === "tuple") return schema.items.map((item: unknown, index: number) => decodeWire(value[index], item));
+  if (schema.kind === "map") return Object.fromEntries(Object.entries(value).map(([key, item]) => [key, decodeWire(item, schema.value)]));
+  return value;
+}
+
+function transformStruct(value: any, definition: any, mode: "encode" | "decode"): any {
+  const fields = collectFields(definition);
+  const flattenedMaps = collectMapValues(definition.flattened ?? []);
+  const transform = mode === "encode" ? encodeWire : decodeWire;
+  const output = { ...value };
+  const known = new Set(fields.map((field: any) => field.wire));
+  for (const field of fields) {
+    if (Object.hasOwn(value, field.wire)) output[field.wire] = transform(value[field.wire], field.ty);
+  }
+  const additional = definition.additional ?? flattenedMaps[0];
+  if (additional) {
+    for (const key of Object.keys(output)) {
+      if (!known.has(key)) output[key] = transform(output[key], additional);
+    }
+  }
+  return output;
+}
+
+function collectFields(definition: any): any[] {
+  const fields = [...(definition.fields ?? [])];
+  for (const reference of definition.flattened ?? []) {
+    const flattened = reference.ref ? typeDefinitions[reference.ref] : undefined;
+    if (flattened?.kind === "struct") fields.push(...collectFields(flattened));
+    if (flattened?.kind === "newtype" && flattened.inner.ref) {
+      const inner = typeDefinitions[flattened.inner.ref];
+      if (inner?.kind === "struct") fields.push(...collectFields(inner));
+    }
+  }
+  return fields;
+}
+
+function collectMapValues(references: any[]): any[] {
+  return references.flatMap((reference) => {
+    if (reference.kind === "map") return [reference.value];
+    if (!reference.ref) return [];
+    const definition = typeDefinitions[reference.ref];
+    return definition?.kind === "newtype" && definition.inner.kind === "map"
+      ? [definition.inner.value]
+      : definition?.kind === "struct"
+        ? collectMapValues(definition.flattened ?? [])
+        : [];
+  });
+}
+
+function transformEnum(value: any, definition: any, mode: "encode" | "decode"): any {
+  const repr = definition.repr;
+  let variant: any;
+  let payload: unknown;
+  if (repr.kind === "string") return value;
+  if (repr.kind === "external") {
+    if (typeof value === "string") return value;
+    const wire = Object.keys(value)[0];
+    variant = definition.variants.find((entry: any) => entry.wire === wire);
+    payload = value[wire];
+  } else if (repr.kind === "internal") {
+    variant = definition.variants.find((entry: any) => entry.wire === value[repr.tag]);
+    payload = value;
+  } else if (repr.kind === "adjacent") {
+    variant = definition.variants.find((entry: any) => entry.wire === value[repr.tag]);
+    payload = value[repr.content];
+  } else {
+    return value;
+  }
+  return transformVariant(value, definition, variant, mode, payload);
+}
+
+function transformVariant(value: any, definition: any, variant: any, mode: "encode" | "decode", payloadValue: any = value): any {
+  if (!variant || variant.payload.kind === "unit") return value;
+  const payload = variant.payload;
+  const transform = mode === "encode" ? encodeWire : decodeWire;
+  const transformPayload = (current: any): any => {
+    if (payload.kind === "newtype") return transform(current, payload.ty);
+    if (payload.kind === "tuple") return payload.items.map((item: unknown, index: number) => transform(current[index], item));
+    if (payload.kind === "struct") return transformStruct(current, { kind: "struct", fields: payload.fields }, mode);
+    return current;
+  };
+  const repr = definition.repr;
+  if (repr.kind === "external") {
+    const wire = variant.wire;
+    return typeof value === "string" ? value : { [wire]: transformPayload(payloadValue) };
+  }
+  if (repr.kind === "adjacent") return { ...value, [repr.content]: transformPayload(payloadValue) };
+  return transformPayload(payloadValue);
+}
+
+function encodeBytes(value: Uint8Array | number[], encoding: string): string | number[] {
+  const bytes = value instanceof Uint8Array ? value : new Uint8Array(value);
+  if (encoding === "array") return Array.from(bytes);
+  if (encoding === "hex") return Array.from(bytes, (byte) => byte.toString(16).padStart(2, "0")).join("");
+  const binary = Array.from(bytes, (byte) => String.fromCharCode(byte)).join("");
+  const base64 = btoa(binary);
+  return encoding === "base64url" ? base64.replaceAll("+", "-").replaceAll("/", "_").replace(/=+$/, "") : base64;
+}
+
+function decodeBytes(value: string | number[], encoding: string): Uint8Array {
+  if (encoding === "array") return new Uint8Array(value as number[]);
+  if (encoding === "hex") return new Uint8Array((value as string).match(/.{1,2}/g)?.map((byte) => parseInt(byte, 16)) ?? []);
+  let base64 = value as string;
+  if (encoding === "base64url") base64 = base64.replaceAll("-", "+").replaceAll("_", "/");
+  base64 += "=".repeat((4 - base64.length % 4) % 4);
+  return Uint8Array.from(atob(base64), (byte) => byte.charCodeAt(0));
+}
+
+function cookieValue(header: string | null, name: string): string | undefined {
+  const cookie = header?.split(";").find((part) => part.trim().startsWith(`${name}=`))?.trim();
+  return cookie?.slice(name.length + 1);
+}
+
+function pointerValue(value: unknown, pointer: string): unknown {
+  if (pointer === "") return value;
+  return pointer.split("/").slice(1).reduce<unknown>((current, part) => {
+    const key = part.replaceAll("~1", "/").replaceAll("~0", "~");
+    return current && typeof current === "object" ? (current as Record<string, unknown>)[key] : undefined;
+  }, value);
+}
+
+"#
+}
