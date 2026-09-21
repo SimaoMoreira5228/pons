@@ -5,7 +5,7 @@ use serde_json::Value;
 
 use crate::IR_VERSION;
 use crate::operation::{
-    AuthScheme, ContentKind, ErrorContent, ErrorResponse, ErrorStatus, Operation,
+    AuthScheme, ContentKind, ErrorContent, ErrorResponse, ErrorStatus, Method, Operation,
 };
 use crate::types::{
     Diagnostic, EnumRepr, Field, InlineType, TypeDef, TypeKind, TypeRef, VariantPayload,
@@ -28,6 +28,10 @@ pub struct Document {
     pub ext: BTreeMap<String, Value>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub diagnostics: Vec<Diagnostic>,
+}
+
+fn status_forbids_body(status: u16) -> bool {
+    matches!(status, 100..=199 | 204 | 205 | 304)
 }
 
 impl Document {
@@ -68,7 +72,7 @@ impl Document {
         }
 
         for error in &self.common_errors {
-            self.validate_error("common_errors", error, &mut errors);
+            self.validate_error("common_errors", error, false, &mut errors);
             self.visit_error_refs("common_errors", error, &mut errors);
         }
 
@@ -123,6 +127,14 @@ impl Document {
                 });
             }
             self.visit_operation_refs(&owner, operation, &mut errors);
+            if let Some(stream) = &operation.stream
+                && let Err(message) = stream.kind.validate()
+            {
+                errors.push(ValidationError::InvalidValue {
+                    path: owner.clone(),
+                    message,
+                });
+            }
 
             for alternative in &operation.auth.alternatives {
                 for scheme in alternative {
@@ -171,6 +183,14 @@ impl Document {
                         ),
                     });
                 }
+                if (operation.method == Method::Head || status_forbids_body(response.status))
+                    && (response.content != ContentKind::Empty || response.body.is_some())
+                {
+                    errors.push(ValidationError::InvalidValue {
+                        path: owner.clone(),
+                        message: format!("response {} cannot carry a body", response.status),
+                    });
+                }
                 if response.content == ContentKind::Stream {
                     stream_responses += 1;
                 }
@@ -195,7 +215,17 @@ impl Document {
                 });
             }
             for error in &operation.errors {
-                self.validate_error(&owner, error, &mut errors);
+                self.validate_error(&owner, error, operation.method == Method::Head, &mut errors);
+            }
+            if operation.errors_inherit && operation.method == Method::Head {
+                for error in &self.common_errors {
+                    if error.body.is_some() {
+                        errors.push(ValidationError::InvalidValue {
+                            path: owner.clone(),
+                            message: format!("error {:?} cannot carry a body", error.status),
+                        });
+                    }
+                }
             }
         }
 
@@ -225,6 +255,14 @@ impl Document {
         match &definition.definition {
             TypeKind::Struct { fields, .. } => self.validate_fields(&owner, fields, errors),
             TypeKind::Enum { repr, variants } => {
+                if let EnumRepr::Adjacent { tag, content } = repr
+                    && tag == content
+                {
+                    errors.push(ValidationError::InvalidValue {
+                        path: owner.clone(),
+                        message: "adjacent enum tag and content must differ".into(),
+                    });
+                }
                 if variants.is_empty() {
                     errors.push(ValidationError::InvalidValue {
                         path: owner.clone(),
@@ -247,16 +285,19 @@ impl Document {
                             message: "string enum variants must have unit payloads".into(),
                         });
                     }
-                    let tag = match repr {
-                        EnumRepr::Internal { tag } | EnumRepr::Adjacent { tag, .. } => Some(tag),
-                        _ => None,
+                    let reserved = match repr {
+                        EnumRepr::Internal { tag } => vec![tag.as_str()],
+                        EnumRepr::Adjacent { tag, content } => vec![tag.as_str(), content.as_str()],
+                        _ => Vec::new(),
                     };
-                    if let (Some(tag), VariantPayload::Struct { fields }) = (tag, &variant.payload)
-                        && fields.iter().any(|field| field.wire == *tag)
+                    if let VariantPayload::Struct { fields } = &variant.payload
+                        && fields
+                            .iter()
+                            .any(|field| reserved.contains(&field.wire.as_str()))
                     {
                         errors.push(ValidationError::InvalidValue {
                             path: owner.clone(),
-                            message: format!("variant {} uses enum tag field {tag}", variant.wire),
+                            message: format!("variant {} uses a reserved enum field", variant.wire),
                         });
                     }
                     if let VariantPayload::Struct { fields } = &variant.payload {
@@ -429,6 +470,7 @@ impl Document {
         &self,
         owner: &str,
         error: &ErrorResponse,
+        body_forbidden: bool,
         errors: &mut Vec<ValidationError>,
     ) {
         if let ErrorStatus::Exact(status) = error.status
@@ -445,6 +487,16 @@ impl Document {
             errors.push(ValidationError::InvalidValue {
                 path: owner.into(),
                 message: format!("invalid HTTP status class {class}xx"),
+            });
+        }
+        if error.body.is_some()
+            && (body_forbidden
+                || matches!(error.status, ErrorStatus::Class(1))
+                || matches!(error.status, ErrorStatus::Exact(status) if status_forbids_body(status)))
+        {
+            errors.push(ValidationError::InvalidValue {
+                path: owner.into(),
+                message: format!("error {:?} cannot carry a body", error.status),
             });
         }
         if (error.content == ErrorContent::Empty) == error.body.is_some() {

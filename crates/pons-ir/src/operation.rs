@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -415,6 +415,22 @@ pub enum StreamKind {
 }
 
 impl StreamKind {
+    pub(crate) fn validate(&self) -> Result<(), String> {
+        let Self::Sse { events } = self else {
+            return Ok(());
+        };
+        let mut names = BTreeSet::new();
+        for event in events {
+            if event.event.is_empty() {
+                return Err("SSE event name cannot be empty".into());
+            }
+            if !names.insert(event.event.as_str()) {
+                return Err(format!("duplicate SSE event {}", event.event));
+            }
+        }
+        Ok(())
+    }
+
     pub(crate) fn visit_refs(&self, visit: &mut impl FnMut(&TypeRef)) {
         match self {
             Self::Sse { events } => events.iter().for_each(|event| event.data.visit_refs(visit)),
