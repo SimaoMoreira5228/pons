@@ -2,7 +2,7 @@ use std::collections::BTreeMap;
 
 use pons_ir::{
     ApiKeyLocation, AuthScheme, ContentKind, CredentialLocator, Document, ErrorContent,
-    ErrorResponse, ErrorStatus, Operation, PathSegment, StreamKind, TypeRef,
+    ErrorResponse, ErrorStatus, Operation, PathSegment, Presence, StreamKind, TypeRef,
 };
 
 use crate::runtime;
@@ -452,8 +452,25 @@ fn response_descriptors(operation: &Operation) -> Result<String, EmitError> {
             } else {
                 String::new()
             };
+            let headers = response
+                .headers
+                .iter()
+                .map(|header| {
+                    format!(
+                        "{{ name: {}, required: {} }}",
+                        string(&header.wire),
+                        header.presence == Presence::Required
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join(", ");
+            let headers = if headers.is_empty() {
+                String::new()
+            } else {
+                format!(", headers: [{headers}]")
+            };
             Ok(format!(
-                "{{ status: {}, content: {}, schema: {schema}{events} }}",
+                "{{ status: {}, content: {}, schema: {schema}{events}{headers} }}",
                 response.status,
                 string(content_name(response.content))
             ))

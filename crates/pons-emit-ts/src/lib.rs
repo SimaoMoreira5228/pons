@@ -226,6 +226,49 @@ mod tests {
         assert!(client.contains("AsyncIterable<Result<EventsWatchEvent, EventsWatchStreamError>>"));
         assert!(client.contains("event: \"user\""));
         assert!(client.contains("name === \"error\""));
+        assert!(client.contains("headers: [{ name: \"X-Trace-ID\", required: true }]"));
+        assert!(client.contains("missing required response header"));
+        assert!(client.contains("response.headers.has(header.name)"));
+        assert!(client.contains("header.required && !response.headers.has(header.name)"));
+        assert!(client.contains("declaredSuccess?.headers"));
+        let missing_header_branch = client
+            .split("const missingHeader")
+            .nth(1)
+            .unwrap()
+            .split("const responseSchema")
+            .next()
+            .unwrap();
+        assert!(missing_header_branch.contains("if (missingHeader)"));
+        assert!(
+            missing_header_branch.contains("header.required && !response.headers.has(header.name)")
+        );
+        assert!(missing_header_branch.contains("kind: \"protocol\""));
+        assert!(client.contains("undeclared success response"));
+        assert!(client.contains("Math.floor(response.status / 100)"));
+        assert!(!client.contains("response.ok"));
+        let declared_success = client.find("const declaredSuccess").unwrap();
+        let declared_error = client.find("const declaredError").unwrap();
+        let undeclared_success = client.find("undeclared success response").unwrap();
+        assert!(declared_success < declared_error && declared_error < undeclared_success);
+        let stream_capture = client
+            .find("captureCredential(client, response, provides, undefined, false)")
+            .unwrap();
+        let stream_return = client.find("return ok(readSse").unwrap();
+        assert!(stream_capture < stream_return);
+    }
+
+    #[test]
+    fn emits_optional_response_headers() {
+        let mut document: Document =
+            serde_json::from_str(include_str!("../../../fixtures/login.json")).unwrap();
+        document.operations[1].responses[0].headers[0].presence = pons_ir::Presence::Optional;
+        let files = super::emit(&document).unwrap();
+        let client = files.iter().find(|file| file.path == "client.ts").unwrap();
+        assert!(
+            client
+                .content
+                .contains("headers: [{ name: \"X-Trace-ID\", required: false }]")
+        );
     }
 
     #[test]

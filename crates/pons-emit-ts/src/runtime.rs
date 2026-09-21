@@ -9,7 +9,7 @@ pub(super) fn render() -> &'static str {
   content: string | undefined,
   authGroups: string[][],
   bodySchema: unknown,
-  responses: Array<{ status: number; content: string; schema?: unknown; events?: Array<{ event: string; schema: unknown }> }>,
+  responses: Array<{ status: number; content: string; schema?: unknown; events?: Array<{ event: string; schema: unknown }>; headers?: Array<{ name: string; required: boolean }> }>,
   errors: Array<{ status: number | string; content: string; schema?: unknown; events?: Array<{ event: string; schema: unknown }> }>,
   authOptional: boolean,
   provides: { scheme: string; value: { from: string; pointer?: string; name?: string } } | undefined,
@@ -86,19 +86,27 @@ pub(super) fn render() -> &'static str {
     }
     const response = await (client.fetch ?? fetch)(url, init);
     const responseContent = response.headers.get("content-type") ?? "";
-    const declaredError = errors.find((error) => error.status === response.status ||
-      error.status === "default" ||
-      (typeof error.status === "string" && error.status === `${Math.floor(response.status / 100)}xx`));
-    const responseSchema = response.ok
-      ? responses.find((entry) => entry.status === response.status)
-      : declaredError;
+    const declaredSuccess = responses.find((entry) => entry.status === response.status);
+    const declaredError =
+      errors.find((error) => error.status === response.status) ??
+      errors.find((error) => typeof error.status === "string" && error.status === `${Math.floor(response.status / 100)}xx`) ??
+      errors.find((error) => error.status === "default");
+    if (declaredSuccess === undefined && declaredError === undefined && response.status >= 200 && response.status < 300) {
+      return err({ kind: "protocol", message: `undeclared success response ${response.status}` });
+    }
+    const missingHeader = declaredSuccess?.headers?.find((header) => header.required && !response.headers.has(header.name));
+    if (missingHeader) {
+      return err({ kind: "protocol", message: `missing required response header ${missingHeader.name}` });
+    }
+    const responseSchema = declaredSuccess ?? declaredError;
     const responseKind = responseSchema?.content;
-    if (response.ok && responseSchema?.content === "stream") {
+    if (declaredSuccess?.content === "stream") {
       if (!responseContent.includes("text/event-stream")) {
         return err({ kind: "protocol", message: `expected text/event-stream, received ${responseContent || "no content type"}` });
       }
       if (!response.body) return err({ kind: "protocol", message: "the event stream has no response body" });
-      return ok(readSse(response.body, responseSchema.events ?? []) as T);
+      captureCredential(client, response, provides, undefined, false);
+      return ok(readSse(response.body, declaredSuccess?.events ?? []) as T);
     }
     const jsonResponse = responseKind === "json" || responseKind === "problem_json" ||
       (!responseKind && responseContent.includes("json"));
@@ -114,24 +122,36 @@ pub(super) fn render() -> &'static str {
     const value = jsonResponse && responseSchema?.schema
       ? decodeWire(rawValue, responseSchema.schema)
       : rawValue;
-    if (!response.ok) {
+    if (declaredSuccess === undefined) {
       return declaredError
         ? err({ kind: "http", status: response.status, body: value } as E)
-      : err({ kind: "unexpected_http", status: response.status, body: value });
+        : err({ kind: "unexpected_http", status: response.status, body: value });
     }
-    if (provides) {
-      const locator = provides.value;
-      const credential = locator.from === "body"
-        ? pointerValue(value, locator.pointer ?? "")
-        : locator.from === "header" ? response.headers.get(locator.name ?? "")
-          : locator.from === "set_cookie" ? cookieValue(response.headers.get("set-cookie"), locator.name ?? "")
-            : undefined;
-      if (credential !== undefined && credential !== null) client.auth![provides.scheme] = String(credential);
-    }
+    captureCredential(client, response, provides, value, true);
     return ok(value as T);
   } catch (cause) {
     return err({ kind: "network", cause });
   }
+}
+
+function captureCredential(
+  client: ClientOptions,
+  response: Response,
+  provides: { scheme: string; value: { from: string; pointer?: string; name?: string } } | undefined,
+  value: unknown,
+  includeBody: boolean,
+): void {
+  if (!provides) return;
+  const locator = provides.value;
+  let credential: unknown;
+  if (locator.from === "body" && includeBody) {
+    credential = pointerValue(value, locator.pointer ?? "");
+  } else if (locator.from === "header") {
+    credential = response.headers.get(locator.name ?? "");
+  } else if (locator.from === "set_cookie") {
+    credential = cookieValue(response.headers.get("set-cookie"), locator.name ?? "");
+  }
+  if (credential !== undefined && credential !== null) client.auth![provides.scheme] = String(credential);
 }
 
 type SseStreamFailure = { kind: "stream_error"; cause: unknown } | { kind: "unknown_event"; event: string } | { kind: "invalid_event"; event: string; cause: unknown } | { kind: "server_error"; body: unknown };
