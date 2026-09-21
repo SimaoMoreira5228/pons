@@ -81,13 +81,20 @@ impl Operation {
     }
 
     pub(crate) fn canonicalize(&mut self) {
-        self.headers
-            .sort_by(|left, right| left.wire.cmp(&right.wire));
+        self.headers.sort_by(|left, right| {
+            left.wire
+                .to_ascii_lowercase()
+                .cmp(&right.wire.to_ascii_lowercase())
+                .then_with(|| left.wire.cmp(&right.wire))
+        });
         self.responses.sort_by_key(|response| response.status);
         self.responses.iter_mut().for_each(|response| {
-            response
-                .headers
-                .sort_by(|left, right| left.wire.cmp(&right.wire));
+            response.headers.sort_by(|left, right| {
+                left.wire
+                    .to_ascii_lowercase()
+                    .cmp(&right.wire.to_ascii_lowercase())
+                    .then_with(|| left.wire.cmp(&right.wire))
+            });
         });
         self.errors.sort_by(|left, right| {
             left.status
@@ -165,6 +172,26 @@ pub struct Response {
     pub headers: Vec<ResponseHeader>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub ext: BTreeMap<String, Value>,
+}
+
+impl Response {
+    pub(crate) fn equivalent_ignoring_header_case(&self, other: &Self) -> bool {
+        self.status == other.status
+            && self.content == other.content
+            && self.body == other.body
+            && self.ext == other.ext
+            && self.headers.len() == other.headers.len()
+            && self
+                .headers
+                .iter()
+                .zip(&other.headers)
+                .all(|(left, right)| {
+                    left.wire.eq_ignore_ascii_case(&right.wire)
+                        && left.ty == right.ty
+                        && left.presence == right.presence
+                        && left.ext == right.ext
+                })
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]

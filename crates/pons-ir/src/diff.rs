@@ -482,21 +482,27 @@ fn diff_headers(
     old: &[crate::HeaderParameter],
     new: &[crate::HeaderParameter],
 ) {
-    let old: BTreeMap<_, _> = old.iter().map(|header| (&header.wire, header)).collect();
-    let new: BTreeMap<_, _> = new.iter().map(|header| (&header.wire, header)).collect();
-    for wire in old.keys() {
-        if !new.contains_key(wire) {
+    let old: BTreeMap<String, _> = old
+        .iter()
+        .map(|header| (header.wire.to_ascii_lowercase(), header))
+        .collect();
+    let new: BTreeMap<String, _> = new
+        .iter()
+        .map(|header| (header.wire.to_ascii_lowercase(), header))
+        .collect();
+    for (key, header) in &old {
+        if !new.contains_key(key) {
             add(
                 diff,
                 ChangeLevel::Breaking,
-                format!("{path}.headers.{wire}"),
+                format!("{path}.headers.{}", header.wire),
                 "request header removed",
             );
         }
     }
-    for (wire, header) in new {
-        let header_path = format!("{path}.headers.{wire}");
-        match old.get(wire) {
+    for (key, header) in &new {
+        let header_path = format!("{path}.headers.{}", header.wire);
+        match old.get(key) {
             Some(previous) if previous.ty != header.ty => add(
                 diff,
                 ChangeLevel::Breaking,
@@ -566,7 +572,7 @@ fn diff_responses(diff: &mut Diff, path: &str, old: &Operation, new: &Operation)
     }
     for (status, response) in new {
         match old.get(&status) {
-            Some(previous) if *previous != response => add(
+            Some(previous) if !previous.equivalent_ignoring_header_case(response) => add(
                 diff,
                 ChangeLevel::Breaking,
                 format!("{path}.responses.{status}"),

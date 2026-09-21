@@ -2,7 +2,9 @@ use axum::response::IntoResponse;
 use pons_axum::extract::{Path, Query, State};
 use pons_axum::http::StatusCode;
 use pons_axum::routing::{get, post};
-use pons_axum::{Header, HeaderSpec, OptionalHeader, Router, WithStatus};
+use pons_axum::{
+    Header, HeaderSpec, OptionalHeader, Router, WithHeader, WithOptionalHeader, WithStatus,
+};
 use pons_core::Schema;
 use pons_ir::{AuthScheme, ContentKind, Info, InlineType, PathSegment, TypeKind, TypeRef};
 use serde::{Deserialize, Serialize};
@@ -52,6 +54,13 @@ impl HeaderSpec for Retry {
     const NAME: &'static str = "X-Retry";
 }
 
+struct TraceId;
+
+impl HeaderSpec for TraceId {
+    type Value = String;
+    const NAME: &'static str = "X-Trace-ID";
+}
+
 #[derive(Clone)]
 struct AppState;
 
@@ -83,6 +92,27 @@ async fn headers(
         id: 1,
         name: "Ada".into(),
     })
+}
+
+async fn response_headers() -> WithStatus<201, WithHeader<TraceId, pons_axum::extract::Json<User>>>
+{
+    WithStatus::new(WithHeader::new(
+        pons_axum::extract::Json(User {
+            id: 1,
+            name: "Ada".into(),
+        }),
+        "trace-123".into(),
+    ))
+}
+
+async fn optional_response_headers() -> WithOptionalHeader<Retry, pons_axum::extract::Json<User>> {
+    WithOptionalHeader::new(
+        pons_axum::extract::Json(User {
+            id: 1,
+            name: "Ada".into(),
+        }),
+        Some(3),
+    )
 }
 
 async fn health() {}
@@ -142,6 +172,8 @@ fn router_describes_path_query_body_response_and_state() {
         .route("/users/{id}", get(get_user))
         .route("/users", get(list_users).post(create_user))
         .route("/headers", get(headers))
+        .route("/response-headers", get(response_headers))
+        .route("/optional-response-headers", get(optional_response_headers))
         .route("/created", post(created_user))
         .route("/", get(health))
         .route("/typed", get(typed_user))
@@ -203,6 +235,44 @@ fn router_describes_path_query_body_response_and_state() {
         TypeRef::Inline(InlineType::Int { bits: 16, .. })
     ));
 
+    let response_headers = document
+        .operations
+        .iter()
+        .find(|operation| {
+            operation.path.iter().any(|segment| {
+                matches!(segment, PathSegment::Literal { lit } if lit == "response-headers")
+            })
+        })
+        .unwrap();
+    assert_eq!(response_headers.responses[0].status, 201);
+    assert_eq!(response_headers.responses[0].headers[0].wire, "X-Trace-ID");
+    assert_eq!(
+        response_headers.responses[0].headers[0].presence,
+        pons_ir::Presence::Required
+    );
+    assert!(matches!(
+        response_headers.responses[0].headers[0].ty,
+        TypeRef::Inline(InlineType::String { .. })
+    ));
+
+    let optional_response_headers = document
+        .operations
+        .iter()
+        .find(|operation| {
+            operation.path.iter().any(|segment| {
+                matches!(segment, PathSegment::Literal { lit } if lit == "optional-response-headers")
+            })
+        })
+        .unwrap();
+    assert_eq!(
+        optional_response_headers.responses[0].headers[0].presence,
+        pons_ir::Presence::Optional
+    );
+    assert!(matches!(
+        optional_response_headers.responses[0].headers[0].ty,
+        TypeRef::Inline(InlineType::Int { bits: 16, .. })
+    ));
+
     let post = document
         .operations
         .iter()
@@ -222,6 +292,45 @@ fn router_describes_path_query_body_response_and_state() {
     }))
     .into_response();
     assert_eq!(response.status(), StatusCode::CREATED);
+
+    let response = WithHeader::<TraceId, _>::new(
+        pons_axum::extract::Json(User {
+            id: 1,
+            name: "Ada".into(),
+        }),
+        "trace-123".into(),
+    )
+    .into_response();
+    assert_eq!(response.headers()["x-trace-id"], "trace-123");
+    let response = WithHeader::<TraceId, _>::new(
+        pons_axum::extract::Json(User {
+            id: 1,
+            name: "Ada".into(),
+        }),
+        "bad\nvalue".into(),
+    )
+    .into_response();
+    assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+    let response = WithStatus::<201, _>::new(WithHeader::<TraceId, _>::new(
+        pons_axum::extract::Json(User {
+            id: 1,
+            name: "Ada".into(),
+        }),
+        "bad\nvalue".into(),
+    ))
+    .into_response();
+    assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+
+    let response = WithOptionalHeader::<Retry, _>::new(
+        pons_axum::extract::Json(User {
+            id: 1,
+            name: "Ada".into(),
+        }),
+        None,
+    )
+    .into_response();
+    assert!(!response.headers().contains_key("x-retry"));
+
     let created = document
         .operations
         .iter()

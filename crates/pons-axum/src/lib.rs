@@ -9,7 +9,7 @@ use std::collections::BTreeMap;
 pub use axum::{body, extract, http};
 pub use describe::{
     DescribeRequest, DescribeResponse, Header, HeaderRejection, HeaderSpec, OperationCx,
-    OptionalHeader, StatusResponse, WithStatus,
+    OptionalHeader, StatusResponse, WithHeader, WithOptionalHeader, WithStatus,
 };
 pub use handler::DescribeHandler;
 use operation::build;

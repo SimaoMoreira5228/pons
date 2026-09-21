@@ -1,8 +1,9 @@
+use axum::response::IntoResponse;
 use pons_core::{ErrorSpec, Schema, TypeCx};
 use pons_ir::{
     AuthRequirement, Body, ContentKind, Diagnostic, DiagnosticSeverity, Direction, ErrorResponse,
-    HeaderParameter, InlineType, Presence, Response, StreamDescription, StreamKind, StreamMessage,
-    TypeRef,
+    HeaderParameter, InlineType, Presence, Response, ResponseHeader, StreamDescription, StreamKind,
+    StreamMessage, TypeRef,
 };
 
 #[derive(Debug, Default)]
@@ -44,6 +45,135 @@ pub trait HeaderSpec {
 pub struct Header<S: HeaderSpec>(pub S::Value);
 
 pub struct OptionalHeader<S: HeaderSpec>(pub Option<S::Value>);
+
+pub struct WithHeader<S: HeaderSpec, R>(pub R, pub S::Value);
+
+impl<S: HeaderSpec, R> WithHeader<S, R> {
+    pub fn new(body: R, value: S::Value) -> Self {
+        Self(body, value)
+    }
+}
+
+pub struct WithOptionalHeader<S: HeaderSpec, R>(pub R, pub Option<S::Value>);
+
+#[derive(Clone)]
+struct InvalidResponseHeader;
+
+impl<S: HeaderSpec, R> WithOptionalHeader<S, R> {
+    pub fn new(body: R, value: Option<S::Value>) -> Self {
+        Self(body, value)
+    }
+}
+
+fn insert_response_header<S>(
+    response: &mut axum::response::Response,
+    value: &S::Value,
+) -> Result<(), &'static str>
+where
+    S: HeaderSpec,
+    S::Value: ToString,
+{
+    let name = axum::http::HeaderName::from_bytes(S::NAME.as_bytes())
+        .map_err(|_| "invalid response header name")?;
+    let value = axum::http::HeaderValue::from_bytes(value.to_string().as_bytes())
+        .map_err(|_| "invalid response header value")?;
+    response.headers_mut().insert(name, value);
+    Ok(())
+}
+
+fn invalid_response_header() -> axum::response::Response {
+    let mut response = (
+        axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+        "invalid response header value",
+    )
+        .into_response();
+    response.extensions_mut().insert(InvalidResponseHeader);
+    response
+}
+
+fn describe_response_header<S: HeaderSpec>(cx: &mut OperationCx, start: usize, presence: Presence) {
+    let header = ResponseHeader {
+        wire: S::NAME.to_owned(),
+        ty: S::Value::schema(&mut cx.types, Direction::Output),
+        presence,
+        ext: Default::default(),
+    };
+    cx.responses[start..]
+        .iter_mut()
+        .for_each(|response| response.headers.push(header.clone()));
+}
+
+impl<S, R> axum::response::IntoResponse for WithHeader<S, R>
+where
+    S: HeaderSpec,
+    S::Value: ToString,
+    R: StatusResponse,
+{
+    fn into_response(self) -> axum::response::Response {
+        let mut response = self.0.into_response();
+        if insert_response_header::<S>(&mut response, &self.1).is_err() {
+            return invalid_response_header();
+        }
+        response
+    }
+}
+
+impl<S, R> DescribeResponse for WithHeader<S, R>
+where
+    S: HeaderSpec,
+    R: DescribeResponse,
+{
+    fn describe(cx: &mut OperationCx) {
+        let start = cx.responses.len();
+        R::describe(cx);
+        describe_response_header::<S>(cx, start, Presence::Required);
+    }
+}
+
+impl<S, R> StatusResponse for WithHeader<S, R>
+where
+    S: HeaderSpec,
+    S::Value: ToString,
+    R: StatusResponse,
+{
+}
+
+impl<S, R> axum::response::IntoResponse for WithOptionalHeader<S, R>
+where
+    S: HeaderSpec,
+    S::Value: ToString,
+    R: StatusResponse,
+{
+    fn into_response(self) -> axum::response::Response {
+        let mut response = self.0.into_response();
+        if let Some(value) = self.1
+            && insert_response_header::<S>(&mut response, &value).is_err()
+        {
+            return invalid_response_header();
+        }
+        response
+    }
+}
+
+impl<S, R> DescribeResponse for WithOptionalHeader<S, R>
+where
+    S: HeaderSpec,
+    R: DescribeResponse,
+{
+    fn describe(cx: &mut OperationCx) {
+        let start = cx.responses.len();
+        R::describe(cx);
+        describe_response_header::<S>(cx, start, Presence::Optional);
+    }
+}
+
+impl<S, R> StatusResponse for WithOptionalHeader<S, R>
+where
+    S: HeaderSpec,
+    S::Value: ToString,
+    R: StatusResponse,
+{
+}
 
 impl axum::response::IntoResponse for HeaderRejection {
     fn into_response(self) -> axum::response::Response {
@@ -161,12 +291,16 @@ where
             (100..=599).contains(&STATUS),
             "WithStatus requires an HTTP status representable by Pons IR"
         );
-        (
-            axum::http::StatusCode::from_u16(STATUS)
-                .expect("WithStatus requires a valid HTTP status"),
-            self.0,
-        )
-            .into_response()
+        let mut response = self.0.into_response();
+        if response
+            .extensions()
+            .get::<InvalidResponseHeader>()
+            .is_none()
+        {
+            *response.status_mut() = axum::http::StatusCode::from_u16(STATUS)
+                .expect("WithStatus requires a valid HTTP status");
+        }
+        response
     }
 }
 
