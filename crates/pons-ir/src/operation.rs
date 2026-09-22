@@ -399,6 +399,29 @@ pub enum CredentialLocator {
     SetCookie { name: String },
 }
 
+impl CredentialLocator {
+    pub(crate) fn validate(&self) -> Result<(), String> {
+        let Self::Body { pointer } = self else {
+            return Ok(());
+        };
+        if !pointer.is_empty() && !pointer.starts_with('/') {
+            return Err("credential body pointer must be empty or start with '/'".into());
+        }
+        let mut characters = pointer.chars();
+        while let Some(character) = characters.next() {
+            if character == '~' {
+                let Some(next) = characters.next() else {
+                    return Err("credential body pointer has an incomplete escape".into());
+                };
+                if next != '0' && next != '1' {
+                    return Err("credential body pointer has an invalid escape".into());
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct StreamDescription {
     #[serde(flatten)]

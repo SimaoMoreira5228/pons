@@ -1,4 +1,7 @@
-use pons_ir::{Document, EnumRepr, ErrorStatus, Method, StreamKind, TypeKind, VariantPayload};
+use pons_ir::{
+    CredentialLocator, Document, EnumRepr, ErrorStatus, Method, StreamKind, TypeKind,
+    VariantPayload,
+};
 
 #[test]
 fn consumer_can_load_validate_and_canonicalize_the_contract_fixture() {
@@ -179,6 +182,22 @@ fn validation_rejects_bodies_on_bodyless_http_responses() {
             .any(|error| error.to_string().contains("cannot carry a body"))
     );
 
+    for class in [2, 3] {
+        let mut document = base.clone();
+        document.operations[0].errors[0].status = ErrorStatus::Class(class);
+        assert!(
+            document
+                .validate()
+                .unwrap_err()
+                .iter()
+                .any(|error| error.to_string().contains("cannot carry a body"))
+        );
+    }
+
+    let mut document = base.clone();
+    document.operations[0].errors[0].status = ErrorStatus::Class(4);
+    assert!(document.validate().is_ok());
+
     let mut document = base;
     document.operations[0].errors[0].status = ErrorStatus::Exact(204);
     assert!(
@@ -187,5 +206,97 @@ fn validation_rejects_bodies_on_bodyless_http_responses() {
             .unwrap_err()
             .iter()
             .any(|error| error.to_string().contains("cannot carry a body"))
+    );
+}
+
+#[test]
+fn validation_rejects_malformed_credential_pointers() {
+    let base: Document =
+        serde_json::from_str(include_str!("../../../fixtures/login.json")).unwrap();
+    let mut document = base.clone();
+    document.operations[0].provides.as_mut().unwrap().value = CredentialLocator::Body {
+        pointer: "token".into(),
+    };
+    assert!(
+        document
+            .validate()
+            .unwrap_err()
+            .iter()
+            .any(|error| error.to_string().contains("must be empty or start with"))
+    );
+
+    let mut document = base.clone();
+    document.operations[0].provides.as_mut().unwrap().value = CredentialLocator::Body {
+        pointer: "/bad~2".into(),
+    };
+    assert!(
+        document
+            .validate()
+            .unwrap_err()
+            .iter()
+            .any(|error| error.to_string().contains("invalid escape"))
+    );
+
+    let mut document = base.clone();
+    document.operations[0].provides.as_mut().unwrap().expires_at = Some(CredentialLocator::Body {
+        pointer: "/bad~".into(),
+    });
+    assert!(
+        document
+            .validate()
+            .unwrap_err()
+            .iter()
+            .any(|error| error.to_string().contains("incomplete escape"))
+    );
+
+    let mut document = base;
+    document.operations[0].provides.as_mut().unwrap().value = CredentialLocator::Body {
+        pointer: String::new(),
+    };
+    document.operations[0].provides.as_mut().unwrap().expires_at = None;
+    assert!(document.validate().is_ok());
+}
+
+#[test]
+fn validation_rejects_invalid_header_names() {
+    let base: Document =
+        serde_json::from_str(include_str!("../../../fixtures/login.json")).unwrap();
+    let mut document = base.clone();
+    let pons_ir::AuthScheme::ApiKey { name, .. } = document.auth_schemes.get_mut("tenant").unwrap()
+    else {
+        panic!()
+    };
+    *name = "bad header".into();
+    assert!(
+        document
+            .validate()
+            .unwrap_err()
+            .iter()
+            .any(|error| error.to_string().contains("API key header"))
+    );
+
+    let mut document = base.clone();
+    document.operations[0].provides.as_mut().unwrap().value = CredentialLocator::Header {
+        name: "bad header".into(),
+    };
+    assert!(
+        document
+            .validate()
+            .unwrap_err()
+            .iter()
+            .any(|error| error.to_string().contains("credential header"))
+    );
+
+    let mut document = base;
+    document.operations[0].provides.as_mut().unwrap().expires_at =
+        Some(CredentialLocator::Header {
+            name: String::new(),
+        });
+    assert!(
+        document
+            .validate()
+            .unwrap_err()
+            .iter()
+            .any(|error| error.to_string().contains("credential header"))
     );
 }

@@ -228,6 +228,11 @@ mod tests {
         assert!(client.contains("name === \"error\""));
         assert!(client.contains("headers: [{ name: \"X-Trace-ID\", required: true }]"));
         assert!(client.contains("missing required response header"));
+        assert!(client.contains("expectedContentTypes"));
+        assert!(client.contains("application/problem+json"));
+        assert!(client.contains("stream: \"text/event-stream\""));
+        assert!(client.contains("actualContentType !== expectedContentType"));
+        assert!(!client.contains("responseContent.includes(\"text/event-stream\")"));
         assert!(client.contains("response.headers.has(header.name)"));
         assert!(client.contains("header.required && !response.headers.has(header.name)"));
         assert!(client.contains("declaredSuccess?.headers"));

@@ -100,10 +100,21 @@ pub(super) fn render() -> &'static str {
     }
     const responseSchema = declaredSuccess ?? declaredError;
     const responseKind = responseSchema?.content;
+    const expectedContentTypes: Record<string, string> = {
+      json: "application/json",
+      problem_json: "application/problem+json",
+      form: "application/x-www-form-urlencoded",
+      multipart: "multipart/form-data",
+      text: "text/plain",
+      bytes: "application/octet-stream",
+      stream: "text/event-stream",
+    };
+    const expectedContentType = responseKind ? expectedContentTypes[responseKind] : undefined;
+    const actualContentType = responseContent.split(";", 1)[0].trim().toLowerCase();
+    if (expectedContentType !== undefined && actualContentType !== expectedContentType) {
+      return err({ kind: "protocol", message: `expected ${expectedContentType}, received ${responseContent || "no content type"}` });
+    }
     if (declaredSuccess?.content === "stream") {
-      if (!responseContent.includes("text/event-stream")) {
-        return err({ kind: "protocol", message: `expected text/event-stream, received ${responseContent || "no content type"}` });
-      }
       if (!response.body) return err({ kind: "protocol", message: "the event stream has no response body" });
       captureCredential(client, response, provides, undefined, false);
       return ok(readSse(response.body, declaredSuccess?.events ?? []) as T);

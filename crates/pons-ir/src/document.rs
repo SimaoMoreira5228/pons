@@ -5,7 +5,8 @@ use serde_json::Value;
 
 use crate::IR_VERSION;
 use crate::operation::{
-    AuthScheme, ContentKind, ErrorContent, ErrorResponse, ErrorStatus, Method, Operation,
+    ApiKeyLocation, AuthScheme, ContentKind, CredentialLocator, ErrorContent, ErrorResponse,
+    ErrorStatus, Method, Operation,
 };
 use crate::types::{
     Diagnostic, EnumRepr, Field, InlineType, TypeDef, TypeKind, TypeRef, VariantPayload,
@@ -69,6 +70,21 @@ impl Document {
 
         for (id, definition) in &self.types {
             self.validate_type(id, definition, &mut errors);
+        }
+        for (id, scheme) in &self.auth_schemes {
+            if let AuthScheme::ApiKey {
+                location: ApiKeyLocation::Header,
+                name,
+            } = scheme
+            {
+                self.validate_header_name(
+                    &format!("auth scheme {id}"),
+                    "API key header",
+                    name,
+                    &mut BTreeSet::new(),
+                    &mut errors,
+                );
+            }
         }
 
         for error in &self.common_errors {
@@ -153,6 +169,25 @@ impl Document {
                     owner: owner.clone(),
                     scheme: provides.scheme.clone(),
                 });
+            }
+            if let Some(provides) = &operation.provides {
+                for locator in std::iter::once(&provides.value).chain(provides.expires_at.iter()) {
+                    if let CredentialLocator::Header { name } = locator {
+                        self.validate_header_name(
+                            &owner,
+                            "credential header",
+                            name,
+                            &mut BTreeSet::new(),
+                            &mut errors,
+                        );
+                    }
+                    if let Err(message) = locator.validate() {
+                        errors.push(ValidationError::InvalidValue {
+                            path: owner.clone(),
+                            message,
+                        });
+                    }
+                }
             }
 
             let mut response_statuses = BTreeSet::new();
@@ -491,7 +526,7 @@ impl Document {
         }
         if error.body.is_some()
             && (body_forbidden
-                || matches!(error.status, ErrorStatus::Class(1))
+                || matches!(error.status, ErrorStatus::Class(1..=3))
                 || matches!(error.status, ErrorStatus::Exact(status) if status_forbids_body(status)))
         {
             errors.push(ValidationError::InvalidValue {
