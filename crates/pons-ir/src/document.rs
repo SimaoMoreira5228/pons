@@ -88,7 +88,14 @@ impl Document {
         }
 
         let mut common_error_ids = BTreeSet::new();
+        let mut common_error_slots = BTreeSet::new();
         for error in &self.common_errors {
+            if !common_error_slots.insert(error.status.clone()) {
+                errors.push(ValidationError::InvalidValue {
+                    path: "common_errors".into(),
+                    message: format!("duplicate error dispatch slot {:?}", error.status),
+                });
+            }
             if !common_error_ids.insert((error.status.clone(), error.name.clone())) {
                 errors.push(ValidationError::InvalidValue {
                     path: "common_errors".into(),
@@ -257,8 +264,20 @@ impl Document {
                 });
             }
             let mut operation_error_ids = BTreeSet::new();
+            let mut operation_error_slots = BTreeSet::new();
             for error in &operation.errors {
                 let identity = (error.status.clone(), error.name.clone());
+                if !operation_error_slots.insert(error.status.clone()) {
+                    errors.push(ValidationError::InvalidValue {
+                        path: owner.clone(),
+                        message: format!("duplicate error dispatch slot {:?}", error.status),
+                    });
+                } else if operation.errors_inherit && common_error_slots.contains(&error.status) {
+                    errors.push(ValidationError::InvalidValue {
+                        path: owner.clone(),
+                        message: format!("error dispatch slot {:?} is inherited", error.status),
+                    });
+                }
                 if !operation_error_ids.insert(identity.clone()) {
                     errors.push(ValidationError::InvalidValue {
                         path: owner.clone(),

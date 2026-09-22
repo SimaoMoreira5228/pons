@@ -36,6 +36,18 @@ pub fn emit(document: &Document) -> Result<Vec<GeneratedFile>, EmitError> {
         )
     })?;
     if document.operations.iter().any(|operation| {
+        operation.responses.iter().any(|response| {
+            matches!(
+                response.content,
+                pons_ir::ContentKind::Form | pons_ir::ContentKind::Multipart
+            )
+        })
+    }) {
+        return Err(EmitError(
+            "the TypeScript emitter does not support form or multipart responses".into(),
+        ));
+    }
+    if document.operations.iter().any(|operation| {
         operation
             .stream
             .as_ref()
@@ -201,7 +213,7 @@ pub(crate) fn string(value: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use pons_ir::{Document, IR_VERSION, StreamKind};
+    use pons_ir::{ContentKind, Document, IR_VERSION, StreamKind};
     use std::collections::BTreeMap;
 
     #[test]
@@ -232,6 +244,9 @@ mod tests {
         assert!(client.contains("application/problem+json"));
         assert!(client.contains("stream: \"text/event-stream\""));
         assert!(client.contains("actualContentType !== expectedContentType"));
+        assert!(client.contains("const text = await response.text()"));
+        assert!(client.contains("rawValue = JSON.parse(text)"));
+        assert!(client.contains("invalid JSON response"));
         assert!(!client.contains("responseContent.includes(\"text/event-stream\")"));
         assert!(client.contains("response.headers.has(header.name)"));
         assert!(client.contains("header.required && !response.headers.has(header.name)"));
@@ -325,6 +340,17 @@ mod tests {
         assert!(super::emit(&document).is_err());
         assert_eq!(document.ir_version, "9.0");
         assert_eq!(IR_VERSION, "0.1");
+    }
+
+    #[test]
+    fn rejects_form_and_multipart_responses() {
+        for content in [ContentKind::Form, ContentKind::Multipart] {
+            let mut document: Document =
+                serde_json::from_str(include_str!("../../../fixtures/login.json")).unwrap();
+            document.operations[0].responses[0].content = content;
+            let error = super::emit(&document).unwrap_err();
+            assert!(error.0.contains("form or multipart responses"));
+        }
     }
 
     #[test]

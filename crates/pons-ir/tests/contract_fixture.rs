@@ -351,6 +351,57 @@ fn validation_rejects_duplicate_error_identities() {
 }
 
 #[test]
+fn validation_rejects_duplicate_error_dispatch_slots() {
+    let base: Document =
+        serde_json::from_str(include_str!("../../../fixtures/login.json")).unwrap();
+    let mut document = base.clone();
+    let error = document.operations[0].errors[0].clone();
+    let mut other = error.clone();
+    other.name = vec!["other".into()];
+    document.common_errors.push(error);
+    document.common_errors.push(other);
+    assert!(
+        document
+            .validate()
+            .unwrap_err()
+            .iter()
+            .any(|error| error.to_string().contains("duplicate error dispatch slot"))
+    );
+
+    let mut document = base.clone();
+    let error = document.operations[0].errors[0].clone();
+    let mut other = error.clone();
+    other.name = vec!["other".into()];
+    document.operations[0].errors.push(other);
+    assert!(
+        document
+            .validate()
+            .unwrap_err()
+            .iter()
+            .any(|error| error.to_string().contains("duplicate error dispatch slot"))
+    );
+
+    let mut document = base.clone();
+    let error = document.operations[0].errors[0].clone();
+    document.common_errors.push(error);
+    assert!(
+        document
+            .validate()
+            .unwrap_err()
+            .iter()
+            .any(|error| error.to_string().contains("dispatch slot")
+                && error.to_string().contains("inherited"))
+    );
+
+    let mut document = base;
+    let mut exact = document.operations[0].errors[0].clone();
+    exact.status = ErrorStatus::Exact(400);
+    exact.name = vec!["exact".into()];
+    document.operations[0].errors.push(exact);
+    assert!(document.validate().is_ok());
+}
+
+#[test]
 fn validation_checks_64_bit_integer_bounds_exactly() {
     let base: Document =
         serde_json::from_str(include_str!("../../../fixtures/login.json")).unwrap();

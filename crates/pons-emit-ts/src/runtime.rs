@@ -123,13 +123,21 @@ pub(super) fn render() -> &'static str {
       (!responseKind && responseContent.includes("json"));
     const textResponse = responseKind === "text" ||
       (!responseKind && responseContent.startsWith("text/"));
-    const rawValue: unknown = response.status === 204 || response.status === 304 || responseKind === "empty"
-      ? undefined
-      : jsonResponse
-        ? await response.json()
-        : textResponse
-          ? await response.text()
-          : new Uint8Array(await response.arrayBuffer());
+    let rawValue: unknown;
+    if (response.status === 204 || response.status === 304 || responseKind === "empty") {
+      rawValue = undefined;
+    } else if (jsonResponse) {
+      const text = await response.text();
+      try {
+        rawValue = JSON.parse(text);
+      } catch {
+        return err({ kind: "protocol", message: "invalid JSON response" });
+      }
+    } else if (textResponse) {
+      rawValue = await response.text();
+    } else {
+      rawValue = new Uint8Array(await response.arrayBuffer());
+    }
     const value = jsonResponse && responseSchema?.schema
       ? decodeWire(rawValue, responseSchema.schema)
       : rawValue;
