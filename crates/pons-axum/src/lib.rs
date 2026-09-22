@@ -6,6 +6,8 @@ mod sse;
 
 use std::collections::BTreeMap;
 
+use pons_core::{ErrorSpec, TypeCx};
+
 pub use axum::{body, extract, http};
 pub use describe::{
     DescribeRequest, DescribeResponse, Header, HeaderRejection, HeaderSpec, OperationCx,
@@ -13,7 +15,7 @@ pub use describe::{
 };
 pub use handler::DescribeHandler;
 use operation::build;
-use pons_ir::{AuthScheme, Document, Info, TypeDef, ValidationError};
+use pons_ir::{AuthScheme, Diagnostic, Document, ErrorResponse, Info, TypeDef, ValidationError};
 pub use routing::MethodRoute;
 pub use sse::{Sse, SseEvent};
 
@@ -22,7 +24,9 @@ pub struct Router<S = ()> {
     info: Info,
     types: BTreeMap<String, TypeDef>,
     auth_schemes: BTreeMap<String, AuthScheme>,
+    common_errors: Vec<ErrorResponse>,
     operations: Vec<pons_ir::Operation>,
+    diagnostics: Vec<Diagnostic>,
 }
 
 impl<S> Router<S>
@@ -35,7 +39,9 @@ where
             info,
             types: BTreeMap::new(),
             auth_schemes: BTreeMap::new(),
+            common_errors: Vec::new(),
             operations: Vec::new(),
+            diagnostics: Vec::new(),
         }
     }
 
@@ -54,13 +60,24 @@ where
         self
     }
 
+    pub fn common_error<E: ErrorSpec>(mut self) -> Self {
+        let mut types = TypeCx::new();
+        self.common_errors.extend(E::errors(&mut types));
+        let (definitions, diagnostics) = types.into_parts();
+        self.types.extend(definitions);
+        self.diagnostics.extend(diagnostics);
+        self
+    }
+
     pub fn with_state<S2>(self, state: S) -> Router<S2> {
         Router {
             inner: self.inner.with_state(state),
             info: self.info,
             types: self.types,
             auth_schemes: self.auth_schemes,
+            common_errors: self.common_errors,
             operations: self.operations,
+            diagnostics: self.diagnostics,
         }
     }
 
@@ -74,10 +91,10 @@ where
             info: self.info.clone(),
             types: self.types.clone(),
             auth_schemes: self.auth_schemes.clone(),
-            common_errors: Vec::new(),
+            common_errors: self.common_errors.clone(),
             operations: self.operations.clone(),
             ext: BTreeMap::new(),
-            diagnostics: Vec::new(),
+            diagnostics: self.diagnostics.clone(),
         }
     }
 
@@ -87,10 +104,10 @@ where
             info: self.info,
             types: self.types,
             auth_schemes: self.auth_schemes,
-            common_errors: Vec::new(),
+            common_errors: self.common_errors,
             operations: self.operations,
             ext: BTreeMap::new(),
-            diagnostics: Vec::new(),
+            diagnostics: self.diagnostics,
         };
         document.canonicalize();
         document.validate()?;

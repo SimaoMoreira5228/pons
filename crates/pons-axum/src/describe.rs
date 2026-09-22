@@ -1,9 +1,9 @@
 use axum::response::IntoResponse;
 use pons_core::{ErrorSpec, Schema, TypeCx};
 use pons_ir::{
-    AuthRequirement, Body, ContentKind, Diagnostic, DiagnosticSeverity, Direction, ErrorResponse,
-    HeaderParameter, InlineType, Presence, Response, ResponseHeader, StreamDescription, StreamKind,
-    StreamMessage, TypeRef,
+    AuthRequirement, Body, ContentKind, CredentialProvision, Diagnostic, DiagnosticSeverity,
+    Direction, ErrorResponse, HeaderParameter, InlineType, Presence, Response, ResponseHeader,
+    StreamDescription, StreamKind, StreamMessage, TypeRef,
 };
 
 #[derive(Debug, Default)]
@@ -17,6 +17,7 @@ pub struct OperationCx {
     pub(crate) errors: Vec<ErrorResponse>,
     pub(crate) stream: Option<StreamDescription>,
     pub(crate) auth: AuthRequirement,
+    pub(crate) provides: Option<CredentialProvision>,
     pub(crate) diagnostics: Vec<Diagnostic>,
 }
 
@@ -415,6 +416,10 @@ impl OperationCx {
             headers: Vec::new(),
             ext: Default::default(),
         });
+    }
+
+    pub fn provide(&mut self, provides: CredentialProvision) {
+        self.provides = Some(provides);
     }
 
     pub fn require_auth(&mut self, scheme: impl Into<String>) {

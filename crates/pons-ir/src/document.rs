@@ -87,7 +87,14 @@ impl Document {
             }
         }
 
+        let mut common_error_ids = BTreeSet::new();
         for error in &self.common_errors {
+            if !common_error_ids.insert((error.status.clone(), error.name.clone())) {
+                errors.push(ValidationError::InvalidValue {
+                    path: "common_errors".into(),
+                    message: format!("duplicate error {:?} {:?}", error.status, error.name),
+                });
+            }
             self.validate_error("common_errors", error, false, &mut errors);
             self.visit_error_refs("common_errors", error, &mut errors);
         }
@@ -249,7 +256,20 @@ impl Document {
                     ),
                 });
             }
+            let mut operation_error_ids = BTreeSet::new();
             for error in &operation.errors {
+                let identity = (error.status.clone(), error.name.clone());
+                if !operation_error_ids.insert(identity.clone()) {
+                    errors.push(ValidationError::InvalidValue {
+                        path: owner.clone(),
+                        message: format!("duplicate error {:?} {:?}", error.status, error.name),
+                    });
+                } else if operation.errors_inherit && common_error_ids.contains(&identity) {
+                    errors.push(ValidationError::InvalidValue {
+                        path: owner.clone(),
+                        message: format!("error {:?} {:?} is inherited", error.status, error.name),
+                    });
+                }
                 self.validate_error(&owner, error, operation.method == Method::Head, &mut errors);
             }
             if operation.errors_inherit && operation.method == Method::Head {
@@ -414,35 +434,28 @@ impl Document {
                         });
                     }
                 }
-                if let Some((native_minimum, native_maximum)) =
-                    integer_native_bounds(*bits, *signed)
-                {
-                    if minimum
+                for (name, value) in [("minimum", minimum), ("maximum", maximum)] {
+                    if value
                         .as_ref()
-                        .and_then(Value::as_f64)
-                        .is_some_and(|value| value < native_minimum)
+                        .is_some_and(|value| integer_below_native(value, *bits, *signed))
                     {
                         errors.push(ValidationError::InvalidValue {
                             path: owner.into(),
-                            message: "integer minimum is below its native range".into(),
+                            message: format!("integer {name} is below its native range"),
                         });
                     }
-                    if maximum
+                    if value
                         .as_ref()
-                        .and_then(Value::as_f64)
-                        .is_some_and(|value| value > native_maximum)
+                        .is_some_and(|value| integer_above_native(value, *bits, *signed))
                     {
                         errors.push(ValidationError::InvalidValue {
                             path: owner.into(),
-                            message: "integer maximum is above its native range".into(),
+                            message: format!("integer {name} is above its native range"),
                         });
                     }
                 }
                 if let (Some(minimum), Some(maximum)) = (minimum, maximum)
-                    && minimum
-                        .as_f64()
-                        .zip(maximum.as_f64())
-                        .is_some_and(|(min, max)| min > max)
+                    && integer_minimum_exceeds_maximum(minimum, maximum)
                 {
                     errors.push(ValidationError::InvalidValue {
                         path: owner.into(),
@@ -594,8 +607,96 @@ pub struct Info {
     pub ext: BTreeMap<String, Value>,
 }
 
+fn integer_as_i128(value: &Value) -> Option<i128> {
+    value
+        .as_i64()
+        .map(i128::from)
+        .or_else(|| value.as_u64().map(i128::from))
+        .or_else(|| {
+            let number = value.as_f64()?;
+            let limit = 2_f64.powi(127);
+            if !number.is_finite() || number.fract() != 0.0 || number < -limit || number >= limit {
+                return None;
+            }
+            Some(number as i128)
+        })
+}
+
+fn integer_minimum_exceeds_maximum(minimum: &Value, maximum: &Value) -> bool {
+    match (integer_as_i128(minimum), integer_as_i128(maximum)) {
+        (Some(minimum), Some(maximum)) => minimum > maximum,
+        _ => minimum
+            .as_f64()
+            .zip(maximum.as_f64())
+            .is_some_and(|(minimum, maximum)| minimum > maximum),
+    }
+}
+
+fn integer_below_native(value: &Value, bits: u16, signed: bool) -> bool {
+    match bits {
+        64 => integer_below_native_64(value, signed),
+        128 if signed => {
+            value.as_i64().is_none()
+                && value.as_u64().is_none()
+                && value.as_f64().is_some_and(|value| value < -2_f64.powi(127))
+        }
+        128 => {
+            value.as_i64().is_some_and(|value| value < 0)
+                || value.as_i64().is_none()
+                    && value.as_u64().is_none()
+                    && value.as_f64().is_some_and(|value| value < 0.0)
+        }
+        _ => integer_native_bounds(bits, signed).is_some_and(|(native_minimum, _)| {
+            value.as_f64().is_some_and(|value| value < native_minimum)
+        }),
+    }
+}
+
+fn integer_above_native(value: &Value, bits: u16, signed: bool) -> bool {
+    match bits {
+        64 => integer_above_native_64(value, signed),
+        128 if signed => {
+            value.as_i64().is_none()
+                && value.as_u64().is_none()
+                && value.as_f64().is_some_and(|value| value >= 2_f64.powi(127))
+        }
+        128 => {
+            value.as_i64().is_none()
+                && value.as_u64().is_none()
+                && value.as_f64().is_some_and(|value| value >= 2_f64.powi(128))
+        }
+        _ => integer_native_bounds(bits, signed).is_some_and(|(_, native_maximum)| {
+            value.as_f64().is_some_and(|value| value > native_maximum)
+        }),
+    }
+}
+
+fn integer_below_native_64(value: &Value, signed: bool) -> bool {
+    if signed {
+        value.as_i64().is_none()
+            && value.as_u64().is_none()
+            && value.as_f64().is_some_and(|value| value < i64::MIN as f64)
+    } else {
+        value.as_i64().is_some_and(|value| value < 0)
+            || value.as_i64().is_none() && value.as_f64().is_some_and(|value| value < 0.0)
+    }
+}
+
+fn integer_above_native_64(value: &Value, signed: bool) -> bool {
+    if signed {
+        value.as_u64().is_some_and(|value| value > i64::MAX as u64)
+            || value.as_i64().is_none()
+                && value.as_u64().is_none()
+                && value.as_f64().is_some_and(|value| value >= 2_f64.powi(63))
+    } else {
+        value.as_i64().is_none()
+            && value.as_u64().is_none()
+            && value.as_f64().is_some_and(|value| value >= 2_f64.powi(64))
+    }
+}
+
 fn integer_native_bounds(bits: u16, signed: bool) -> Option<(f64, f64)> {
-    if !matches!(bits, 8 | 16 | 32 | 64 | 128) {
+    if !matches!(bits, 8 | 16 | 32) {
         return None;
     }
     let exponent = i32::from(bits) - 1;

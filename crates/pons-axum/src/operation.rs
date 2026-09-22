@@ -43,7 +43,7 @@ pub(crate) fn build(path: &str, description: RouteDescription) -> BuiltOperation
         errors_inherit: true,
         stream: description.cx.stream,
         auth: description.cx.auth,
-        provides: None,
+        provides: description.cx.provides,
         semantics: OperationSemantics {
             safe: matches!(method, Method::Get | Method::Head | Method::Options),
             idempotent: matches!(

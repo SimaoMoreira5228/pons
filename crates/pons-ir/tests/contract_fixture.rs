@@ -1,6 +1,6 @@
 use pons_ir::{
-    CredentialLocator, Document, EnumRepr, ErrorStatus, Method, StreamKind, TypeKind,
-    VariantPayload,
+    CredentialLocator, Document, EnumRepr, ErrorStatus, InlineType, Method, StreamKind, TypeKind,
+    TypeRef, VariantPayload,
 };
 
 #[test]
@@ -299,4 +299,222 @@ fn validation_rejects_invalid_header_names() {
             .iter()
             .any(|error| error.to_string().contains("credential header"))
     );
+}
+
+#[test]
+fn validation_rejects_duplicate_error_identities() {
+    let base: Document =
+        serde_json::from_str(include_str!("../../../fixtures/login.json")).unwrap();
+    let mut document = base.clone();
+    let error = document.operations[0].errors[0].clone();
+    let mut duplicate = error.clone();
+    duplicate.retryable = Some(true);
+    document.common_errors.push(error);
+    document.common_errors.push(duplicate);
+    assert!(
+        document
+            .validate()
+            .unwrap_err()
+            .iter()
+            .any(|error| error.to_string().contains("duplicate error"))
+    );
+
+    let mut document = base.clone();
+    let error = document.operations[0].errors[0].clone();
+    let mut duplicate = error.clone();
+    duplicate.retryable = Some(true);
+    document.operations[0].errors.push(duplicate);
+    assert!(
+        document
+            .validate()
+            .unwrap_err()
+            .iter()
+            .any(|error| error.to_string().contains("duplicate error"))
+    );
+
+    let mut document = base.clone();
+    let error = document.operations[0].errors[0].clone();
+    document.common_errors.push(error);
+    assert!(
+        document
+            .validate()
+            .unwrap_err()
+            .iter()
+            .any(|error| error.to_string().contains("is inherited"))
+    );
+
+    let mut document = base;
+    let error = document.operations[0].errors[0].clone();
+    document.common_errors.push(error);
+    document.operations[0].errors_inherit = false;
+    assert!(document.validate().is_ok());
+}
+
+#[test]
+fn validation_checks_64_bit_integer_bounds_exactly() {
+    let base: Document =
+        serde_json::from_str(include_str!("../../../fixtures/login.json")).unwrap();
+    let mut document = base.clone();
+    let definition = document.types.get_mut("User").unwrap();
+    let TypeKind::Struct { fields, .. } = &mut definition.definition else {
+        panic!()
+    };
+    let TypeRef::Inline(InlineType::Int {
+        minimum, signed, ..
+    }) = &mut fields[0].ty
+    else {
+        panic!()
+    };
+    *signed = true;
+    *minimum = Some(serde_json::json!(9_223_372_036_854_775_808_u64));
+    assert!(document.validate().unwrap_err().iter().any(|error| {
+        error
+            .to_string()
+            .contains("minimum is above its native range")
+    }));
+
+    let mut document = base.clone();
+    let definition = document.types.get_mut("User").unwrap();
+    let TypeKind::Struct { fields, .. } = &mut definition.definition else {
+        panic!()
+    };
+    let TypeRef::Inline(InlineType::Int {
+        minimum,
+        maximum,
+        signed,
+        ..
+    }) = &mut fields[0].ty
+    else {
+        panic!()
+    };
+    *signed = true;
+    *minimum = Some(serde_json::json!(9_223_372_036_854_775_808_u64));
+    *maximum = Some(serde_json::json!(i64::MAX));
+    assert!(
+        document
+            .validate()
+            .unwrap_err()
+            .iter()
+            .any(|error| error.to_string().contains("minimum exceeds maximum"))
+    );
+
+    let mut document = base.clone();
+    let definition = document.types.get_mut("User").unwrap();
+    let TypeKind::Struct { fields, .. } = &mut definition.definition else {
+        panic!()
+    };
+    let TypeRef::Inline(InlineType::Int {
+        minimum, maximum, ..
+    }) = &mut fields[0].ty
+    else {
+        panic!()
+    };
+    *minimum = Some(serde_json::json!(9_007_199_254_740_993_u64));
+    *maximum = Some(serde_json::json!(9_007_199_254_740_992.0_f64));
+    assert!(
+        document
+            .validate()
+            .unwrap_err()
+            .iter()
+            .any(|error| error.to_string().contains("minimum exceeds maximum"))
+    );
+
+    let mut document = base;
+    let definition = document.types.get_mut("User").unwrap();
+    let TypeKind::Struct { fields, .. } = &mut definition.definition else {
+        panic!()
+    };
+    let TypeRef::Inline(InlineType::Int { maximum, .. }) = &mut fields[0].ty else {
+        panic!()
+    };
+    *maximum = Some(serde_json::json!(u64::MAX));
+    assert!(document.validate().is_ok());
+}
+
+#[test]
+fn validation_checks_integer_bounds_in_both_directions() {
+    let base: Document =
+        serde_json::from_str(include_str!("../../../fixtures/login.json")).unwrap();
+    let set_bounds = |document: &mut Document,
+                      bits: u16,
+                      signed: bool,
+                      minimum: Option<serde_json::Value>,
+                      maximum: Option<serde_json::Value>| {
+        let definition = document.types.get_mut("User").unwrap();
+        let TypeKind::Struct { fields, .. } = &mut definition.definition else {
+            panic!()
+        };
+        let TypeRef::Inline(InlineType::Int {
+            bits: field_bits,
+            signed: field_signed,
+            minimum: field_minimum,
+            maximum: field_maximum,
+            ..
+        }) = &mut fields[0].ty
+        else {
+            panic!()
+        };
+        *field_bits = bits;
+        *field_signed = signed;
+        *field_minimum = minimum;
+        *field_maximum = maximum;
+    };
+    for (bits, signed, minimum, maximum, message) in [
+        (
+            32,
+            true,
+            Some(serde_json::json!(2_147_483_648_i64)),
+            None,
+            "minimum is above its native range",
+        ),
+        (
+            32,
+            true,
+            None,
+            Some(serde_json::json!(-2_147_483_649_i64)),
+            "maximum is below its native range",
+        ),
+        (
+            32,
+            false,
+            Some(serde_json::json!(4_294_967_296_u64)),
+            None,
+            "minimum is above its native range",
+        ),
+        (
+            32,
+            false,
+            None,
+            Some(serde_json::json!(-1)),
+            "maximum is below its native range",
+        ),
+        (
+            128,
+            true,
+            None,
+            Some(serde_json::json!(
+                170_141_183_460_469_231_731_687_303_715_884_105_728.0_f64
+            )),
+            "maximum is above its native range",
+        ),
+        (
+            128,
+            false,
+            None,
+            Some(serde_json::json!(
+                340_282_366_920_938_463_463_374_607_431_768_211_456.0_f64
+            )),
+            "maximum is above its native range",
+        ),
+    ] {
+        let mut document = base.clone();
+        set_bounds(&mut document, bits, signed, minimum, maximum);
+        assert!(
+            document
+                .validate()
+                .unwrap_err()
+                .iter()
+                .any(|error| error.to_string().contains(message))
+        );
+    }
 }

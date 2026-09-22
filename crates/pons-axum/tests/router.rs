@@ -3,10 +3,14 @@ use pons_axum::extract::{Path, Query, State};
 use pons_axum::http::StatusCode;
 use pons_axum::routing::{get, post};
 use pons_axum::{
-    Header, HeaderSpec, OptionalHeader, Router, WithHeader, WithOptionalHeader, WithStatus,
+    DescribeRequest, Header, HeaderSpec, OperationCx, OptionalHeader, Router, WithHeader,
+    WithOptionalHeader, WithStatus,
 };
 use pons_core::Schema;
-use pons_ir::{AuthScheme, ContentKind, Info, InlineType, PathSegment, TypeKind, TypeRef};
+use pons_ir::{
+    AuthScheme, ContentKind, CredentialLocator, CredentialProvision, Info, InlineType, PathSegment,
+    TypeKind, TypeRef,
+};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
@@ -61,6 +65,32 @@ impl HeaderSpec for TraceId {
     const NAME: &'static str = "X-Trace-ID";
 }
 
+struct Provides;
+
+impl pons_axum::extract::FromRequestParts<AppState> for Provides {
+    type Rejection = std::convert::Infallible;
+
+    async fn from_request_parts(
+        _: &mut pons_axum::http::request::Parts,
+        _: &AppState,
+    ) -> Result<Self, Self::Rejection> {
+        Ok(Self)
+    }
+}
+
+impl DescribeRequest for Provides {
+    fn describe(cx: &mut OperationCx) {
+        cx.provide(CredentialProvision {
+            scheme: "session".into(),
+            value: CredentialLocator::Body {
+                pointer: "/token".into(),
+            },
+            expires_at: None,
+            ext: BTreeMap::new(),
+        });
+    }
+}
+
 #[derive(Clone)]
 struct AppState;
 
@@ -88,6 +118,13 @@ async fn headers(
     OptionalHeader(retry): OptionalHeader<Retry>,
 ) -> pons_axum::extract::Json<User> {
     let _ = (request_id, retry);
+    pons_axum::extract::Json(User {
+        id: 1,
+        name: "Ada".into(),
+    })
+}
+
+async fn provisioned(_provides: Provides) -> pons_axum::extract::Json<User> {
     pons_axum::extract::Json(User {
         id: 1,
         name: "Ada".into(),
@@ -127,6 +164,13 @@ async fn user_events()
 enum UserError {
     #[pons(status = 404)]
     Missing,
+}
+
+#[allow(dead_code)]
+#[derive(Serialize, Schema, pons_core::ApiError)]
+enum CommonError {
+    #[pons(status = 503)]
+    Unavailable,
 }
 
 impl axum::response::IntoResponse for UserError {
@@ -172,6 +216,7 @@ fn router_describes_path_query_body_response_and_state() {
         .route("/users/{id}", get(get_user))
         .route("/users", get(list_users).post(create_user))
         .route("/headers", get(headers))
+        .route("/provisioned", get(provisioned))
         .route("/response-headers", get(response_headers))
         .route("/optional-response-headers", get(optional_response_headers))
         .route("/created", post(created_user))
@@ -180,8 +225,18 @@ fn router_describes_path_query_body_response_and_state() {
         .route("/events", get(user_events))
         .with_state::<()>(AppState)
         .auth_scheme("session", AuthScheme::Bearer { format: None })
+        .common_error::<CommonError>()
         .into_document()
         .unwrap();
+    assert_eq!(document.common_errors.len(), 1);
+    assert_eq!(
+        document.common_errors[0].status,
+        pons_ir::ErrorStatus::Exact(503)
+    );
+    let Some(pons_ir::TypeRef::Named(error_type)) = &document.common_errors[0].body else {
+        panic!()
+    };
+    assert!(document.types.contains_key(&error_type.id));
 
     let get_user = document
         .operations
@@ -234,6 +289,23 @@ fn router_describes_path_query_body_response_and_state() {
         headers.headers[1].ty,
         TypeRef::Inline(InlineType::Int { bits: 16, .. })
     ));
+
+    let provisioned = document
+        .operations
+        .iter()
+        .find(|operation| {
+            operation.path.iter().any(
+                |segment| matches!(segment, PathSegment::Literal { lit } if lit == "provisioned"),
+            )
+        })
+        .unwrap();
+    assert_eq!(provisioned.provides.as_ref().unwrap().scheme, "session");
+    assert_eq!(
+        provisioned.provides.as_ref().unwrap().value,
+        CredentialLocator::Body {
+            pointer: "/token".into()
+        }
+    );
 
     let response_headers = document
         .operations
