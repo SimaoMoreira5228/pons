@@ -1,10 +1,10 @@
 use axum::response::IntoResponse;
-use pons_axum::extract::{Path, Query, State};
+use pons_axum::extract::{Form, Multipart, Path, Query, State};
 use pons_axum::http::StatusCode;
-use pons_axum::routing::{get, post};
+use pons_axum::routing::{delete, get, post};
 use pons_axum::{
-    DescribeRequest, Header, HeaderSpec, OperationCx, OptionalHeader, Router, WithHeader,
-    WithOptionalHeader, WithStatus,
+    DescribeRequest, Header, HeaderSpec, Ndjson, NoContent, OperationCx, OptionalHeader, Router,
+    WithHeader, WithOptionalHeader, WithStatus,
 };
 use pons_core::Schema;
 use pons_ir::{
@@ -159,6 +159,10 @@ async fn user_events()
     pons_axum::Sse::new(futures_util::stream::iter([UserEvent { id: 1 }]))
 }
 
+async fn user_ndjson() -> Ndjson<UserEvent, impl futures_util::Stream<Item = UserEvent> + Send> {
+    Ndjson::new(futures_util::stream::iter([UserEvent { id: 1 }]))
+}
+
 #[derive(Serialize, Schema, pons_core::ApiError)]
 #[serde(rename_all = "snake_case")]
 enum UserError {
@@ -200,6 +204,24 @@ async fn created_user(
     })))
 }
 
+async fn form_user(Form(input): Form<CreateUser>) -> pons_axum::extract::Json<User> {
+    pons_axum::extract::Json(User {
+        id: 1,
+        name: input.name,
+    })
+}
+
+async fn multipart_user(_multipart: Multipart) -> pons_axum::extract::Json<User> {
+    pons_axum::extract::Json(User {
+        id: 1,
+        name: "Ada".into(),
+    })
+}
+
+async fn delete_user() -> NoContent {
+    NoContent
+}
+
 fn info() -> Info {
     Info {
         title: "Users".into(),
@@ -208,6 +230,96 @@ fn info() -> Info {
         servers: Vec::new(),
         ext: BTreeMap::new(),
     }
+}
+
+#[test]
+fn router_describes_form_request_body() {
+    let document = Router::<()>::new(info())
+        .route("/form", post(form_user))
+        .into_document()
+        .unwrap();
+    let operation = document
+        .operations
+        .iter()
+        .find(|operation| {
+            operation
+                .path
+                .iter()
+                .any(|segment| matches!(segment, PathSegment::Literal { lit } if lit == "form"))
+        })
+        .unwrap();
+    let body = operation.body.as_ref().unwrap();
+    assert_eq!(body.content, ContentKind::Form);
+    assert!(matches!(body.ty, TypeRef::Named(_)));
+}
+
+#[test]
+fn router_describes_multipart_request_as_opaque() {
+    let document = Router::<()>::new(info())
+        .route("/multipart", post(multipart_user))
+        .into_document()
+        .unwrap();
+    let operation = document
+        .operations
+        .iter()
+        .find(|operation| {
+            operation.path.iter().any(
+                |segment| matches!(segment, PathSegment::Literal { lit } if lit == "multipart"),
+            )
+        })
+        .unwrap();
+    let body = operation.body.as_ref().unwrap();
+    assert_eq!(body.content, ContentKind::Multipart);
+    assert_eq!(body.ty, TypeRef::Inline(InlineType::Any));
+    assert!(operation.diagnostics.iter().any(|diagnostic| {
+        diagnostic.code == "PONS-W101" && diagnostic.message.contains("multipart fields are opaque")
+    }));
+}
+
+#[test]
+fn router_describes_no_content_response() {
+    assert_eq!(NoContent.into_response().status(), StatusCode::NO_CONTENT);
+    let document = Router::<()>::new(info())
+        .route("/delete", delete(delete_user))
+        .into_document()
+        .unwrap();
+    let operation = document
+        .operations
+        .iter()
+        .find(|operation| operation.method == pons_ir::Method::Delete)
+        .unwrap();
+    assert_eq!(operation.responses[0].status, 204);
+    assert_eq!(operation.responses[0].content, ContentKind::Empty);
+    assert!(operation.responses[0].body.is_none());
+}
+
+#[test]
+fn router_describes_ndjson_stream() {
+    let response = Ndjson::<UserEvent, _>::new(futures_util::stream::iter([UserEvent { id: 1 }]))
+        .into_response();
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(
+        response.headers()[pons_axum::http::header::CONTENT_TYPE],
+        "application/x-ndjson"
+    );
+    let document = Router::<()>::new(info())
+        .route("/ndjson", get(user_ndjson))
+        .into_document()
+        .unwrap();
+    let operation = document
+        .operations
+        .iter()
+        .find(|operation| operation.method == pons_ir::Method::Get)
+        .unwrap();
+    let stream = operation.stream.as_ref().unwrap();
+    assert!(matches!(
+        stream.kind,
+        pons_ir::StreamKind::Ndjson {
+            item: TypeRef::Named(_)
+        }
+    ));
+    assert_eq!(operation.responses[0].content, ContentKind::Stream);
+    assert!(operation.responses[0].body.is_none());
 }
 
 #[test]

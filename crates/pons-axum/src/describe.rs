@@ -318,6 +318,22 @@ where
     }
 }
 
+pub struct NoContent;
+
+impl axum::response::IntoResponse for NoContent {
+    fn into_response(self) -> axum::response::Response {
+        axum::http::StatusCode::NO_CONTENT.into_response()
+    }
+}
+
+impl DescribeResponse for NoContent {
+    fn describe(cx: &mut OperationCx) {
+        cx.empty_response(204);
+    }
+}
+
+impl StatusResponse for NoContent {}
+
 impl OperationCx {
     pub fn type_ref<T: Schema>(&mut self, direction: Direction) -> TypeRef {
         T::schema(&mut self.types, direction)
@@ -418,6 +434,21 @@ impl OperationCx {
         });
     }
 
+    pub fn ndjson<T: Schema>(&mut self) {
+        self.stream = Some(StreamDescription {
+            kind: StreamKind::Ndjson {
+                item: T::schema(&mut self.types, Direction::Output),
+            },
+        });
+        self.responses.push(Response {
+            status: 200,
+            content: ContentKind::Stream,
+            body: None,
+            headers: Vec::new(),
+            ext: Default::default(),
+        });
+    }
+
     pub fn provide(&mut self, provides: CredentialProvision) {
         self.provides = Some(provides);
     }
@@ -457,6 +488,22 @@ impl OperationCx {
 impl<T: Schema> DescribeRequest for axum::Json<T> {
     fn describe(cx: &mut OperationCx) {
         cx.request_body::<T>(ContentKind::Json);
+    }
+}
+
+impl<T: Schema> DescribeRequest for axum::extract::Form<T> {
+    fn describe(cx: &mut OperationCx) {
+        cx.request_body::<T>(ContentKind::Form);
+    }
+}
+
+impl DescribeRequest for axum::extract::Multipart {
+    fn describe(cx: &mut OperationCx) {
+        cx.request_body::<MultipartBody>(ContentKind::Multipart);
+        cx.diagnostic(
+            "PONS-W101",
+            "multipart fields are opaque; wrap them with a typed request description",
+        );
     }
 }
 
@@ -575,6 +622,14 @@ impl<T: crate::SseEvent, S> DescribeResponse for crate::Sse<T, S> {
 }
 
 pub struct ByteArray;
+
+pub struct MultipartBody;
+
+impl Schema for MultipartBody {
+    fn schema(_: &mut TypeCx, _: Direction) -> TypeRef {
+        TypeRef::Inline(InlineType::Any)
+    }
+}
 
 impl Schema for ByteArray {
     fn schema(_: &mut TypeCx, _: Direction) -> TypeRef {

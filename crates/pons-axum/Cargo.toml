@@ -11,6 +11,7 @@ futures-util.workspace = true
 pons-core = { path = "../pons-core" }
 pons-ir = { path = "../pons-ir" }
 serde.workspace = true
+serde_json.workspace = true
 
 [dev-dependencies]
 serde.workspace = true
