@@ -31,15 +31,24 @@ pub(super) fn run(
     }
 
     let (files, diagnostics, warnings, logs) = if target == "ts" {
-        let files = pons_emit_ts::emit(document)
-            .map_err(|error| CliError::Failure(error.to_string()))?
+        let output = pons_emit_ts::emit_with_mode(
+            document,
+            if strict {
+                pons_emit_ts::EmitMode::Strict
+            } else {
+                pons_emit_ts::EmitMode::Lossy
+            },
+        )
+        .map_err(|error| CliError::Failure(error.to_string()))?;
+        let files = output
+            .files
             .into_iter()
             .map(|file| OutputFile {
                 path: file.path,
                 content: file.content,
             })
             .collect();
-        (files, Vec::new(), Vec::new(), Vec::new())
+        (files, Vec::new(), output.warnings, Vec::new())
     } else if target == "openapi" {
         let content = pons_emit_openapi::emit(document)
             .map_err(|error| CliError::Failure(error.to_string()))?;

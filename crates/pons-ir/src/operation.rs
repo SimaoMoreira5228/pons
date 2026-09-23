@@ -9,6 +9,7 @@ use schemars::{JsonSchema, Schema, SchemaGenerator};
 use crate::types::{Diagnostic, Doc, Name, Presence, TypeRef};
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct Operation {
     pub id: Vec<Name>,
     pub method: Method,
@@ -125,6 +126,7 @@ pub enum Method {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
 #[serde(untagged)]
 pub enum PathSegment {
     Literal { lit: String },
@@ -132,6 +134,7 @@ pub enum PathSegment {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct HeaderParameter {
     pub wire: String,
     pub ident: Name,
@@ -142,6 +145,7 @@ pub struct HeaderParameter {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct Body {
     pub ty: TypeRef,
     pub content: ContentKind,
@@ -163,6 +167,7 @@ pub enum ContentKind {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct Response {
     pub status: u16,
     pub content: ContentKind,
@@ -195,6 +200,7 @@ impl Response {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct ResponseHeader {
     pub wire: String,
     pub ty: TypeRef,
@@ -204,6 +210,7 @@ pub struct ResponseHeader {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct ErrorResponse {
     pub status: ErrorStatus,
     pub name: Name,
@@ -306,6 +313,7 @@ pub enum ErrorContent {
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct AuthRequirement {
     #[serde(default)]
     pub alternatives: Vec<Vec<String>>,
@@ -316,6 +324,7 @@ pub struct AuthRequirement {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum AuthScheme {
     Bearer {
@@ -358,6 +367,7 @@ pub enum ApiKeyLocation {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct OAuthFlow {
     pub kind: OAuthFlowKind,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -382,6 +392,7 @@ pub enum OAuthFlowKind {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct CredentialProvision {
     pub scheme: String,
     pub value: CredentialLocator,
@@ -392,6 +403,7 @@ pub struct CredentialProvision {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
 #[serde(tag = "from", rename_all = "snake_case")]
 pub enum CredentialLocator {
     Body { pointer: String },
@@ -423,12 +435,14 @@ impl CredentialLocator {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
+#[schemars(deny_unknown_fields)]
 pub struct StreamDescription {
     #[serde(flatten)]
     pub kind: StreamKind,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum StreamKind {
     Sse { events: Vec<StreamMessage> },
@@ -474,12 +488,14 @@ impl StreamKind {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct StreamMessage {
     pub event: String,
     pub data: TypeRef,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct OperationSemantics {
     pub safe: bool,
     pub idempotent: bool,
@@ -488,6 +504,7 @@ pub struct OperationSemantics {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct Origin {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source: Option<String>,

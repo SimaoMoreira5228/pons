@@ -8,6 +8,7 @@ use crate::operation::Origin;
 pub type Name = Vec<String>;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
+#[schemars(deny_unknown_fields)]
 pub struct TypeDef {
     pub name: Name,
     pub direction: Direction,
@@ -24,6 +25,7 @@ pub struct TypeDef {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum TypeKind {
     Struct {
@@ -81,6 +83,7 @@ impl TypeKind {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum EnumRepr {
     String,
@@ -91,6 +94,7 @@ pub enum EnumRepr {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct Variant {
     pub wire: String,
     pub ident: Name,
@@ -104,6 +108,7 @@ pub struct Variant {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum VariantPayload {
     Unit,
@@ -130,6 +135,7 @@ impl VariantPayload {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct Field {
     pub wire: String,
     pub ident: Name,
@@ -213,6 +219,7 @@ pub enum TypeRef {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct NamedRef {
     #[serde(rename = "ref")]
     pub id: String,
@@ -240,6 +247,7 @@ impl TypeRef {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum InlineType {
     Bool,
@@ -330,6 +338,7 @@ pub enum FieldFormat {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct Doc {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub summary: Option<String>,
@@ -342,6 +351,7 @@ pub struct Doc {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct Diagnostic {
     pub severity: DiagnosticSeverity,
     pub code: String,

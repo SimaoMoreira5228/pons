@@ -9,7 +9,7 @@ use std::process::ExitCode;
 
 use pons_ir::{ChangeLevel, Document};
 
-const HELP: &str = "Usage: pons <command> <ir.json> [arguments]\n\nCommands:\n  check <ir.json>                              Validate an IR document\n  fmt <ir.json>                                Rewrite an IR document in canonical form\n  diff <old.json> <new.json>                   Classify changes between two IR documents\n  emit --target <name> <ir.json> <output-dir>  Generate files (built-in: ts, openapi)\n      --strict                                 Fail if the emitter lacks IR capabilities\n";
+const HELP: &str = "Usage: pons <command> <ir.json> [arguments]\n\nCommands:\n  check <ir.json>                              Validate an IR document\n  fmt <ir.json>                                Rewrite an IR document in canonical form\n  diff <old.json> <new.json>                   Classify changes between two IR documents\n  emit --target <name> <ir.json> <output-dir> [--strict|--lossy]\n                                                Generate files (built-in: ts, openapi)\n      --strict                                 Reject unsupported capabilities (default)\n      --lossy                                  Allow explicitly lossy output with warnings\n";
 
 fn main() -> ExitCode {
     match run(env::args_os().skip(1).collect()) {
@@ -67,9 +67,19 @@ fn run(args: Vec<OsString>) -> Result<(), CliError> {
         let target = args[2]
             .to_str()
             .ok_or_else(|| CliError::Usage(HELP.into()))?;
-        let strict = args.len() == 6 && args[5] == "--strict";
-        if args.len() != 5 && !strict {
-            return Err(CliError::Usage(HELP.into()));
+        let mut strict = true;
+        let mut strict_flag = false;
+        let mut lossy_flag = false;
+        for flag in &args[5..] {
+            match flag.to_str() {
+                Some("--strict") if !strict_flag && !lossy_flag => strict_flag = true,
+                Some("--lossy") if !strict_flag && !lossy_flag => {
+                    strict_flag = true;
+                    lossy_flag = true;
+                    strict = false;
+                }
+                _ => return Err(CliError::Usage(HELP.into())),
+            }
         }
         let document = read_document(Path::new(&args[3]))?;
         validate(&document)?;

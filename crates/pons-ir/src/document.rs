@@ -13,6 +13,7 @@ use crate::types::{
 };
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct Document {
     #[schemars(regex(pattern = "^0\\.1$"))]
     pub ir_version: String,
@@ -555,7 +556,7 @@ impl Document {
                 }
                 if multiple_of
                     .as_ref()
-                    .is_some_and(|value| value.as_f64().is_none_or(|value| value <= 0.0))
+                    .is_some_and(|value| !positive_number(value))
                 {
                     errors.push(ValidationError::InvalidValue {
                         path: owner.into(),
@@ -687,6 +688,7 @@ impl Document {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct Info {
     pub title: String,
     pub version: String,
@@ -698,104 +700,136 @@ pub struct Info {
     pub ext: BTreeMap<String, Value>,
 }
 
-fn integer_as_i128(value: &Value) -> Option<i128> {
-    value
-        .as_i64()
-        .map(i128::from)
-        .or_else(|| value.as_u64().map(i128::from))
-        .or_else(|| {
-            let number = value.as_f64()?;
-            let limit = 2_f64.powi(127);
-            if !number.is_finite() || number.fract() != 0.0 || number < -limit || number >= limit {
+fn integer_magnitude(value: &Value) -> Option<(bool, u128)> {
+    let text = value.as_number()?.to_string();
+    let (negative, unsigned) = match text.strip_prefix('-') {
+        Some(unsigned) => (true, unsigned),
+        None => (false, text.as_str()),
+    };
+    let mantissa = match unsigned.split_once(['e', 'E']) {
+        Some((mantissa, exponent)) => {
+            if exponent.parse::<i32>().ok()? != 0 {
                 return None;
             }
-            Some(number as i128)
-        })
+            mantissa
+        }
+        None => unsigned,
+    };
+    let (whole, fraction) = match mantissa.split_once('.') {
+        Some((whole, fraction)) => (whole, fraction),
+        None => (mantissa, ""),
+    };
+    if whole.is_empty() && fraction.is_empty() {
+        return None;
+    }
+    let digits = format!("{whole}{fraction}");
+    if !digits.bytes().all(|byte| byte.is_ascii_digit()) {
+        return None;
+    }
+    let first_significant = digits.bytes().position(|byte| byte != b'0');
+    let Some(first_significant) = first_significant else {
+        return Some((false, 0));
+    };
+    let significant = &digits[first_significant..];
+    let scale = i64::try_from(fraction.len()).ok()?;
+    let magnitude = if scale <= 0 {
+        let zeros = usize::try_from(-scale).ok()?;
+        if significant.len().checked_add(zeros)? > 39 {
+            return None;
+        }
+        let mut integer = String::with_capacity(significant.len() + zeros);
+        integer.push_str(significant);
+        integer.extend(std::iter::repeat_n('0', zeros));
+        integer.parse().ok()?
+    } else {
+        let scale = usize::try_from(scale).ok()?;
+        if scale >= significant.len()
+            || significant[significant.len() - scale..]
+                .bytes()
+                .any(|byte| byte != b'0')
+        {
+            return None;
+        }
+        significant[..significant.len() - scale].parse().ok()?
+    };
+    Some((negative && magnitude != 0, magnitude))
+}
+
+fn positive_number(value: &Value) -> bool {
+    if let Some((negative, magnitude)) = integer_magnitude(value) {
+        return !negative && magnitude != 0;
+    }
+    value.as_f64().is_some_and(|number| number > 0.0)
 }
 
 fn integer_minimum_exceeds_maximum(minimum: &Value, maximum: &Value) -> bool {
-    match (integer_as_i128(minimum), integer_as_i128(maximum)) {
-        (Some(minimum), Some(maximum)) => minimum > maximum,
-        _ => minimum
-            .as_f64()
-            .zip(maximum.as_f64())
-            .is_some_and(|(minimum, maximum)| minimum > maximum),
+    if let (Some((minimum_negative, minimum)), Some((maximum_negative, maximum))) =
+        (integer_magnitude(minimum), integer_magnitude(maximum))
+    {
+        return match (minimum_negative, maximum_negative) {
+            (false, true) => true,
+            (true, false) => false,
+            (false, false) => minimum > maximum,
+            (true, true) => minimum < maximum,
+        };
+    }
+    minimum
+        .as_f64()
+        .zip(maximum.as_f64())
+        .is_some_and(|(minimum, maximum)| minimum > maximum)
+}
+
+fn integer_native_max(bits: u16) -> u128 {
+    if bits == 128 {
+        u128::MAX
+    } else {
+        (1_u128 << u32::from(bits)) - 1
     }
 }
 
 fn integer_below_native(value: &Value, bits: u16, signed: bool) -> bool {
-    match bits {
-        64 => integer_below_native_64(value, signed),
-        128 if signed => {
-            value.as_i64().is_none()
-                && value.as_u64().is_none()
-                && value.as_f64().is_some_and(|value| value < -2_f64.powi(127))
-        }
-        128 => {
-            value.as_i64().is_some_and(|value| value < 0)
-                || value.as_i64().is_none()
-                    && value.as_u64().is_none()
-                    && value.as_f64().is_some_and(|value| value < 0.0)
-        }
-        _ => integer_native_bounds(bits, signed).is_some_and(|(native_minimum, _)| {
-            value.as_f64().is_some_and(|value| value < native_minimum)
-        }),
+    if !matches!(bits, 8 | 16 | 32 | 64 | 128) {
+        return false;
+    }
+    if let Some((negative, magnitude)) = integer_magnitude(value) {
+        return if signed {
+            negative && magnitude > (1_u128 << (u32::from(bits) - 1))
+        } else {
+            negative || magnitude > integer_native_max(bits)
+        };
+    }
+    let Some(number) = value.as_f64() else {
+        return value
+            .as_number()
+            .is_some_and(|number| number.to_string().starts_with('-'));
+    };
+    if signed {
+        number < -(2_f64.powi(i32::from(bits) - 1))
+    } else {
+        number < 0.0
     }
 }
 
 fn integer_above_native(value: &Value, bits: u16, signed: bool) -> bool {
-    match bits {
-        64 => integer_above_native_64(value, signed),
-        128 if signed => {
-            value.as_i64().is_none()
-                && value.as_u64().is_none()
-                && value.as_f64().is_some_and(|value| value >= 2_f64.powi(127))
-        }
-        128 => {
-            value.as_i64().is_none()
-                && value.as_u64().is_none()
-                && value.as_f64().is_some_and(|value| value >= 2_f64.powi(128))
-        }
-        _ => integer_native_bounds(bits, signed).is_some_and(|(_, native_maximum)| {
-            value.as_f64().is_some_and(|value| value > native_maximum)
-        }),
+    if !matches!(bits, 8 | 16 | 32 | 64 | 128) {
+        return false;
     }
-}
-
-fn integer_below_native_64(value: &Value, signed: bool) -> bool {
+    if let Some((negative, magnitude)) = integer_magnitude(value) {
+        return if signed {
+            !negative && magnitude > ((1_u128 << (u32::from(bits) - 1)) - 1)
+        } else {
+            !negative && magnitude > integer_native_max(bits)
+        };
+    }
+    let Some(number) = value.as_f64() else {
+        return value
+            .as_number()
+            .is_some_and(|number| !number.to_string().starts_with('-'));
+    };
     if signed {
-        value.as_i64().is_none()
-            && value.as_u64().is_none()
-            && value.as_f64().is_some_and(|value| value < i64::MIN as f64)
+        number >= 2_f64.powi(i32::from(bits) - 1)
     } else {
-        value.as_i64().is_some_and(|value| value < 0)
-            || value.as_i64().is_none() && value.as_f64().is_some_and(|value| value < 0.0)
-    }
-}
-
-fn integer_above_native_64(value: &Value, signed: bool) -> bool {
-    if signed {
-        value.as_u64().is_some_and(|value| value > i64::MAX as u64)
-            || value.as_i64().is_none()
-                && value.as_u64().is_none()
-                && value.as_f64().is_some_and(|value| value >= 2_f64.powi(63))
-    } else {
-        value.as_i64().is_none()
-            && value.as_u64().is_none()
-            && value.as_f64().is_some_and(|value| value >= 2_f64.powi(64))
-    }
-}
-
-fn integer_native_bounds(bits: u16, signed: bool) -> Option<(f64, f64)> {
-    if !matches!(bits, 8 | 16 | 32) {
-        return None;
-    }
-    let exponent = i32::from(bits) - 1;
-    if signed {
-        let maximum = 2_f64.powi(exponent) - 1.0;
-        Some((-maximum - 1.0, maximum))
-    } else {
-        Some((0.0, 2_f64.powi(exponent + 1) - 1.0))
+        number >= 2_f64.powi(i32::from(bits))
     }
 }
 

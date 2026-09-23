@@ -1,4 +1,5 @@
 use std::fs;
+use std::path::Path;
 use std::process::Command;
 
 use serde_json::Value;
@@ -7,6 +8,14 @@ const FIXTURE: &str = include_str!("../../../fixtures/login.json");
 
 fn pons() -> Command {
     Command::new(env!("CARGO_BIN_EXE_pons"))
+}
+
+fn wide_number_input(directory: &Path) -> std::path::PathBuf {
+    let path = directory.join("api.json");
+    let mut contract: Value = serde_json::from_str(FIXTURE).unwrap();
+    contract["types"]["User"]["fields"][0]["ty"]["wire"] = serde_json::json!("number");
+    fs::write(&path, serde_json::to_vec(&contract).unwrap()).unwrap();
+    path
 }
 
 #[test]
@@ -121,7 +130,47 @@ fn emit_writes_a_typed_typescript_client() {
     assert!(client.contains("EventsWatchEvent"));
 }
 
-#[cfg(unix)]
+#[test]
+fn emit_strict_rejects_wide_typescript_numbers_without_output() {
+    let directory = tempfile::tempdir().unwrap();
+    let input = wide_number_input(directory.path());
+    let output_dir = directory.path().join("generated");
+    let output = pons()
+        .args(["emit", "--target", "ts"])
+        .arg(&input)
+        .arg(&output_dir)
+        .output()
+        .unwrap();
+
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("wide numeric integers"));
+    assert!(!output_dir.exists());
+}
+
+#[test]
+fn emit_lossy_writes_wide_typescript_numbers_with_a_warning() {
+    let directory = tempfile::tempdir().unwrap();
+    let input = wide_number_input(directory.path());
+    let output_dir = directory.path().join("generated");
+    let output = pons()
+        .args(["emit", "--target", "ts"])
+        .arg(&input)
+        .arg(&output_dir)
+        .arg("--lossy")
+        .output()
+        .unwrap();
+
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(String::from_utf8_lossy(&output.stderr).contains("wide numeric integers"));
+    assert!(output_dir.join("types.ts").exists());
+    assert!(output_dir.join("client.ts").exists());
+}
+
+#[cfg(target_os = "linux")]
 #[test]
 fn emit_runs_an_external_target_and_writes_its_files() {
     use std::os::unix::fs::PermissionsExt;
@@ -136,6 +185,11 @@ fn emit_runs_an_external_target_and_writes_its_files() {
 if [ "$1" = describe ]; then
   printf '%s' '{"name":"fixture","version":"1.0.0","protocol":{"min":"1.0","max":"1.0"},"ir_version":{"min":"0.1","max":"0.1"},"capabilities":{"streaming":["sse"],"enum_reprs":["string","external","internal","adjacent","untagged"],"direction_split":true,"provides":true,"flattened":true}}'
 elif [ "$1" = emit ]; then
+  i=0
+  while [ "$i" -lt 2000 ]; do
+    printf '%*s' 1000 ''
+    i=$((i + 1))
+  done
   request=$(cat)
   printf '%s' "$request" > "$PONS_REQUEST"
   printf '%s\n' 'plugin log' >&2
@@ -160,6 +214,7 @@ fi
     let output_dir = directory.path().join("generated");
     let request_path = directory.path().join("request.json");
     let mut contract: Value = serde_json::from_str(FIXTURE).unwrap();
+    contract["ext"]["large"] = Value::String("x".repeat(100_000));
     contract["operations"][1]["auth"]["alternatives"] =
         serde_json::json!([["tenant"], ["session"]]);
     contract["operations"].as_array_mut().unwrap().reverse();
@@ -169,11 +224,11 @@ fi
         .reverse();
     fs::write(&input, serde_json::to_vec(&contract).unwrap()).unwrap();
 
-    let output = pons()
+    let output = Command::new("timeout")
+        .args(["10s", env!("CARGO_BIN_EXE_pons")])
         .args(["emit", "--target", "fixture"])
         .arg(&input)
         .arg(&output_dir)
-        .arg("--strict")
         .env("PATH", path)
         .env("PONS_REQUEST", &request_path)
         .output()

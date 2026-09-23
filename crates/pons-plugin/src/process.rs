@@ -108,15 +108,19 @@ pub fn invoke(
                 executable.to_string_lossy()
             ))
         })?;
-    child
+    let mut stdin = child
         .stdin
         .take()
-        .ok_or_else(|| PluginError("emitter stdin is unavailable".into()))?
-        .write_all(&input)
+        .ok_or_else(|| PluginError("emitter stdin is unavailable".into()))?;
+    let writer = std::thread::spawn(move || stdin.write_all(&input));
+    let output = child.wait_with_output();
+    let write_result = writer
+        .join()
+        .map_err(|_| PluginError("emitter stdin writer panicked".into()))?;
+    write_result
         .map_err(|error| PluginError(format!("cannot send request to emitter: {error}")))?;
-    let output = child
-        .wait_with_output()
-        .map_err(|error| PluginError(format!("cannot wait for emitter: {error}")))?;
+    let output =
+        output.map_err(|error| PluginError(format!("cannot wait for emitter: {error}")))?;
     ensure_success(executable, "emit", &output.status, &output.stderr)?;
     let response: EmitResponse = serde_json::from_slice(&output.stdout).map_err(|error| {
         PluginError(format!(

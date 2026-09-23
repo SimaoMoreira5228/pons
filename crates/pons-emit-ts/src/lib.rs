@@ -4,7 +4,10 @@ mod types;
 
 use std::collections::BTreeMap;
 
-use pons_ir::{Document, StreamKind};
+use pons_ir::{
+    Document, InlineType, IntegerWire, PathSegment, StreamKind, TypeDef, TypeKind, TypeRef,
+    VariantPayload,
+};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GeneratedFile {
@@ -23,7 +26,23 @@ impl std::fmt::Display for EmitError {
 
 impl std::error::Error for EmitError {}
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EmitMode {
+    Strict,
+    Lossy,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EmitOutput {
+    pub files: Vec<GeneratedFile>,
+    pub warnings: Vec<String>,
+}
+
 pub fn emit(document: &Document) -> Result<Vec<GeneratedFile>, EmitError> {
+    emit_with_mode(document, EmitMode::Strict).map(|output| output.files)
+}
+
+pub fn emit_with_mode(document: &Document, mode: EmitMode) -> Result<EmitOutput, EmitError> {
     let mut document = document.clone();
     document.canonicalize();
     document.validate().map_err(|errors| {
@@ -62,8 +81,15 @@ pub fn emit(document: &Document) -> Result<Vec<GeneratedFile>, EmitError> {
             "the TypeScript emitter currently supports SSE streams only".into(),
         ));
     }
+    let wide_integers = wide_integer_references(&document);
+    if mode == EmitMode::Strict && !wide_integers.is_empty() {
+        return Err(EmitError(format!(
+            "TypeScript strict mode rejects wide numeric integers at {}; use lossy mode",
+            wide_integers.join(", ")
+        )));
+    }
     let names = type_names(&document);
-    Ok(vec![
+    let files = vec![
         GeneratedFile {
             path: "types.ts".into(),
             content: types::emit(&document, &names)?,
@@ -72,7 +98,171 @@ pub fn emit(document: &Document) -> Result<Vec<GeneratedFile>, EmitError> {
             path: "client.ts".into(),
             content: client::emit(&document, &names)?,
         },
-    ])
+    ];
+    let warnings = (!wide_integers.is_empty())
+        .then(|| {
+            format!(
+                "TypeScript emits wide numeric integers as number at {}",
+                wide_integers.join(", ")
+            )
+        })
+        .into_iter()
+        .collect();
+    Ok(EmitOutput { files, warnings })
+}
+
+fn wide_integer_references(document: &Document) -> Vec<String> {
+    let mut paths = Vec::new();
+    for (id, definition) in &document.types {
+        scan_definition(&format!("types.{id}"), definition, &mut paths);
+    }
+    for (index, error) in document.common_errors.iter().enumerate() {
+        if let Some(body) = &error.body {
+            scan_type_ref(body, &format!("common_errors[{index}].body"), &mut paths);
+        }
+    }
+    for (index, operation) in document.operations.iter().enumerate() {
+        let prefix = format!("operations[{index}]");
+        for (segment_index, segment) in operation.path.iter().enumerate() {
+            if let PathSegment::Param { ty, .. } = segment {
+                scan_type_ref(
+                    ty,
+                    &format!("{prefix}.path[{segment_index}].ty"),
+                    &mut paths,
+                );
+            }
+        }
+        if let Some(query) = &operation.query {
+            scan_type_ref(query, &format!("{prefix}.query"), &mut paths);
+        }
+        for (header_index, header) in operation.headers.iter().enumerate() {
+            scan_type_ref(
+                &header.ty,
+                &format!("{prefix}.headers[{header_index}].ty"),
+                &mut paths,
+            );
+        }
+        if let Some(body) = &operation.body {
+            scan_type_ref(&body.ty, &format!("{prefix}.body.ty"), &mut paths);
+        }
+        for (response_index, response) in operation.responses.iter().enumerate() {
+            if let Some(body) = &response.body {
+                scan_type_ref(
+                    body,
+                    &format!("{prefix}.responses[{response_index}].body"),
+                    &mut paths,
+                );
+            }
+            for (header_index, header) in response.headers.iter().enumerate() {
+                scan_type_ref(
+                    &header.ty,
+                    &format!("{prefix}.responses[{response_index}].headers[{header_index}].ty"),
+                    &mut paths,
+                );
+            }
+        }
+        for (error_index, error) in operation.errors.iter().enumerate() {
+            if let Some(body) = &error.body {
+                scan_type_ref(
+                    body,
+                    &format!("{prefix}.errors[{error_index}].body"),
+                    &mut paths,
+                );
+            }
+        }
+        if let Some(stream) = &operation.stream {
+            match &stream.kind {
+                StreamKind::Sse { events } => {
+                    for (event_index, event) in events.iter().enumerate() {
+                        scan_type_ref(
+                            &event.data,
+                            &format!("{prefix}.stream.events[{event_index}].data"),
+                            &mut paths,
+                        );
+                    }
+                }
+                StreamKind::Ndjson { item } => {
+                    scan_type_ref(item, &format!("{prefix}.stream.item"), &mut paths);
+                }
+                StreamKind::Websocket { client, server } => {
+                    scan_type_ref(client, &format!("{prefix}.stream.client"), &mut paths);
+                    scan_type_ref(server, &format!("{prefix}.stream.server"), &mut paths);
+                }
+                StreamKind::Bytes { .. } => {}
+            }
+        }
+    }
+    paths
+}
+
+fn scan_definition(path: &str, definition: &TypeDef, paths: &mut Vec<String>) {
+    match &definition.definition {
+        TypeKind::Struct {
+            fields,
+            flattened,
+            additional,
+        } => {
+            for (index, field) in fields.iter().enumerate() {
+                scan_type_ref(&field.ty, &format!("{path}.fields[{index}].ty"), paths);
+            }
+            for (index, reference) in flattened.iter().enumerate() {
+                scan_type_ref(reference, &format!("{path}.flattened[{index}]"), paths);
+            }
+            if let Some(additional) = additional {
+                scan_type_ref(additional, &format!("{path}.additional"), paths);
+            }
+        }
+        TypeKind::Enum { variants, .. } => {
+            for (variant_index, variant) in variants.iter().enumerate() {
+                scan_payload(
+                    &variant.payload,
+                    &format!("{path}.variants[{variant_index}].payload"),
+                    paths,
+                );
+            }
+        }
+        TypeKind::Newtype { inner } => scan_type_ref(inner, &format!("{path}.inner"), paths),
+    }
+}
+
+fn scan_payload(payload: &VariantPayload, path: &str, paths: &mut Vec<String>) {
+    match payload {
+        VariantPayload::Unit => {}
+        VariantPayload::Newtype { ty } => scan_type_ref(ty, &format!("{path}.ty"), paths),
+        VariantPayload::Tuple { items } => {
+            for (index, item) in items.iter().enumerate() {
+                scan_type_ref(item, &format!("{path}.items[{index}]"), paths);
+            }
+        }
+        VariantPayload::Struct { fields } => {
+            for (index, field) in fields.iter().enumerate() {
+                scan_type_ref(&field.ty, &format!("{path}.fields[{index}].ty"), paths);
+            }
+        }
+    }
+}
+
+fn scan_type_ref(reference: &TypeRef, path: &str, paths: &mut Vec<String>) {
+    let TypeRef::Inline(inline) = reference else {
+        return;
+    };
+    match inline {
+        InlineType::Int { bits, wire, .. } if *wire == IntegerWire::Number && *bits > 53 => {
+            paths.push(path.to_owned())
+        }
+        InlineType::Nullable { inner } => scan_type_ref(inner, &format!("{path}.inner"), paths),
+        InlineType::Array { item, .. } => scan_type_ref(item, &format!("{path}.item"), paths),
+        InlineType::Map { key, value } => {
+            scan_type_ref(key, &format!("{path}.key"), paths);
+            scan_type_ref(value, &format!("{path}.value"), paths);
+        }
+        InlineType::Tuple { items } => {
+            for (index, item) in items.iter().enumerate() {
+                scan_type_ref(item, &format!("{path}.items[{index}]"), paths);
+            }
+        }
+        _ => {}
+    }
 }
 
 fn type_names(document: &Document) -> BTreeMap<String, String> {
@@ -213,7 +403,9 @@ pub(crate) fn string(value: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use pons_ir::{ContentKind, Document, IR_VERSION, StreamKind};
+    use pons_ir::{
+        ContentKind, Document, IR_VERSION, InlineType, IntegerWire, StreamKind, TypeKind, TypeRef,
+    };
     use std::collections::BTreeMap;
 
     #[test]
@@ -288,6 +480,36 @@ mod tests {
             client
                 .content
                 .contains("headers: [{ name: \"X-Trace-ID\", required: false }]")
+        );
+    }
+
+    #[test]
+    fn strict_mode_rejects_wide_numbers_and_lossy_mode_warns() {
+        let mut document: Document =
+            serde_json::from_str(include_str!("../../../fixtures/login.json")).unwrap();
+        let definition = document.types.get_mut("User").unwrap();
+        let TypeKind::Struct { fields, .. } = &mut definition.definition else {
+            panic!()
+        };
+        let TypeRef::Inline(InlineType::Int { wire, .. }) = &mut fields[0].ty else {
+            panic!()
+        };
+        *wire = IntegerWire::Number;
+
+        let error = super::emit(&document).unwrap_err();
+        assert!(error.0.contains("wide numeric integers"));
+        let output = super::emit_with_mode(&document, super::EmitMode::Lossy).unwrap();
+        assert!(
+            output
+                .warnings
+                .iter()
+                .any(|warning| warning.contains("wide numeric integers"))
+        );
+        assert!(
+            output
+                .files
+                .iter()
+                .any(|file| file.content.contains("number"))
         );
     }
 
