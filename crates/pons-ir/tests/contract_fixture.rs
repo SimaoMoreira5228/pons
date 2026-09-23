@@ -1,6 +1,6 @@
 use pons_ir::{
-    CredentialLocator, Document, EnumRepr, ErrorStatus, InlineType, Method, StreamKind, TypeKind,
-    TypeRef, VariantPayload,
+    AuthScheme, CredentialLocator, Document, EnumRepr, ErrorStatus, InlineType, Method, OAuthFlow,
+    OAuthFlowKind, StreamKind, TypeKind, TypeRef, VariantPayload,
 };
 
 #[test]
@@ -302,6 +302,52 @@ fn validation_rejects_invalid_header_names() {
 }
 
 #[test]
+fn validation_rejects_empty_query_and_cookie_names() {
+    let base: Document =
+        serde_json::from_str(include_str!("../../../fixtures/login.json")).unwrap();
+    let mut document = base.clone();
+    document.auth_schemes.insert(
+        "query".into(),
+        AuthScheme::ApiKey {
+            location: pons_ir::ApiKeyLocation::Query,
+            name: String::new(),
+        },
+    );
+    assert!(
+        document
+            .validate()
+            .unwrap_err()
+            .iter()
+            .any(|error| error.to_string().contains("carrier names cannot be empty"))
+    );
+
+    let mut document = base.clone();
+    document.auth_schemes.insert(
+        "cookie".into(),
+        AuthScheme::CookieSession {
+            cookie: String::new(),
+        },
+    );
+    assert!(
+        document
+            .validate()
+            .unwrap_err()
+            .iter()
+            .any(|error| error.to_string().contains("carrier names cannot be empty"))
+    );
+
+    let mut document = base;
+    document.operations[0].provides.as_mut().unwrap().value = CredentialLocator::SetCookie {
+        name: String::new(),
+    };
+    assert!(document.validate().unwrap_err().iter().any(|error| {
+        error
+            .to_string()
+            .contains("credential cookie name cannot be empty")
+    }));
+}
+
+#[test]
 fn validation_rejects_duplicate_error_identities() {
     let base: Document =
         serde_json::from_str(include_str!("../../../fixtures/login.json")).unwrap();
@@ -398,6 +444,33 @@ fn validation_rejects_duplicate_error_dispatch_slots() {
     exact.status = ErrorStatus::Exact(400);
     exact.name = vec!["exact".into()];
     document.operations[0].errors.push(exact);
+    assert!(document.validate().is_ok());
+}
+
+#[test]
+fn validation_rejects_exact_error_response_collisions() {
+    let base: Document =
+        serde_json::from_str(include_str!("../../../fixtures/login.json")).unwrap();
+    let mut document = base.clone();
+    document.operations[0].errors[0].status = ErrorStatus::Exact(200);
+    assert!(document.validate().unwrap_err().iter().any(|error| {
+        error
+            .to_string()
+            .contains("collides with a success response")
+    }));
+
+    let mut document = base.clone();
+    let mut common = document.operations[0].errors[0].clone();
+    common.status = ErrorStatus::Exact(200);
+    document.common_errors.push(common);
+    assert!(document.validate().unwrap_err().iter().any(|error| {
+        error
+            .to_string()
+            .contains("collides with a success response")
+    }));
+
+    let mut document = base;
+    document.operations[0].responses[0].status = 400;
     assert!(document.validate().is_ok());
 }
 
@@ -568,4 +641,106 @@ fn validation_checks_integer_bounds_in_both_directions() {
                 .any(|error| error.to_string().contains(message))
         );
     }
+}
+
+#[test]
+fn validation_rejects_invalid_oauth_flow_sets() {
+    let base: Document =
+        serde_json::from_str(include_str!("../../../fixtures/login.json")).unwrap();
+    let flow = |kind| {
+        let (authorization_url, token_url) = match kind {
+            OAuthFlowKind::AuthorizationCode => (
+                Some("https://identity.example.test/authorize".into()),
+                Some("https://identity.example.test/token".into()),
+            ),
+            OAuthFlowKind::Implicit => {
+                (Some("https://identity.example.test/authorize".into()), None)
+            }
+            OAuthFlowKind::Password | OAuthFlowKind::ClientCredentials => {
+                (None, Some("https://identity.example.test/token".into()))
+            }
+        };
+        OAuthFlow {
+            kind,
+            authorization_url,
+            token_url,
+            scopes: Default::default(),
+            ext: Default::default(),
+        }
+    };
+
+    let mut document = base.clone();
+    document
+        .auth_schemes
+        .insert("oauth".into(), AuthScheme::OAuth2 { flows: Vec::new() });
+    assert!(
+        document
+            .validate()
+            .unwrap_err()
+            .iter()
+            .any(|error| error.to_string().contains("at least one flow"))
+    );
+
+    let mut document = base.clone();
+    document.auth_schemes.insert(
+        "oauth".into(),
+        AuthScheme::OAuth2 {
+            flows: vec![
+                flow(OAuthFlowKind::AuthorizationCode),
+                flow(OAuthFlowKind::AuthorizationCode),
+            ],
+        },
+    );
+    assert!(
+        document
+            .validate()
+            .unwrap_err()
+            .iter()
+            .any(|error| error.to_string().contains("duplicate OAuth2 flow"))
+    );
+
+    for kind in [
+        OAuthFlowKind::AuthorizationCode,
+        OAuthFlowKind::Implicit,
+        OAuthFlowKind::Password,
+        OAuthFlowKind::ClientCredentials,
+    ] {
+        let mut document = base.clone();
+        let mut invalid = flow(kind);
+        match kind {
+            OAuthFlowKind::AuthorizationCode => invalid.token_url = None,
+            OAuthFlowKind::Implicit => {
+                invalid.token_url = Some("https://identity.example.test/token".into())
+            }
+            OAuthFlowKind::Password => {
+                invalid.authorization_url = Some("https://identity.example.test/authorize".into())
+            }
+            OAuthFlowKind::ClientCredentials => invalid.token_url = None,
+        }
+        document.auth_schemes.insert(
+            "oauth".into(),
+            AuthScheme::OAuth2 {
+                flows: vec![invalid],
+            },
+        );
+        assert!(
+            document
+                .validate()
+                .unwrap_err()
+                .iter()
+                .any(|error| error.to_string().contains("invalid URL fields"))
+        );
+    }
+
+    let mut document = base;
+    document.auth_schemes.insert(
+        "oauth".into(),
+        AuthScheme::OAuth2 {
+            flows: vec![
+                flow(OAuthFlowKind::AuthorizationCode),
+                flow(OAuthFlowKind::ClientCredentials),
+            ],
+        },
+    );
+    assert!(document.validate().is_ok());
 }

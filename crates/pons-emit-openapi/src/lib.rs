@@ -622,26 +622,6 @@ mod tests {
             AuthScheme::OAuth2 {
                 flows: vec![OAuthFlow {
                     kind: OAuthFlowKind::ClientCredentials,
-                    authorization_url: Some("https://identity.example.test/authorize".into()),
-                    token_url: Some("https://identity.example.test/token".into()),
-                    scopes: Default::default(),
-                    ext: Default::default(),
-                }],
-            },
-        );
-        assert!(
-            super::emit(&document)
-                .unwrap_err()
-                .0
-                .contains("cannot have an authorization URL")
-        );
-
-        let mut document = fixture();
-        document.auth_schemes.insert(
-            "oauth".into(),
-            AuthScheme::OAuth2 {
-                flows: vec![OAuthFlow {
-                    kind: OAuthFlowKind::ClientCredentials,
                     authorization_url: None,
                     token_url: Some("https://?query".into()),
                     scopes: Default::default(),

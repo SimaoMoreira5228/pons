@@ -6,7 +6,7 @@ use serde_json::Value;
 use crate::IR_VERSION;
 use crate::operation::{
     ApiKeyLocation, AuthScheme, ContentKind, CredentialLocator, ErrorContent, ErrorResponse,
-    ErrorStatus, Method, Operation,
+    ErrorStatus, Method, OAuthFlowKind, Operation,
 };
 use crate::types::{
     Diagnostic, EnumRepr, Field, InlineType, TypeDef, TypeKind, TypeRef, VariantPayload,
@@ -72,6 +72,41 @@ impl Document {
             self.validate_type(id, definition, &mut errors);
         }
         for (id, scheme) in &self.auth_schemes {
+            if let AuthScheme::OAuth2 { flows } = scheme {
+                let owner = format!("auth scheme {id}");
+                if flows.is_empty() {
+                    errors.push(ValidationError::InvalidValue {
+                        path: owner.clone(),
+                        message: "OAuth2 scheme needs at least one flow".into(),
+                    });
+                }
+                let mut kinds = BTreeSet::new();
+                for flow in flows {
+                    if !kinds.insert(flow.kind) {
+                        errors.push(ValidationError::InvalidValue {
+                            path: owner.clone(),
+                            message: format!("duplicate OAuth2 flow {:?}", flow.kind),
+                        });
+                    }
+                    let valid_urls = match flow.kind {
+                        OAuthFlowKind::AuthorizationCode => {
+                            flow.authorization_url.is_some() && flow.token_url.is_some()
+                        }
+                        OAuthFlowKind::Implicit => {
+                            flow.authorization_url.is_some() && flow.token_url.is_none()
+                        }
+                        OAuthFlowKind::Password | OAuthFlowKind::ClientCredentials => {
+                            flow.authorization_url.is_none() && flow.token_url.is_some()
+                        }
+                    };
+                    if !valid_urls {
+                        errors.push(ValidationError::InvalidValue {
+                            path: owner.clone(),
+                            message: format!("OAuth2 {:?} flow has invalid URL fields", flow.kind),
+                        });
+                    }
+                }
+            }
             if let AuthScheme::ApiKey {
                 location: ApiKeyLocation::Header,
                 name,
@@ -84,6 +119,19 @@ impl Document {
                     &mut BTreeSet::new(),
                     &mut errors,
                 );
+            }
+            if matches!(
+                scheme,
+                AuthScheme::ApiKey {
+                    location: ApiKeyLocation::Query | ApiKeyLocation::Cookie,
+                    name
+                } if name.is_empty()
+            ) || matches!(scheme, AuthScheme::CookieSession { cookie } if cookie.is_empty())
+            {
+                errors.push(ValidationError::InvalidValue {
+                    path: format!("auth scheme {id}"),
+                    message: "query and cookie carrier names cannot be empty".into(),
+                });
             }
         }
 
@@ -195,6 +243,12 @@ impl Document {
                             &mut errors,
                         );
                     }
+                    if matches!(locator, CredentialLocator::SetCookie { name } if name.is_empty()) {
+                        errors.push(ValidationError::InvalidValue {
+                            path: owner.clone(),
+                            message: "credential cookie name cannot be empty".into(),
+                        });
+                    }
                     if let Err(message) = locator.validate() {
                         errors.push(ValidationError::InvalidValue {
                             path: owner.clone(),
@@ -289,11 +343,29 @@ impl Document {
                         message: format!("error {:?} {:?} is inherited", error.status, error.name),
                     });
                 }
+                if let ErrorStatus::Exact(status) = error.status
+                    && response_statuses.contains(&status)
+                {
+                    errors.push(ValidationError::InvalidValue {
+                        path: owner.clone(),
+                        message: format!("error status {status} collides with a success response"),
+                    });
+                }
                 self.validate_error(&owner, error, operation.method == Method::Head, &mut errors);
             }
-            if operation.errors_inherit && operation.method == Method::Head {
+            if operation.errors_inherit {
                 for error in &self.common_errors {
-                    if error.body.is_some() {
+                    if let ErrorStatus::Exact(status) = error.status
+                        && response_statuses.contains(&status)
+                    {
+                        errors.push(ValidationError::InvalidValue {
+                            path: owner.clone(),
+                            message: format!(
+                                "error status {status} collides with a success response"
+                            ),
+                        });
+                    }
+                    if operation.method == Method::Head && error.body.is_some() {
                         errors.push(ValidationError::InvalidValue {
                             path: owner.clone(),
                             message: format!("error {:?} cannot carry a body", error.status),
