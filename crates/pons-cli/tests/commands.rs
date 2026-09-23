@@ -131,7 +131,7 @@ fn emit_writes_a_typed_typescript_client() {
 }
 
 #[test]
-fn emit_strict_rejects_wide_typescript_numbers_without_output() {
+fn emit_strict_uses_bigint_for_wide_typescript_numbers() {
     let directory = tempfile::tempdir().unwrap();
     let input = wide_number_input(directory.path());
     let output_dir = directory.path().join("generated");
@@ -142,9 +142,14 @@ fn emit_strict_rejects_wide_typescript_numbers_without_output() {
         .output()
         .unwrap();
 
-    assert!(!output.status.success());
-    assert!(String::from_utf8_lossy(&output.stderr).contains("wide numeric integers"));
-    assert!(!output_dir.exists());
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let types = fs::read_to_string(output_dir.join("types.ts")).unwrap();
+    assert!(types.contains("\"id\": bigint"));
+    assert!(!String::from_utf8_lossy(&output.stderr).contains("wide numeric integers"));
 }
 
 #[test]

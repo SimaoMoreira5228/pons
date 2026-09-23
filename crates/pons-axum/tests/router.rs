@@ -211,6 +211,29 @@ fn info() -> Info {
 }
 
 #[test]
+fn document_lowering_adds_metadata_and_revalidates() {
+    let document = Router::<()>::new(info())
+        .try_lower_document(|mut document| {
+            document.ext.insert("policy".into(), "enabled".into());
+            Ok(document)
+        })
+        .unwrap();
+    assert_eq!(document.ext["policy"].as_str(), Some("enabled"));
+
+    let errors = Router::<()>::new(info())
+        .try_lower_document(|mut document| {
+            document.ir_version = "9.0".into();
+            Ok(document)
+        })
+        .unwrap_err();
+    assert!(
+        errors
+            .iter()
+            .any(|error| error.to_string().contains("unsupported IR version"))
+    );
+}
+
+#[test]
 fn router_describes_path_query_body_response_and_state() {
     let document = Router::<AppState>::new(info())
         .route("/users/{id}", get(get_user))

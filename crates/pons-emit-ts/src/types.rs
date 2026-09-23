@@ -5,18 +5,19 @@ use pons_ir::{
     VariantPayload,
 };
 
-use crate::{EmitError, string};
+use crate::{EmitError, EmitMode, string};
 
 pub(super) fn emit(
     document: &Document,
     names: &BTreeMap<String, String>,
+    mode: EmitMode,
 ) -> Result<String, EmitError> {
     let mut output = String::new();
     for (id, definition) in &document.types {
         let name = &names[id];
         output.push_str(&format!(
             "export type {name} = {};\n\n",
-            definition_type(definition, document, names)?
+            definition_type(definition, document, names, mode)?
         ));
     }
     Ok(output.replace("Types.", ""))
@@ -26,6 +27,7 @@ fn definition_type(
     definition: &TypeDef,
     document: &Document,
     names: &BTreeMap<String, String>,
+    mode: EmitMode,
 ) -> Result<String, EmitError> {
     match &definition.definition {
         TypeKind::Struct {
@@ -35,22 +37,22 @@ fn definition_type(
         } => {
             let mut members = fields
                 .iter()
-                .map(|field| field_type(field, document, names))
+                .map(|field| field_type(field, document, names, mode))
                 .collect::<Result<Vec<_>, _>>()?;
             if let Some(additional) = additional {
                 members.push(format!(
                     "[key: string]: {}",
-                    type_ref(additional, document, names)?
+                    type_ref(additional, document, names, mode)?
                 ));
             }
             let mut ty = format!("{{ {} }}", members.join("; "));
             for flat in flattened {
-                ty = format!("{ty} & {}", type_ref(flat, document, names)?);
+                ty = format!("{ty} & {}", type_ref(flat, document, names, mode)?);
             }
             Ok(ty)
         }
-        TypeKind::Enum { repr, variants } => enum_type(repr, variants, document, names),
-        TypeKind::Newtype { inner } => type_ref(inner, document, names),
+        TypeKind::Enum { repr, variants } => enum_type(repr, variants, document, names, mode),
+        TypeKind::Newtype { inner } => type_ref(inner, document, names, mode),
     }
 }
 
@@ -58,6 +60,7 @@ fn field_type(
     field: &Field,
     document: &Document,
     names: &BTreeMap<String, String>,
+    mode: EmitMode,
 ) -> Result<String, EmitError> {
     let key = string(&field.wire);
     let presence = if field.presence == pons_ir::Presence::Optional {
@@ -67,7 +70,7 @@ fn field_type(
     };
     Ok(format!(
         "{key}{presence}: {}",
-        type_ref(&field.ty, document, names)?
+        type_ref(&field.ty, document, names, mode)?
     ))
 }
 
@@ -76,17 +79,18 @@ fn enum_type(
     variants: &[Variant],
     document: &Document,
     names: &BTreeMap<String, String>,
+    mode: EmitMode,
 ) -> Result<String, EmitError> {
     let mut types = Vec::with_capacity(variants.len());
     for variant in variants {
         let payload = match &variant.payload {
             VariantPayload::Unit => "null".into(),
-            VariantPayload::Newtype { ty } => type_ref(ty, document, names)?,
+            VariantPayload::Newtype { ty } => type_ref(ty, document, names, mode)?,
             VariantPayload::Tuple { items } => format!(
                 "[{}]",
                 items
                     .iter()
-                    .map(|item| type_ref(item, document, names))
+                    .map(|item| type_ref(item, document, names, mode))
                     .collect::<Result<Vec<_>, _>>()?
                     .join(", ")
             ),
@@ -94,7 +98,7 @@ fn enum_type(
                 "{{ {} }}",
                 fields
                     .iter()
-                    .map(|field| field_type(field, document, names))
+                    .map(|field| field_type(field, document, names, mode))
                     .collect::<Result<Vec<_>, _>>()?
                     .join("; ")
             ),
@@ -136,6 +140,7 @@ pub(super) fn type_ref(
     reference: &TypeRef,
     document: &Document,
     names: &BTreeMap<String, String>,
+    mode: EmitMode,
 ) -> Result<String, EmitError> {
     match reference {
         TypeRef::Named(reference) => {
@@ -182,7 +187,9 @@ pub(super) fn type_ref(
             InlineType::Bool => Ok("boolean".into()),
             InlineType::Int { bits, wire, .. } => match wire {
                 IntegerWire::String => Ok("string".into()),
-                IntegerWire::Number if *bits > 53 => Ok("number".into()),
+                IntegerWire::Number if *bits > 53 && mode == EmitMode::Strict => {
+                    Ok("bigint".into())
+                }
                 IntegerWire::Number => Ok("number".into()),
             },
             InlineType::Float { .. } => Ok("number".into()),
@@ -195,21 +202,22 @@ pub(super) fn type_ref(
             InlineType::Bytes { .. } => Ok("Uint8Array".into()),
             InlineType::Null => Ok("null".into()),
             InlineType::Any => Ok("unknown".into()),
-            InlineType::Nullable { inner } => {
-                Ok(format!("{} | null", type_ref(inner, document, names)?))
-            }
+            InlineType::Nullable { inner } => Ok(format!(
+                "{} | null",
+                type_ref(inner, document, names, mode)?
+            )),
             InlineType::Array { item, .. } => {
-                Ok(format!("Array<{}>", type_ref(item, document, names)?))
+                Ok(format!("Array<{}>", type_ref(item, document, names, mode)?))
             }
             InlineType::Map { value, .. } => Ok(format!(
                 "Record<string, {}>",
-                type_ref(value, document, names)?
+                type_ref(value, document, names, mode)?
             )),
             InlineType::Tuple { items } => Ok(format!(
                 "[{}]",
                 items
                     .iter()
-                    .map(|item| type_ref(item, document, names))
+                    .map(|item| type_ref(item, document, names, mode))
                     .collect::<Result<Vec<_>, _>>()?
                     .join(", ")
             )),

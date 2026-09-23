@@ -12,6 +12,7 @@ pub(super) fn render() -> &'static str {
   responses: Array<{ status: number; content: string; schema?: unknown; events?: Array<{ event: string; schema: unknown }>; headers?: Array<{ name: string; required: boolean }> }>,
   errors: Array<{ status: number | string; content: string; schema?: unknown; events?: Array<{ event: string; schema: unknown }> }>,
   authOptional: boolean,
+  preserveWideIntegers: boolean,
   provides: { scheme: string; value: { from: string; pointer?: string; name?: string } } | undefined,
 ): Promise<Result<T, E | ClientFailure>> {
   try {
@@ -63,7 +64,7 @@ pub(super) fn render() -> &'static str {
         : body;
       if (content === "json" || content === "problem_json") {
         headers.set("content-type", content === "problem_json" ? "application/problem+json" : "application/json");
-        init.body = JSON.stringify(encodedBody);
+        init.body = stringifyJson(encodedBody);
       } else if (content === "form") {
         const form = new URLSearchParams();
         for (const [key, value] of Object.entries(encodeWire(body, bodySchema) as Record<string, unknown>)) {
@@ -117,7 +118,7 @@ pub(super) fn render() -> &'static str {
     if (declaredSuccess?.content === "stream") {
       if (!response.body) return err({ kind: "protocol", message: "the event stream has no response body" });
       captureCredential(client, response, provides, undefined, false);
-      return ok(readSse(response.body, declaredSuccess?.events ?? []) as T);
+      return ok(readSse(response.body, declaredSuccess?.events ?? [], preserveWideIntegers) as T);
     }
     const jsonResponse = responseKind === "json" || responseKind === "problem_json" ||
       (!responseKind && responseContent.includes("json"));
@@ -129,7 +130,7 @@ pub(super) fn render() -> &'static str {
     } else if (jsonResponse) {
       const text = await response.text();
       try {
-        rawValue = JSON.parse(text);
+        rawValue = parseJson(text, preserveWideIntegers);
       } catch {
         return err({ kind: "protocol", message: "invalid JSON response" });
       }
@@ -178,6 +179,7 @@ type SseStreamFailure = { kind: "stream_error"; cause: unknown } | { kind: "unkn
 async function* readSse<EventValue>(
   body: ReadableStream<Uint8Array>,
   events: Array<{ event: string; schema: unknown }>,
+  preserveWideIntegers: boolean,
 ): AsyncIterable<Result<EventValue, SseStreamFailure>> {
   const reader = body.getReader();
   const decoder = new TextDecoder();
@@ -202,7 +204,7 @@ async function* readSse<EventValue>(
               yield err({ kind: "unknown_event", event: name });
             } else {
               try {
-                const parsed = JSON.parse(data.join("\n"));
+                const parsed = parseJson(data.join("\n"), preserveWideIntegers);
                 const decoded = decodeWire(parsed, descriptor.schema);
                 if (name === "error") yield err({ kind: "server_error", body: decoded });
                 else yield ok({ event: name, data: decoded } as EventValue);
@@ -234,6 +236,75 @@ async function* readSse<EventValue>(
   }
 }
 
+function parseJson(text: string, preserveWideIntegers: boolean): unknown {
+  if (!preserveWideIntegers) return JSON.parse(text);
+  const marker = "\u0000pons-bigint:";
+  let output = "";
+  let index = 0;
+  let inString = false;
+  while (index < text.length) {
+    const character = text[index];
+    if (inString) {
+      output += character;
+      if (character === "\\") {
+        index += 1;
+        if (index < text.length) output += text[index];
+      } else if (character === "\"") {
+        inString = false;
+      }
+      index += 1;
+      continue;
+    }
+    if (character === "\"") {
+      inString = true;
+      output += character;
+      index += 1;
+      continue;
+    }
+    if (character === "-" || (character >= "0" && character <= "9")) {
+      const start = index;
+      if (character === "-") index += 1;
+      while (index < text.length && text[index] >= "0" && text[index] <= "9") index += 1;
+      if (text[index] === ".") {
+        index += 1;
+        while (index < text.length && text[index] >= "0" && text[index] <= "9") index += 1;
+      }
+      if (text[index] === "e" || text[index] === "E") {
+        index += 1;
+        if (text[index] === "+" || text[index] === "-") index += 1;
+        while (index < text.length && text[index] >= "0" && text[index] <= "9") index += 1;
+      }
+      const token = text.slice(start, index);
+      if (/^-?\d+$/.test(token) && !Number.isSafeInteger(Number(token))) {
+        output += JSON.stringify(marker + token);
+      } else {
+        output += token;
+      }
+      continue;
+    }
+    output += character;
+    index += 1;
+  }
+  return JSON.parse(output, (_key: string, value: unknown) => {
+    if (typeof value === "string" && value.startsWith(marker)) {
+      return BigInt(value.slice(marker.length));
+    }
+    return value;
+  });
+}
+
+function stringifyJson(value: unknown): string {
+  if (typeof value === "bigint") return value.toString();
+  if (value === null || typeof value !== "object") return JSON.stringify(value) ?? "null";
+  if (Array.isArray(value)) return `[${value.map((item) => stringifyJson(item)).join(",")}]`;
+  const prototype = Object.getPrototypeOf(value);
+  if (prototype !== Object.prototype && prototype !== null) return JSON.stringify(value) ?? "null";
+  return `{${Object.entries(value as Record<string, unknown>)
+    .filter(([, item]) => item !== undefined)
+    .map(([key, item]) => `${JSON.stringify(key)}:${stringifyJson(item)}`)
+    .join(",")}}`;
+}
+
 function encodeWire(value: any, schema: any): any {
   if (value == null || schema == null) return value;
   if (schema.ref) {
@@ -257,6 +328,7 @@ function encodeWire(value: any, schema: any): any {
 
 function decodeWire(value: any, schema: any): any {
   if (value == null || schema == null) return value;
+  if (schema.kind === "int" && schema.bits <= 53 && typeof value === "bigint") return Number(value);
   if (schema.ref) {
     const definition = typeDefinitions[schema.ref];
     if (!definition) return value;

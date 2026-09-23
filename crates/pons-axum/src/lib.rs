@@ -15,7 +15,8 @@ pub use describe::{
 };
 pub use handler::DescribeHandler;
 use operation::build;
-use pons_ir::{AuthScheme, Diagnostic, Document, ErrorResponse, Info, TypeDef, ValidationError};
+pub use pons_ir::Info;
+use pons_ir::{AuthScheme, Diagnostic, Document, ErrorResponse, TypeDef, ValidationError};
 pub use routing::MethodRoute;
 pub use sse::{Sse, SseEvent};
 
@@ -98,8 +99,25 @@ where
         }
     }
 
+    pub fn try_lower_document(
+        self,
+        lower: impl FnOnce(Document) -> Result<Document, Vec<ValidationError>>,
+    ) -> Result<Document, Vec<ValidationError>> {
+        let mut document = lower(self.into_document_value())?;
+        document.canonicalize();
+        document.validate()?;
+        Ok(document)
+    }
+
     pub fn into_document(self) -> Result<Document, Vec<ValidationError>> {
-        let mut document = Document {
+        let mut document = self.into_document_value();
+        document.canonicalize();
+        document.validate()?;
+        Ok(document)
+    }
+
+    fn into_document_value(self) -> Document {
+        Document {
             ir_version: pons_ir::IR_VERSION.to_owned(),
             info: self.info,
             types: self.types,
@@ -108,9 +126,31 @@ where
             operations: self.operations,
             ext: BTreeMap::new(),
             diagnostics: self.diagnostics,
-        };
-        document.canonicalize();
-        document.validate()?;
-        Ok(document)
+        }
     }
+}
+
+#[macro_export]
+macro_rules! export_main {
+    ($builder:path) => {
+        $crate::export_main!($builder, |document| Ok(document));
+    };
+    ($builder:path, $lower:expr) => {
+        fn main() -> ::std::result::Result<(), ::std::boxed::Box<dyn ::std::error::Error>> {
+            let document = $builder().try_lower_document($lower).map_err(|errors| {
+                ::std::io::Error::other(
+                    errors
+                        .into_iter()
+                        .map(|error| error.to_string())
+                        .collect::<::std::vec::Vec<_>>()
+                        .join("\n"),
+                )
+            })?;
+            let mut output = document.to_canonical_json()?;
+            output.push('\n');
+            let mut stdout = ::std::io::stdout();
+            ::std::io::Write::write_all(&mut stdout, output.as_bytes())?;
+            Ok(())
+        }
+    };
 }

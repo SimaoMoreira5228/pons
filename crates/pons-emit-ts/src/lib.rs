@@ -82,24 +82,19 @@ pub fn emit_with_mode(document: &Document, mode: EmitMode) -> Result<EmitOutput,
         ));
     }
     let wide_integers = wide_integer_references(&document);
-    if mode == EmitMode::Strict && !wide_integers.is_empty() {
-        return Err(EmitError(format!(
-            "TypeScript strict mode rejects wide numeric integers at {}; use lossy mode",
-            wide_integers.join(", ")
-        )));
-    }
     let names = type_names(&document);
+    let preserve_wide_integers = mode == EmitMode::Strict && !wide_integers.is_empty();
     let files = vec![
         GeneratedFile {
             path: "types.ts".into(),
-            content: types::emit(&document, &names)?,
+            content: types::emit(&document, &names, mode)?,
         },
         GeneratedFile {
             path: "client.ts".into(),
-            content: client::emit(&document, &names)?,
+            content: client::emit(&document, &names, mode, preserve_wide_integers)?,
         },
     ];
-    let warnings = (!wide_integers.is_empty())
+    let warnings = (mode == EmitMode::Lossy && !wide_integers.is_empty())
         .then(|| {
             format!(
                 "TypeScript emits wide numeric integers as number at {}",
@@ -437,7 +432,7 @@ mod tests {
         assert!(client.contains("stream: \"text/event-stream\""));
         assert!(client.contains("actualContentType !== expectedContentType"));
         assert!(client.contains("const text = await response.text()"));
-        assert!(client.contains("rawValue = JSON.parse(text)"));
+        assert!(client.contains("rawValue = parseJson(text, preserveWideIntegers)"));
         assert!(client.contains("invalid JSON response"));
         assert!(!client.contains("responseContent.includes(\"text/event-stream\")"));
         assert!(client.contains("response.headers.has(header.name)"));
@@ -484,7 +479,7 @@ mod tests {
     }
 
     #[test]
-    fn strict_mode_rejects_wide_numbers_and_lossy_mode_warns() {
+    fn strict_mode_uses_bigint_and_lossy_mode_warns() {
         let mut document: Document =
             serde_json::from_str(include_str!("../../../fixtures/login.json")).unwrap();
         let definition = document.types.get_mut("User").unwrap();
@@ -496,8 +491,17 @@ mod tests {
         };
         *wire = IntegerWire::Number;
 
-        let error = super::emit(&document).unwrap_err();
-        assert!(error.0.contains("wide numeric integers"));
+        let files = super::emit(&document).unwrap();
+        let types = files.iter().find(|file| file.path == "types.ts").unwrap();
+        assert!(types.content.contains("\"id\": bigint"));
+        let client = files.iter().find(|file| file.path == "client.ts").unwrap();
+        assert!(
+            client
+                .content
+                .contains("parseJson(text, preserveWideIntegers)")
+        );
+        assert!(client.content.contains("stringifyJson(encodedBody)"));
+
         let output = super::emit_with_mode(&document, super::EmitMode::Lossy).unwrap();
         assert!(
             output
@@ -505,12 +509,12 @@ mod tests {
                 .iter()
                 .any(|warning| warning.contains("wide numeric integers"))
         );
-        assert!(
-            output
-                .files
-                .iter()
-                .any(|file| file.content.contains("number"))
-        );
+        let types = output
+            .files
+            .iter()
+            .find(|file| file.path == "types.ts")
+            .unwrap();
+        assert!(types.content.contains("\"id\": number"));
     }
 
     #[test]

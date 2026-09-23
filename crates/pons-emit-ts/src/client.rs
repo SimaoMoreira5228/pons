@@ -6,7 +6,7 @@ use pons_ir::{
 };
 
 use crate::runtime;
-use crate::{EmitError, camel, pascal, string, types};
+use crate::{EmitError, EmitMode, camel, pascal, string, types};
 
 struct Node {
     children: BTreeMap<String, Node>,
@@ -44,6 +44,8 @@ impl Node {
 pub(super) fn emit(
     document: &Document,
     names: &BTreeMap<String, String>,
+    mode: EmitMode,
+    preserve_wide_integers: bool,
 ) -> Result<String, EmitError> {
     let mut output = String::from(
         "import { err, ok, type Result } from \"neverthrow\";\nimport type * as Types from \"./types.js\";\n\n",
@@ -66,7 +68,14 @@ pub(super) fn emit(
         } else {
             format!("{base}{count}")
         };
-        let (declarations, function) = operation_function(operation, &unique, document, names)?;
+        let (declarations, function) = operation_function(
+            operation,
+            &unique,
+            document,
+            names,
+            mode,
+            preserve_wide_integers,
+        )?;
         output.push_str(&declarations);
         let (parents, leaf) = operation
             .id
@@ -145,12 +154,14 @@ fn operation_function(
     name: &str,
     document: &Document,
     names: &BTreeMap<String, String>,
+    mode: EmitMode,
+    preserve_wide_integers: bool,
 ) -> Result<(String, String), EmitError> {
     let args_name = format!("{name}Args");
     let success_name = format!("{name}Response");
     let error_name = format!("{name}Error");
-    let args = operation_args(operation, document, names)?;
-    let (success, stream_types) = response_type(operation, name, document, names)?;
+    let args = operation_args(operation, document, names, mode)?;
+    let (success, stream_types) = response_type(operation, name, document, names, mode)?;
     let errors = if operation.errors_inherit {
         operation
             .errors
@@ -160,7 +171,7 @@ fn operation_function(
     } else {
         operation.errors.iter().collect()
     };
-    let failure = error_type(&errors, document, names)?;
+    let failure = error_type(&errors, document, names, mode)?;
     let path = path_expression(operation);
     let query = if operation.query.is_some() {
         "args.query"
@@ -241,8 +252,8 @@ fn operation_function(
         "export type {args_name} = {{ {args} }};\n{stream_types}export type {success_name} = {success};\nexport type {error_name} = {failure};\n",
     );
     let function = format!(
-        "{args_type} request<{success_name}, {error_name}>(configured, {method:?}, {path}, {query}, {headers}, {body}, {content}, [{groups}], {body_schema}, [{response_schemas}], [{error_schemas}], {}, {provides})",
-        operation.auth.optional,
+        "{args_type} request<{success_name}, {error_name}>(configured, {method:?}, {path}, {query}, {headers}, {body}, {content}, [{groups}], {body_schema}, [{response_schemas}], [{error_schemas}], {}, {}, {provides})",
+        operation.auth.optional, preserve_wide_integers,
     );
     Ok((declarations, function))
 }
@@ -251,6 +262,7 @@ fn operation_args(
     operation: &Operation,
     document: &Document,
     names: &BTreeMap<String, String>,
+    mode: EmitMode,
 ) -> Result<String, EmitError> {
     let mut fields = Vec::new();
     let mut path_params = Vec::new();
@@ -259,7 +271,7 @@ fn operation_args(
             path_params.push(format!(
                 "{}: {}",
                 string(param),
-                types::type_ref(ty, document, names)?
+                types::type_ref(ty, document, names, mode)?
             ));
         }
     }
@@ -269,7 +281,7 @@ fn operation_args(
     if let Some(query) = &operation.query {
         fields.push(format!(
             "query: {}",
-            types::type_ref(query, document, names)?
+            types::type_ref(query, document, names, mode)?
         ));
     }
     if !operation.headers.is_empty() {
@@ -286,7 +298,7 @@ fn operation_args(
                     "{}{}: {}",
                     string(&header.wire),
                     optional,
-                    types::type_ref(&header.ty, document, names)?
+                    types::type_ref(&header.ty, document, names, mode)?
                 ))
             })
             .collect::<Result<Vec<_>, EmitError>>()?;
@@ -295,7 +307,7 @@ fn operation_args(
     if let Some(body) = &operation.body {
         fields.push(format!(
             "body: {}",
-            types::type_ref(&body.ty, document, names)?
+            types::type_ref(&body.ty, document, names, mode)?
         ));
     }
     Ok(fields.join("; "))
@@ -306,6 +318,7 @@ fn response_type(
     name: &str,
     document: &Document,
     names: &BTreeMap<String, String>,
+    mode: EmitMode,
 ) -> Result<(String, String), EmitError> {
     if let Some(StreamKind::Sse { events }) = operation.stream.as_ref().map(|stream| &stream.kind) {
         let event_name = format!("{name}Event");
@@ -317,7 +330,7 @@ fn response_type(
                 Ok(format!(
                     "{{ event: {}; data: {} }}",
                     string(&event.event),
-                    types::type_ref(&event.data, document, names)?
+                    types::type_ref(&event.data, document, names, mode)?
                 ))
             })
             .collect::<Result<Vec<_>, EmitError>>()?;
@@ -329,7 +342,7 @@ fn response_type(
         for event in events.iter().filter(|event| event.event == "error") {
             stream_failures.push(format!(
                 "{{ kind: \"server_error\"; body: {} }}",
-                types::type_ref(&event.data, document, names)?
+                types::type_ref(&event.data, document, names, mode)?
             ));
         }
         return Ok((
@@ -349,7 +362,7 @@ fn response_type(
         .responses
         .iter()
         .map(|response| match &response.body {
-            Some(body) => types::type_ref(body, document, names),
+            Some(body) => types::type_ref(body, document, names, mode),
             None => Ok("void".into()),
         })
         .collect::<Result<Vec<_>, _>>()?;
@@ -367,6 +380,7 @@ fn error_type(
     errors: &[&ErrorResponse],
     document: &Document,
     names: &BTreeMap<String, String>,
+    mode: EmitMode,
 ) -> Result<String, EmitError> {
     let mut failures = vec!["ClientFailure".into()];
     for error in errors {
@@ -378,7 +392,7 @@ fn error_type(
         let body = error
             .body
             .as_ref()
-            .map(|body| types::type_ref(body, document, names))
+            .map(|body| types::type_ref(body, document, names, mode))
             .transpose()?;
         failures.push(match body {
             Some(body) => format!("{{ kind: \"http\"; status: {status}; body: {body} }}"),
