@@ -2,7 +2,7 @@ use axum::response::IntoResponse;
 use pons_axum::body::Bytes;
 use pons_axum::extract::{Form, Multipart, Path, Query, State};
 use pons_axum::http::StatusCode;
-use pons_axum::routing::{delete, get, post};
+use pons_axum::routing::{delete, get, post, post_with};
 use pons_axum::{
     Auth, DescribeRequest, DocumentedLayer, Header, HeaderSpec, Ndjson, NoContent, OperationCx,
     OperationMeta, OptionalHeader, RawBytes, Router, SessionAuth, WithHeader, WithOptionalHeader,
@@ -455,7 +455,8 @@ fn operation_meta_overrides_identity_and_adds_contract_metadata() {
         .auth_scheme("session", AuthScheme::Bearer { format: None })
         .route(
             "/login",
-            post(create_user).with_meta(
+            post_with(
+                create_user,
                 OperationMeta::new("auth.login")
                     .summary("Create a session")
                     .tag("auth")
@@ -464,7 +465,10 @@ fn operation_meta_overrides_identity_and_adds_contract_metadata() {
                         CredentialLocator::Body {
                             pointer: "/token".into(),
                         },
-                    ),
+                    )
+                    .expires_at(CredentialLocator::Body {
+                        pointer: "/expires".into(),
+                    }),
             ),
         )
         .into_document()
@@ -478,6 +482,12 @@ fn operation_meta_overrides_identity_and_adds_contract_metadata() {
     assert_eq!(doc.summary.as_deref(), Some("Create a session"));
     assert_eq!(doc.tags, vec!["auth".to_owned()]);
     assert_eq!(operation.provides.as_ref().unwrap().scheme, "session");
+    assert_eq!(
+        operation.provides.as_ref().unwrap().expires_at,
+        Some(CredentialLocator::Body {
+            pointer: "/expires".into(),
+        })
+    );
 }
 
 #[test]

@@ -4,6 +4,7 @@ pub struct OperationMeta {
     pub(crate) id: Vec<Name>,
     pub(crate) doc: Doc,
     pub(crate) provides: Option<CredentialProvision>,
+    pub(crate) expires_at: Option<CredentialLocator>,
 }
 
 impl OperationMeta {
@@ -30,6 +31,7 @@ impl OperationMeta {
                 tags: Vec::new(),
             },
             provides: None,
+            expires_at: None,
         }
     }
 
@@ -57,9 +59,18 @@ impl OperationMeta {
         self.provides = Some(CredentialProvision {
             scheme: scheme.into(),
             value: locator,
-            expires_at: None,
+            expires_at: self.expires_at.take(),
             ext: Default::default(),
         });
+        self
+    }
+
+    pub fn expires_at(mut self, locator: CredentialLocator) -> Self {
+        if let Some(provision) = self.provides.as_mut() {
+            provision.expires_at = Some(locator);
+        } else {
+            self.expires_at = Some(locator);
+        }
         self
     }
 }

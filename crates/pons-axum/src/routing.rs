@@ -118,6 +118,27 @@ method_function!(delete, Delete, delete);
 method_function!(head, Head, head);
 method_function!(options, Options, options);
 
+macro_rules! method_with_function {
+    ($function:ident, $base:ident) => {
+        pub fn $function<H, T, S>(handler: H, meta: OperationMeta) -> MethodRoute<S>
+        where
+            H: Handler<T, S> + DescribeHandler<T, S>,
+            T: 'static,
+            S: Clone + Send + Sync + 'static,
+        {
+            $base::<H, T, S>(handler).with_meta(meta)
+        }
+    };
+}
+
+method_with_function!(get_with, get);
+method_with_function!(post_with, post);
+method_with_function!(put_with, put);
+method_with_function!(patch_with, patch);
+method_with_function!(delete_with, delete);
+method_with_function!(head_with, head);
+method_with_function!(options_with, options);
+
 fn describe_handler<H, T, S>(method: Method) -> RouteDescription
 where
     H: DescribeHandler<T, S>,
