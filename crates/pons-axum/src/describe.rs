@@ -468,57 +468,6 @@ impl OperationCx {
         self.provides = Some(provides);
     }
 
-    pub fn require_auth(&mut self, scheme: impl Into<String>) {
-        self.require_all([scheme]);
-    }
-
-    pub fn require_all<I, S>(&mut self, schemes: I)
-    where
-        I: IntoIterator<Item = S>,
-        S: Into<String>,
-    {
-        let mut unique = Vec::new();
-        for scheme in schemes {
-            let scheme = scheme.into();
-            if !unique.contains(&scheme) {
-                unique.push(scheme);
-            }
-        }
-        if unique.is_empty() {
-            return;
-        }
-        if self.auth.alternatives.is_empty() {
-            self.auth.alternatives.push(unique);
-        } else {
-            self.auth.alternatives.iter_mut().for_each(|alternative| {
-                for scheme in &unique {
-                    if !alternative.contains(scheme) {
-                        alternative.push(scheme.clone());
-                    }
-                }
-            });
-        }
-    }
-
-    pub fn require_any<I, S>(&mut self, schemes: I)
-    where
-        I: IntoIterator<Item = S>,
-        S: Into<String>,
-    {
-        let schemes = schemes.into_iter().map(Into::into).collect::<Vec<_>>();
-        if !schemes.is_empty() {
-            self.auth.alternatives.push(schemes);
-        }
-    }
-
-    pub fn optional_auth(&mut self) {
-        self.auth.optional = true;
-    }
-
-    pub(crate) fn auth_requirement(&self) -> AuthRequirement {
-        self.auth.clone()
-    }
-
     pub fn diagnostic(&mut self, code: &str, message: impl Into<String>) {
         let message = message.into();
         if self
@@ -556,10 +505,47 @@ impl<T: Schema> DescribeRequest for axum::extract::Form<T> {
 
 impl DescribeRequest for axum::extract::Multipart {
     fn describe(cx: &mut OperationCx) {
-        cx.request_body::<MultipartBody>(ContentKind::Multipart);
+        cx.request_body::<OpaqueBody>(ContentKind::Multipart);
         cx.diagnostic(
             "PONS-W101",
             "multipart fields are opaque; wrap them with a typed request description",
+        );
+    }
+}
+
+impl DescribeRequest for axum::extract::RawForm {
+    fn describe(cx: &mut OperationCx) {
+        cx.request_body::<OpaqueBody>(ContentKind::Form);
+        cx.diagnostic(
+            "PONS-W101",
+            "raw form fields are opaque; use Form<T> for a typed form",
+        );
+    }
+}
+
+impl DescribeRequest for axum::extract::RawQuery {
+    fn describe(cx: &mut OperationCx) {
+        cx.diagnostic(
+            "PONS-W101",
+            "raw query strings are opaque; use Query<T> for typed fields",
+        );
+    }
+}
+
+impl DescribeRequest for axum::extract::RawPathParams {
+    fn describe(cx: &mut OperationCx) {
+        cx.diagnostic(
+            "PONS-W101",
+            "raw path parameters are opaque; use Path<T> for typed fields",
+        );
+    }
+}
+
+impl DescribeRequest for axum::extract::Request {
+    fn describe(cx: &mut OperationCx) {
+        cx.diagnostic(
+            "PONS-W101",
+            "raw request extractors do not expose a stable contract; use typed extractors",
         );
     }
 }
@@ -585,7 +571,12 @@ impl<T> DescribeRequest for axum::extract::Extension<T> {
 }
 
 impl DescribeRequest for axum::http::HeaderMap {
-    fn describe(_: &mut OperationCx) {}
+    fn describe(cx: &mut OperationCx) {
+        cx.diagnostic(
+            "PONS-W101",
+            "raw HeaderMap extractors do not declare named headers; use typed header wrappers",
+        );
+    }
 }
 
 impl DescribeRequest for String {
@@ -604,15 +595,8 @@ impl DescribeResponse for axum::response::Response {
     fn describe(cx: &mut OperationCx) {
         cx.diagnostic(
             "PONS-W101",
-            "raw Axum responses do not expose their status or body; represented as 200 JSON any",
+            "raw Axum responses do not expose status or body; use a typed response wrapper",
         );
-        cx.responses.push(Response {
-            status: 200,
-            content: ContentKind::Json,
-            body: Some(TypeRef::Inline(InlineType::Any)),
-            headers: Vec::new(),
-            ext: Default::default(),
-        });
     }
 }
 
@@ -680,9 +664,9 @@ impl<T: crate::SseEvent, S> DescribeResponse for crate::Sse<T, S> {
 
 pub struct ByteArray;
 
-pub struct MultipartBody;
+pub struct OpaqueBody;
 
-impl Schema for MultipartBody {
+impl Schema for OpaqueBody {
     fn schema(_: &mut TypeCx, _: Direction) -> TypeRef {
         TypeRef::Inline(InlineType::Any)
     }
@@ -700,23 +684,6 @@ impl Schema for ByteArray {
 mod tests {
     use super::*;
     use axum::response::IntoResponse;
-
-    #[test]
-    fn composes_auth_requirements() {
-        let mut cx = OperationCx::default();
-        cx.require_all(["session"]);
-        cx.require_all(["tenant"]);
-        cx.require_any(["api_key", "basic"]);
-        cx.optional_auth();
-        assert_eq!(
-            cx.auth.alternatives,
-            vec![
-                vec![String::from("session"), String::from("tenant")],
-                vec![String::from("api_key"), String::from("basic")],
-            ]
-        );
-        assert!(cx.auth.optional);
-    }
 
     #[test]
     fn parses_headers_case_insensitively_and_rejects_invalid_values() {

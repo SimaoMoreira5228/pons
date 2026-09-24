@@ -243,6 +243,17 @@ async fn noop_layer(
     next.run(request).await
 }
 
+async fn raw_headers(_headers: pons_axum::http::HeaderMap) -> pons_axum::extract::Json<User> {
+    pons_axum::extract::Json(User {
+        id: 1,
+        name: "Ada".into(),
+    })
+}
+
+async fn raw_response() -> axum::response::Response {
+    StatusCode::OK.into_response()
+}
+
 fn info() -> Info {
     Info {
         title: "Users".into(),
@@ -294,6 +305,41 @@ fn router_describes_multipart_request_as_opaque() {
     assert_eq!(body.ty, TypeRef::Inline(InlineType::Any));
     assert!(operation.diagnostics.iter().any(|diagnostic| {
         diagnostic.code == "PONS-W101" && diagnostic.message.contains("multipart fields are opaque")
+    }));
+}
+
+#[test]
+fn raw_axum_boundaries_are_diagnosed_without_inventing_contracts() {
+    let document = Router::<()>::new(info())
+        .route("/raw-headers", get(raw_headers))
+        .route("/raw-response", get(raw_response))
+        .into_document()
+        .unwrap();
+    let headers = document
+        .operations
+        .iter()
+        .find(|operation| {
+            operation.path.iter().any(
+                |segment| matches!(segment, PathSegment::Literal { lit } if lit == "raw-headers"),
+            )
+        })
+        .unwrap();
+    assert!(headers.diagnostics.iter().any(|diagnostic| {
+        diagnostic.code == "PONS-W101" && diagnostic.message.contains("raw HeaderMap")
+    }));
+    assert!(headers.headers.is_empty());
+    let response = document
+        .operations
+        .iter()
+        .find(|operation| {
+            operation.path.iter().any(
+                |segment| matches!(segment, PathSegment::Literal { lit } if lit == "raw-response"),
+            )
+        })
+        .unwrap();
+    assert!(response.responses.is_empty());
+    assert!(response.diagnostics.iter().any(|diagnostic| {
+        diagnostic.code == "PONS-W101" && diagnostic.message.contains("raw Axum responses")
     }));
 }
 

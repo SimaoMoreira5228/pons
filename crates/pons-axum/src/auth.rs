@@ -15,6 +15,59 @@ pub trait AuthSpec {
     }
 }
 
+impl OperationCx {
+    pub fn require_auth(&mut self, scheme: impl Into<String>) {
+        self.require_all([scheme]);
+    }
+
+    pub fn require_all<I, S>(&mut self, schemes: I)
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        let mut unique = Vec::new();
+        for scheme in schemes {
+            let scheme = scheme.into();
+            if !unique.contains(&scheme) {
+                unique.push(scheme);
+            }
+        }
+        if unique.is_empty() {
+            return;
+        }
+        if self.auth.alternatives.is_empty() {
+            self.auth.alternatives.push(unique);
+        } else {
+            self.auth.alternatives.iter_mut().for_each(|alternative| {
+                for scheme in &unique {
+                    if !alternative.contains(scheme) {
+                        alternative.push(scheme.clone());
+                    }
+                }
+            });
+        }
+    }
+
+    pub fn require_any<I, S>(&mut self, schemes: I)
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        let schemes = schemes.into_iter().map(Into::into).collect::<Vec<_>>();
+        if !schemes.is_empty() {
+            self.auth.alternatives.push(schemes);
+        }
+    }
+
+    pub fn optional_auth(&mut self) {
+        self.auth.optional = true;
+    }
+
+    pub(crate) fn auth_requirement(&self) -> AuthRequirement {
+        self.auth.clone()
+    }
+}
+
 pub(crate) fn merge_auth_requirements(target: &mut AuthRequirement, source: &AuthRequirement) {
     if source.alternatives.is_empty() {
         return;
@@ -85,5 +138,27 @@ where
     fn describe(cx: &mut OperationCx) {
         T::describe(cx);
         P::apply(cx);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn composes_auth_requirements() {
+        let mut cx = OperationCx::default();
+        cx.require_all(["session"]);
+        cx.require_all(["tenant"]);
+        cx.require_any(["api_key", "basic"]);
+        cx.optional_auth();
+        assert_eq!(
+            cx.auth.alternatives,
+            vec![
+                vec![String::from("session"), String::from("tenant")],
+                vec![String::from("api_key"), String::from("basic")],
+            ]
+        );
+        assert!(cx.auth.optional);
     }
 }

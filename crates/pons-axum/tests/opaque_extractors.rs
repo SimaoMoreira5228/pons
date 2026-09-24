@@ -1,0 +1,97 @@
+use pons_axum::Router;
+use pons_axum::extract::{Json, RawForm, RawPathParams, RawQuery, Request};
+use pons_axum::routing::{get, post};
+use pons_core::Schema;
+use pons_ir::{ContentKind, Info, InlineType, PathSegment, TypeRef};
+use serde::Serialize;
+use std::collections::BTreeMap;
+
+#[derive(Serialize, Schema)]
+struct User {
+    id: u64,
+}
+
+async fn raw_query(_query: RawQuery) -> Json<User> {
+    Json(User { id: 1 })
+}
+
+async fn raw_form(_form: RawForm) -> Json<User> {
+    Json(User { id: 1 })
+}
+
+async fn raw_path(_path: RawPathParams) -> Json<User> {
+    Json(User { id: 1 })
+}
+
+async fn raw_request(_request: Request) -> Json<User> {
+    Json(User { id: 1 })
+}
+
+fn info() -> Info {
+    Info {
+        title: "Opaque extractors".into(),
+        version: "1".into(),
+        description: None,
+        servers: Vec::new(),
+        ext: BTreeMap::new(),
+    }
+}
+
+fn operation<'a>(document: &'a pons_ir::Document, literal: &str) -> &'a pons_ir::Operation {
+    document
+        .operations
+        .iter()
+        .find(|operation| {
+            operation
+                .path
+                .iter()
+                .any(|segment| matches!(segment, PathSegment::Literal { lit } if lit == literal))
+        })
+        .unwrap()
+}
+
+#[test]
+fn raw_extractors_report_opaque_contract_shapes() {
+    let document = Router::<()>::new(info())
+        .route("/query", get(raw_query))
+        .route("/form", post(raw_form))
+        .route("/path/{id}", get(raw_path))
+        .route("/request", post(raw_request))
+        .into_document()
+        .unwrap();
+
+    let query = operation(&document, "query");
+    assert!(query.query.is_none());
+    assert!(query.diagnostics.iter().any(|diagnostic| {
+        diagnostic.code == "PONS-W101" && diagnostic.message.contains("raw query strings")
+    }));
+
+    let form = operation(&document, "form");
+    assert_eq!(form.body.as_ref().unwrap().content, ContentKind::Form);
+    assert_eq!(
+        form.body.as_ref().unwrap().ty,
+        TypeRef::Inline(InlineType::Any)
+    );
+    assert!(form.diagnostics.iter().any(|diagnostic| {
+        diagnostic.code == "PONS-W101" && diagnostic.message.contains("raw form fields")
+    }));
+
+    let path = operation(&document, "path");
+    assert!(path.diagnostics.iter().any(|diagnostic| {
+        diagnostic.code == "PONS-W101" && diagnostic.message.contains("raw path parameters")
+    }));
+    assert!(path.path.iter().any(|segment| {
+        matches!(
+            segment,
+            PathSegment::Param {
+                ty: TypeRef::Inline(InlineType::String { .. }),
+                ..
+            }
+        )
+    }));
+
+    let request = operation(&document, "request");
+    assert!(request.diagnostics.iter().any(|diagnostic| {
+        diagnostic.code == "PONS-W101" && diagnostic.message.contains("raw request extractors")
+    }));
+}
