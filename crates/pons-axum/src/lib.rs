@@ -1,7 +1,11 @@
+mod auth;
 mod describe;
 mod handler;
+mod layer;
+mod metadata;
 mod ndjson;
 mod operation;
+mod raw_bytes;
 pub mod routing;
 mod sse;
 
@@ -9,16 +13,20 @@ use std::collections::BTreeMap;
 
 use pons_core::{ErrorSpec, TypeCx};
 
+pub use auth::{Auth, AuthSpec, SessionAuth};
 pub use axum::{body, extract, http};
 pub use describe::{
     DescribeRequest, DescribeResponse, Header, HeaderRejection, HeaderSpec, NoContent, OperationCx,
     OptionalHeader, StatusResponse, WithHeader, WithOptionalHeader, WithStatus,
 };
 pub use handler::DescribeHandler;
+pub use layer::DocumentedLayer;
+pub use metadata::OperationMeta;
 pub use ndjson::Ndjson;
 use operation::build;
 pub use pons_ir::Info;
 use pons_ir::{AuthScheme, Diagnostic, Document, ErrorResponse, TypeDef, ValidationError};
+pub use raw_bytes::RawBytes;
 pub use routing::MethodRoute;
 pub use sse::{Sse, SseEvent};
 

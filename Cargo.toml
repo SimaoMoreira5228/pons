@@ -17,3 +17,5 @@ proc-macro2 = "1"
 serde_derive_internals = "0.30.0"
 axum = { version = "0.8.9", default-features = false, features = ["form", "json", "multipart", "query"] }
 futures-util = "0.3"
+tower-layer = "0.3"
+tower-service = "0.3"

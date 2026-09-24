@@ -5,11 +5,13 @@ use pons_ir::{
 };
 
 use crate::describe::OperationCx;
+use crate::metadata::OperationMeta;
 
 pub(crate) struct RouteDescription {
     pub method: Method,
     pub id: Vec<Vec<String>>,
     pub cx: OperationCx,
+    pub meta: Option<OperationMeta>,
 }
 
 pub(crate) struct BuiltOperation {
@@ -18,32 +20,40 @@ pub(crate) struct BuiltOperation {
 }
 
 pub(crate) fn build(path: &str, description: RouteDescription) -> BuiltOperation {
-    let mut diagnostics = description.cx.diagnostics.clone();
-    if description.cx.path_types.len() > 1 {
+    let RouteDescription {
+        method,
+        id: inferred_id,
+        cx,
+        meta,
+    } = description;
+    let mut diagnostics = cx.diagnostics.clone();
+    if cx.path_types.len() > 1 {
         diagnostics.push(diagnostic(
             "PONS-W101",
             "multiple Path extractors are not represented separately",
         ));
     }
-    let path_types = path_types(&description.cx);
+    let path_types = path_types(&cx);
     let segments = parse_path(path, &path_types, &mut diagnostics);
-    let (types, type_diagnostics) = description.cx.types.into_parts();
+    let (types, type_diagnostics) = cx.types.into_parts();
     diagnostics.extend(type_diagnostics);
-    let id = description.id;
-    let method = description.method;
+    let (id, doc, provides) = match meta {
+        Some(meta) => (meta.id, Some(meta.doc), meta.provides.or(cx.provides)),
+        None => (inferred_id, None, cx.provides),
+    };
     let operation = Operation {
         id,
         method,
         path: segments,
-        query: description.cx.query,
-        headers: description.cx.headers,
-        body: description.cx.body,
-        responses: description.cx.responses,
-        errors: description.cx.errors,
+        query: cx.query,
+        headers: cx.headers,
+        body: cx.body,
+        responses: cx.responses,
+        errors: cx.errors,
         errors_inherit: true,
-        stream: description.cx.stream,
-        auth: description.cx.auth,
-        provides: description.cx.provides,
+        stream: cx.stream,
+        auth: cx.auth,
+        provides,
         semantics: OperationSemantics {
             safe: matches!(method, Method::Get | Method::Head | Method::Options),
             idempotent: matches!(
@@ -52,7 +62,7 @@ pub(crate) fn build(path: &str, description: RouteDescription) -> BuiltOperation
             ),
             pagination: None,
         },
-        doc: None,
+        doc,
         origin: None,
         ext: BTreeMap::new(),
         diagnostics,

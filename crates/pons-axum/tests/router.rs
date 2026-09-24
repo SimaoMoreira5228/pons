@@ -1,10 +1,12 @@
 use axum::response::IntoResponse;
+use pons_axum::body::Bytes;
 use pons_axum::extract::{Form, Multipart, Path, Query, State};
 use pons_axum::http::StatusCode;
 use pons_axum::routing::{delete, get, post};
 use pons_axum::{
-    DescribeRequest, Header, HeaderSpec, Ndjson, NoContent, OperationCx, OptionalHeader, Router,
-    WithHeader, WithOptionalHeader, WithStatus,
+    Auth, DescribeRequest, DocumentedLayer, Header, HeaderSpec, Ndjson, NoContent, OperationCx,
+    OperationMeta, OptionalHeader, RawBytes, Router, SessionAuth, WithHeader, WithOptionalHeader,
+    WithStatus,
 };
 use pons_core::Schema;
 use pons_ir::{
@@ -131,6 +133,14 @@ async fn provisioned(_provides: Provides) -> pons_axum::extract::Json<User> {
     })
 }
 
+async fn authenticated(auth: Auth<Provides>) -> pons_axum::extract::Json<User> {
+    let _ = auth.into_inner();
+    pons_axum::extract::Json(User {
+        id: 1,
+        name: "Ada".into(),
+    })
+}
+
 async fn response_headers() -> WithStatus<201, WithHeader<TraceId, pons_axum::extract::Json<User>>>
 {
     WithStatus::new(WithHeader::new(
@@ -161,6 +171,10 @@ async fn user_events()
 
 async fn user_ndjson() -> Ndjson<UserEvent, impl futures_util::Stream<Item = UserEvent> + Send> {
     Ndjson::new(futures_util::stream::iter([UserEvent { id: 1 }]))
+}
+
+async fn user_bytes() -> RawBytes<impl futures_util::Stream<Item = Bytes> + Send> {
+    RawBytes::new(futures_util::stream::iter([Bytes::from_static(b"pdf")]))
 }
 
 #[derive(Serialize, Schema, pons_core::ApiError)]
@@ -220,6 +234,13 @@ async fn multipart_user(_multipart: Multipart) -> pons_axum::extract::Json<User>
 
 async fn delete_user() -> NoContent {
     NoContent
+}
+
+async fn noop_layer(
+    request: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> axum::response::Response {
+    next.run(request).await
 }
 
 fn info() -> Info {
@@ -320,6 +341,97 @@ fn router_describes_ndjson_stream() {
     ));
     assert_eq!(operation.responses[0].content, ContentKind::Stream);
     assert!(operation.responses[0].body.is_none());
+}
+
+#[test]
+fn auth_wrapper_delegates_extraction_and_requires_session() {
+    let document = Router::<AppState>::new(info())
+        .auth_scheme("session", AuthScheme::Bearer { format: None })
+        .route("/authenticated", get(authenticated))
+        .into_document()
+        .unwrap();
+    let operation = document
+        .operations
+        .iter()
+        .find(|operation| operation.method == pons_ir::Method::Get)
+        .unwrap();
+    assert_eq!(
+        operation.auth.alternatives,
+        vec![vec!["session".to_owned()]]
+    );
+    assert!(!operation.auth.optional);
+}
+
+#[test]
+fn router_describes_raw_bytes_stream() {
+    let response =
+        RawBytes::new(futures_util::stream::iter([Bytes::from_static(b"pdf")])).into_response();
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(
+        response.headers()[pons_axum::http::header::CONTENT_TYPE],
+        "application/octet-stream"
+    );
+    let document = Router::<()>::new(info())
+        .route("/bytes", get(user_bytes))
+        .into_document()
+        .unwrap();
+    let operation = document
+        .operations
+        .iter()
+        .find(|operation| operation.method == pons_ir::Method::Get)
+        .unwrap();
+    assert!(matches!(
+        operation.stream.as_ref().unwrap().kind,
+        pons_ir::StreamKind::Bytes { ref content_type } if content_type == "application/octet-stream"
+    ));
+    assert_eq!(operation.responses[0].content, ContentKind::Stream);
+    assert!(operation.responses[0].body.is_none());
+}
+
+#[test]
+fn documented_layer_applies_auth_to_the_group() {
+    let router = Router::<AppState>::new(info()).route("/authenticated", get(authenticated));
+    let router =
+        DocumentedLayer::new(axum::middleware::from_fn(noop_layer), SessionAuth).layer(router);
+    let document = router
+        .auth_scheme("session", AuthScheme::Bearer { format: None })
+        .into_document()
+        .unwrap();
+    assert_eq!(
+        document.operations[0].auth.alternatives,
+        vec![vec!["session".to_owned()]]
+    );
+}
+
+#[test]
+fn operation_meta_overrides_identity_and_adds_contract_metadata() {
+    let document = Router::<()>::new(info())
+        .auth_scheme("session", AuthScheme::Bearer { format: None })
+        .route(
+            "/login",
+            post(create_user).with_meta(
+                OperationMeta::new("auth.login")
+                    .summary("Create a session")
+                    .tag("auth")
+                    .provides(
+                        "session",
+                        CredentialLocator::Body {
+                            pointer: "/token".into(),
+                        },
+                    ),
+            ),
+        )
+        .into_document()
+        .unwrap();
+    let operation = &document.operations[0];
+    assert_eq!(
+        operation.id,
+        vec![vec![String::from("auth")], vec![String::from("login")]]
+    );
+    let doc = operation.doc.as_ref().unwrap();
+    assert_eq!(doc.summary.as_deref(), Some("Create a session"));
+    assert_eq!(doc.tags, vec!["auth".to_owned()]);
+    assert_eq!(operation.provides.as_ref().unwrap().scheme, "session");
 }
 
 #[test]

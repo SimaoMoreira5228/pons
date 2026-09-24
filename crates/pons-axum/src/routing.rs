@@ -7,6 +7,7 @@ use pons_ir::{Method, Name};
 
 use crate::OperationCx;
 use crate::handler::DescribeHandler;
+use crate::metadata::OperationMeta;
 use crate::operation::RouteDescription;
 
 pub struct MethodRoute<S = ()> {
@@ -18,6 +19,14 @@ impl<S> MethodRoute<S>
 where
     S: Clone + Send + Sync + 'static,
 {
+    pub fn with_meta(mut self, meta: OperationMeta) -> Self {
+        self.descriptions
+            .last_mut()
+            .expect("method route must contain a handler")
+            .meta = Some(meta);
+        self
+    }
+
     pub fn head<H, T>(mut self, handler: H) -> Self
     where
         H: Handler<T, S> + DescribeHandler<T, S>,
@@ -119,6 +128,7 @@ where
         method,
         id: handler_id::<H>(),
         cx,
+        meta: None,
     }
 }
 

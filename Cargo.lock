@@ -314,6 +314,8 @@ dependencies = [
  "pons-ir",
  "serde",
  "serde_json",
+ "tower-layer",
+ "tower-service",
 ]
 
 [[package]]
