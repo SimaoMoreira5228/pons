@@ -1,8 +1,15 @@
 pub(super) fn render() -> &'static str {
     r#"class ResponseHeaderDecodeError extends Error {}
+class CredentialSourceError extends Error {
+  constructor(readonly scheme: string, readonly sourceCause: unknown) {
+    super(`credential source failed for ${scheme}`);
+  }
+}
+
+type ConfiguredClient = ClientOptions & { authValues: Record<string, string> };
 
 async function request<T, E>(
-  client: ClientOptions,
+  client: ConfiguredClient,
   method: string,
   path: string,
   query: unknown,
@@ -16,21 +23,26 @@ async function request<T, E>(
   authOptional: boolean,
   preserveWideIntegers: boolean,
   provides: { scheme: string; value: { from: string; pointer?: string; name?: string } } | undefined,
+  callOptions: CallOptions | undefined,
+  idempotent: boolean,
 ): Promise<Result<T, E | ClientFailure>> {
-  const timeoutController = client.timeout === undefined ? undefined : new AbortController();
+  const timeoutMs = callOptions?.timeout ?? client.timeout;
+  const parentSignal = callOptions?.signal ?? client.signal;
+  const retry = callOptions?.retry === false ? undefined : { ...client.retry, ...(callOptions?.retry ?? {}) };
+  const timeoutController = timeoutMs === undefined ? undefined : new AbortController();
   let timedOut = false;
   const timeoutId = timeoutController === undefined
     ? undefined
     : setTimeout(() => {
         timedOut = true;
         timeoutController.abort();
-      }, client.timeout);
+      }, timeoutMs);
   const abortParent = () => timeoutController?.abort();
-  if (timeoutController && client.signal) {
-    if (client.signal.aborted) timeoutController.abort();
-    else client.signal.addEventListener("abort", abortParent, { once: true });
+  if (timeoutController && parentSignal) {
+    if (parentSignal.aborted) timeoutController.abort();
+    else parentSignal.addEventListener("abort", abortParent, { once: true });
   }
-  const signal = timeoutController?.signal ?? client.signal;
+  const signal = timeoutController?.signal ?? parentSignal;
   try {
     const baseUrl = client.baseUrl.endsWith("/") ? client.baseUrl : `${client.baseUrl}/`;
     const url = new URL(path.replace(/^\/+/, ""), baseUrl);
@@ -51,14 +63,13 @@ async function request<T, E>(
       const definition = authSchemes[scheme];
       return definition !== undefined && (
         (definition.kind === "custom" && client.authAdapters?.[scheme] !== undefined) ||
-        (definition.kind !== "custom" && (client.auth?.[scheme] !== undefined || definition.kind === "cookie"))
+        (definition.kind !== "custom" && (client.authValues[scheme] !== undefined || client.auth?.[scheme] !== undefined || definition.kind === "cookie"))
       );
     }));
     if (authGroups.length && !activeGroup && !authOptional) {
       return err({ kind: "auth", schemes: authGroups.flat() });
     }
     for (const scheme of activeGroup ?? []) {
-      const value = client.auth?.[scheme];
       const definition = authSchemes[scheme];
       if (definition === undefined) continue;
       if (definition.kind === "custom") {
@@ -78,7 +89,11 @@ async function request<T, E>(
         credentials = "include";
         continue;
       }
-      if (value === undefined) continue;
+      const value = await credentialValue(client, scheme);
+      if (value === undefined) {
+        if (!authOptional) return err({ kind: "auth", schemes: [scheme] });
+        continue;
+      }
       if (definition.kind === "bearer") headers.set("authorization", `Bearer ${value}`);
       else if (definition.kind === "basic") {
         const bytes = new TextEncoder().encode(value);
@@ -117,7 +132,7 @@ async function request<T, E>(
         init.body = body as BodyInit;
       }
     }
-    const response = await (client.fetch ?? fetch)(url, init);
+    const response = await fetchWithRetry(client.fetch ?? fetch, url, init, retry, idempotent, signal);
     const responseContent = response.headers.get("content-type") ?? "";
     const declaredSuccess = responses.find((entry) => entry.status === response.status);
     const declaredError =
@@ -150,7 +165,7 @@ async function request<T, E>(
     }
     if (declaredSuccess?.content === "stream") {
       if (!response.body) return err({ kind: "protocol", message: "the event stream has no response body" });
-      captureCredential(client, response, provides, undefined, false);
+      await captureCredential(client, response, provides, undefined, false);
       if (declaredSuccess.stream === "ndjson") {
         return ok(withResponseHeaders(readNdjson(response.body, declaredSuccess.item, preserveWideIntegers), response, declaredSuccess, preserveWideIntegers) as T);
       }
@@ -183,19 +198,102 @@ async function request<T, E>(
         ? err({ kind: "http", status: response.status, body: value, headers: response.headers } as E)
         : err({ kind: "unexpected_http", status: response.status, body: value });
     }
-    captureCredential(client, response, provides, value, true);
+    await captureCredential(client, response, provides, value, true);
     return ok(withResponseHeaders(value, response, declaredSuccess, preserveWideIntegers) as T);
   } catch (cause) {
-    if (timedOut) return err({ kind: "timeout", afterMs: client.timeout! });
+    if (timedOut) return err({ kind: "timeout", afterMs: timeoutMs! });
     if (cause instanceof ResponseHeaderDecodeError) return err({ kind: "protocol", message: cause.message });
+    if (cause instanceof CredentialSourceError) return err({ kind: "auth_source", scheme: cause.scheme, cause: cause.sourceCause });
     if (typeof DOMException !== "undefined" && cause instanceof DOMException && cause.name === "AbortError") {
       return err({ kind: "aborted", cause });
     }
     return err({ kind: "network", cause });
   } finally {
     if (timeoutId !== undefined) clearTimeout(timeoutId);
-    if (timeoutController && client.signal) client.signal.removeEventListener("abort", abortParent);
+    if (timeoutController && parentSignal) parentSignal.removeEventListener("abort", abortParent);
   }
+}
+
+async function fetchWithRetry(
+  fetchImpl: typeof fetch,
+  url: URL,
+  init: RequestInit,
+  options: RetryOptions | undefined,
+  idempotent: boolean,
+  signal: AbortSignal | undefined,
+): Promise<Response> {
+  const attempts = idempotent ? Math.max(1, Math.floor(options?.attempts ?? 1)) : 1;
+  let attempt = 0;
+  while (true) {
+    let response: Response;
+    try {
+      response = await fetchImpl(url, init);
+    } catch (cause) {
+      if (attempt + 1 >= attempts) throw cause;
+      await waitForRetry(retryDelay(undefined, attempt, options), signal);
+      attempt += 1;
+      continue;
+    }
+    const retryableStatus = response.status === 502 || response.status === 503 || response.status === 504;
+    if (!retryableStatus || attempt + 1 >= attempts) return response;
+    try {
+      await response.body?.cancel();
+    } catch {
+    }
+    await waitForRetry(retryDelay(response, attempt, options), signal);
+    attempt += 1;
+  }
+}
+
+function retryDelay(response: Response | undefined, attempt: number, options: RetryOptions | undefined): number {
+  const retryAfter = response?.headers.get("retry-after");
+  const parsedRetryAfter = retryAfter === null || retryAfter === undefined ? undefined : Number(retryAfter);
+  if (parsedRetryAfter !== undefined && Number.isFinite(parsedRetryAfter) && parsedRetryAfter >= 0) {
+    return parsedRetryAfter * 1000;
+  }
+  const backoff = Math.max(0, options?.backoffMs ?? 100);
+  const maximum = Math.max(0, options?.maxBackoffMs ?? 1000);
+  const delay = Math.min(maximum, backoff * 2 ** attempt);
+  return delay + Math.max(0, options?.jitterMs ?? 0) * Math.random();
+}
+
+function waitForRetry(milliseconds: number, signal: AbortSignal | undefined): Promise<void> {
+  if (signal?.aborted) return Promise.reject(abortError());
+  if (milliseconds <= 0) return Promise.resolve();
+  return new Promise((resolve, reject) => {
+    let timer: ReturnType<typeof setTimeout>;
+    let onAbort: () => void;
+    const cleanup = () => signal?.removeEventListener("abort", onAbort);
+    onAbort = () => {
+      clearTimeout(timer);
+      cleanup();
+      reject(abortError());
+    };
+    timer = setTimeout(() => {
+      cleanup();
+      resolve();
+    }, milliseconds);
+    signal?.addEventListener("abort", onAbort, { once: true });
+  });
+}
+
+function abortError(): Error {
+  if (typeof DOMException !== "undefined") return new DOMException("The operation was aborted", "AbortError");
+  return Object.assign(new Error("The operation was aborted"), { name: "AbortError" });
+}
+
+async function credentialValue(client: ConfiguredClient, scheme: string): Promise<string | undefined> {
+  const cached = client.authValues[scheme];
+  if (cached !== undefined) return cached;
+  const source = client.auth?.[scheme];
+  try {
+    if (typeof source === "string") return source;
+    if (typeof source === "function") return (await source()) ?? undefined;
+    if (source !== undefined) return (await source.get()) ?? undefined;
+  } catch (cause) {
+    throw new CredentialSourceError(scheme, cause);
+  }
+  return undefined;
 }
 
 function withResponseHeaders(
@@ -249,13 +347,13 @@ function parseNumber(value: string): number {
   return parsed;
 }
 
-function captureCredential(
-  client: ClientOptions,
+async function captureCredential(
+  client: ConfiguredClient,
   response: Response,
   provides: { scheme: string; value: { from: string; pointer?: string; name?: string } } | undefined,
   value: unknown,
   includeBody: boolean,
-): void {
+): Promise<void> {
   if (!provides) return;
   const locator = provides.value;
   let credential: unknown;
@@ -266,7 +364,16 @@ function captureCredential(
   } else if (locator.from === "set_cookie") {
     credential = cookieValue(response.headers.get("set-cookie"), locator.name ?? "");
   }
-  if (credential !== undefined && credential !== null) client.auth![provides.scheme] = String(credential);
+  if (credential !== undefined && credential !== null) {
+    const nextCredential = String(credential);
+    const source = client.auth?.[provides.scheme];
+    try {
+      if (source !== undefined && typeof source === "object") await source.set(nextCredential);
+    } catch (cause) {
+      throw new CredentialSourceError(provides.scheme, cause);
+    }
+    client.authValues[provides.scheme] = nextCredential;
+  }
 }
 
 type SseStreamFailure = { kind: "stream_error"; cause: unknown } | { kind: "unknown_event"; event: string } | { kind: "invalid_event"; event: string; cause: unknown } | { kind: "server_error"; body: unknown };

@@ -427,7 +427,15 @@ mod tests {
         assert!(client.contains("attachment.headers"));
         assert!(client.contains("signal?: AbortSignal"));
         assert!(client.contains("timeout?: number"));
-        assert!(client.contains("signal = timeoutController?.signal ?? client.signal"));
+        assert!(client.contains("export type CallOptions"));
+        assert!(client.contains("callOptions?.timeout ?? client.timeout"));
+        assert!(client.contains("callOptions?.signal ?? client.signal"));
+        assert!(client.contains("options?: CallOptions"));
+        assert!(client.contains("export type RetryOptions"));
+        assert!(client.contains("retry?: RetryOptions | false"));
+        assert!(client.contains("fetchWithRetry"));
+        assert!(client.contains("retry-after"));
+        assert!(client.contains("idempotent: boolean"));
         assert!(client.contains("setTimeout"));
         assert!(client.contains("kind: \"timeout\""));
         assert!(client.contains("kind: \"aborted\""));
@@ -437,7 +445,11 @@ mod tests {
         assert!(client.contains("ResponseWithHeaders"));
         assert!(client.contains("withResponseHeaders"));
         assert!(client.contains("return { value, headers }"));
-        assert!(client.contains("client.auth![provides.scheme]"));
+        assert!(client.contains("export type TokenStore"));
+        assert!(client.contains("export type CredentialSource"));
+        assert!(client.contains("kind: \"auth_source\""));
+        assert!(client.contains("await source.set(nextCredential)"));
+        assert!(client.contains("client.authValues[provides.scheme]"));
         assert!(client.contains("AsyncIterable<Result<EventsWatchEvent, EventsWatchStreamError>>"));
         assert!(client.contains(
             "ResponseWithHeaders<AsyncIterable<Result<EventsWatchEvent, EventsWatchStreamError>>"

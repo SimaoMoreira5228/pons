@@ -53,8 +53,10 @@ pub(super) fn emit(
     );
     output.push_str(&auth_types(document));
     output.push_str(&type_definitions(document)?);
-    output.push_str("\nexport type AuthAttachment = { headers?: Record<string, string>; query?: Record<string, string>; cookies?: Record<string, string> };\nexport type AuthAdapter = (context: { scheme: string; method: string; url: URL; headers: Headers }) => AuthAttachment | Promise<AuthAttachment>;\nexport type ResponseWithHeaders<T, H> = { value: T; headers: H };\nexport type ClientFailure = { kind: \"network\"; cause: unknown } | { kind: \"timeout\"; afterMs: number } | { kind: \"aborted\"; cause: unknown } | { kind: \"auth_adapter\"; scheme: string; cause: unknown } | { kind: \"protocol\"; message: string } | { kind: \"unexpected_http\"; status: number; body: unknown } | { kind: \"auth\"; schemes: string[] };\n\n");
-    output.push_str("export type ClientOptions = { baseUrl: string; headers?: HeadersInit; auth?: Record<string, string>; authAdapters?: Record<string, AuthAdapter>; fetch?: typeof fetch; signal?: AbortSignal; timeout?: number };\n\n");
+    output.push_str("\nexport type AuthAttachment = { headers?: Record<string, string>; query?: Record<string, string>; cookies?: Record<string, string> };\nexport type AuthAdapter = (context: { scheme: string; method: string; url: URL; headers: Headers }) => AuthAttachment | Promise<AuthAttachment>;\nexport type TokenStore = { get(): string | undefined | Promise<string | undefined>; set(value: string): void | Promise<void>; clear(): void | Promise<void> };\nexport type CredentialSource = string | (() => string | undefined | Promise<string | undefined>) | TokenStore;\nexport type ResponseWithHeaders<T, H> = { value: T; headers: H };\nexport type ClientFailure = { kind: \"network\"; cause: unknown } | { kind: \"timeout\"; afterMs: number } | { kind: \"aborted\"; cause: unknown } | { kind: \"auth_adapter\"; scheme: string; cause: unknown } | { kind: \"auth_source\"; scheme: string; cause: unknown } | { kind: \"protocol\"; message: string } | { kind: \"unexpected_http\"; status: number; body: unknown } | { kind: \"auth\"; schemes: string[] };\n\n");
+    output.push_str("export type RetryOptions = { attempts?: number; backoffMs?: number; maxBackoffMs?: number; jitterMs?: number };\n");
+    output.push_str("export type CallOptions = { signal?: AbortSignal; timeout?: number; retry?: RetryOptions | false };\n");
+    output.push_str("export type ClientOptions = { baseUrl: string; headers?: HeadersInit; auth?: Record<string, CredentialSource>; authAdapters?: Record<string, AuthAdapter>; fetch?: typeof fetch; signal?: AbortSignal; timeout?: number; retry?: RetryOptions };\n\n");
     output.push_str(runtime::render());
 
     let mut tree = Node::new();
@@ -98,7 +100,7 @@ pub(super) fn emit(
         }
         node.operations.push((leaf, function));
     }
-    output.push_str("export function createClient(client: ClientOptions) {\n  const auth = { ...client.auth };\n  const configured = { ...client, auth };\n  return ");
+    output.push_str("export function createClient(client: ClientOptions) {\n  const auth = { ...client.auth };\n  const authValues: Record<string, string> = {};\n  const configured = { ...client, auth, authValues };\n  return ");
     output.push_str(&tree.render(2));
     output.push_str(";\n}\n");
     Ok(output)
@@ -244,17 +246,20 @@ fn operation_function(
         })
         .unwrap_or_else(|| "undefined".into());
     let method = format!("{:?}", operation.method).to_uppercase();
-    let args_type = if args.is_empty() {
-        "() =>".to_owned()
+    let (args_type, options) = if args.is_empty() {
+        ("(_options?: CallOptions) =>".to_owned(), "_options")
     } else {
-        format!("(args: {args_name}) =>")
+        (
+            format!("(args: {args_name}, options?: CallOptions) =>"),
+            "options",
+        )
     };
     let declarations = format!(
         "export type {args_name} = {{ {args} }};\n{stream_types}export type {success_name} = {success};\nexport type {error_name} = {failure};\n",
     );
     let function = format!(
-        "{args_type} request<{success_name}, {error_name}>(configured, {method:?}, {path}, {query}, {headers}, {body}, {content}, [{groups}], {body_schema}, [{response_schemas}], [{error_schemas}], {}, {}, {provides})",
-        operation.auth.optional, preserve_wide_integers,
+        "{args_type} request<{success_name}, {error_name}>(configured, {method:?}, {path}, {query}, {headers}, {body}, {content}, [{groups}], {body_schema}, [{response_schemas}], [{error_schemas}], {}, {}, {provides}, {options}, {})",
+        operation.auth.optional, preserve_wide_integers, operation.semantics.idempotent,
     );
     Ok((declarations, function))
 }
