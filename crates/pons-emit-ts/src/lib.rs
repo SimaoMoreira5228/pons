@@ -67,18 +67,19 @@ pub fn emit_with_mode(document: &Document, mode: EmitMode) -> Result<EmitOutput,
         ));
     }
     if document.operations.iter().any(|operation| {
-        operation
-            .stream
-            .as_ref()
-            .is_some_and(|stream| !matches!(&stream.kind, StreamKind::Sse { .. }))
-            || operation.stream.is_none()
-                && operation
-                    .responses
-                    .iter()
-                    .any(|response| response.content == pons_ir::ContentKind::Stream)
+        operation.stream.as_ref().is_some_and(|stream| {
+            !matches!(
+                &stream.kind,
+                StreamKind::Sse { .. } | StreamKind::Ndjson { .. }
+            )
+        }) || operation.stream.is_none()
+            && operation
+                .responses
+                .iter()
+                .any(|response| response.content == pons_ir::ContentKind::Stream)
     }) {
         return Err(EmitError(
-            "the TypeScript emitter currently supports SSE streams only".into(),
+            "the TypeScript emitter supports SSE and NDJSON streams only".into(),
         ));
     }
     let wide_integers = wide_integer_references(&document);
@@ -420,7 +421,15 @@ mod tests {
         assert!(client.contains("auth"));
         assert!(client.contains("neverthrow"));
         assert!(client.contains("kind: \"api_key\", location: \"header\""));
+        assert!(client.contains("signal?: AbortSignal"));
+        assert!(client.contains("timeout?: number"));
+        assert!(client.contains("signal = timeoutController?.signal ?? client.signal"));
+        assert!(client.contains("setTimeout"));
+        assert!(client.contains("kind: \"timeout\""));
+        assert!(client.contains("kind: \"aborted\""));
         assert!(client.contains("body: Extract<Types.LoginError"));
+        assert!(client.contains("headers: Headers"));
+        assert!(client.contains("headers: response.headers"));
         assert!(client.contains("client.auth![provides.scheme]"));
         assert!(client.contains("AsyncIterable<Result<EventsWatchEvent, EventsWatchStreamError>>"));
         assert!(client.contains("event: \"user\""));
@@ -429,7 +438,8 @@ mod tests {
         assert!(client.contains("missing required response header"));
         assert!(client.contains("expectedContentTypes"));
         assert!(client.contains("application/problem+json"));
-        assert!(client.contains("stream: \"text/event-stream\""));
+        assert!(client.contains("stream === \"ndjson\""));
+        assert!(client.contains("\"text/event-stream\""));
         assert!(client.contains("actualContentType !== expectedContentType"));
         assert!(client.contains("const text = await response.text()"));
         assert!(client.contains("rawValue = parseJson(text, preserveWideIntegers)"));
@@ -580,16 +590,20 @@ mod tests {
     }
 
     #[test]
-    fn rejects_unsupported_streams_instead_of_emitting_a_false_contract() {
+    fn emits_ndjson_streams_and_rejects_other_stream_kinds() {
         let document: Document =
             serde_json::from_str(include_str!("../../../fixtures/login.json")).unwrap();
         let mut document = document;
-        let operation = document
+        let stream_index = document
             .operations
-            .iter_mut()
-            .find(|operation| operation.stream.is_some())
+            .iter()
+            .position(|operation| operation.stream.is_some())
             .unwrap();
-        operation.stream.as_mut().unwrap().kind = StreamKind::Ndjson {
+        document.operations[stream_index]
+            .stream
+            .as_mut()
+            .unwrap()
+            .kind = StreamKind::Ndjson {
             item: pons_ir::TypeRef::Inline(pons_ir::InlineType::String {
                 format: None,
                 min_length: None,
@@ -597,7 +611,21 @@ mod tests {
                 pattern: None,
             }),
         };
+        let files = super::emit(&document).unwrap();
+        let client = files.iter().find(|file| file.path == "client.ts").unwrap();
+        assert!(client.content.contains("readNdjson"));
+        assert!(client.content.contains("application/x-ndjson"));
+        assert!(client.content.contains("AsyncIterable<Result"));
+
+        document.operations[stream_index]
+            .stream
+            .as_mut()
+            .unwrap()
+            .kind = StreamKind::Websocket {
+            client: pons_ir::TypeRef::Inline(pons_ir::InlineType::Any),
+            server: pons_ir::TypeRef::Inline(pons_ir::InlineType::Any),
+        };
         let error = super::emit(&document).unwrap_err();
-        assert!(error.0.contains("SSE streams only"));
+        assert!(error.0.contains("SSE and NDJSON streams only"));
     }
 }

@@ -52,8 +52,8 @@ pub(super) fn emit(
     );
     output.push_str(&auth_types(document));
     output.push_str(&type_definitions(document)?);
-    output.push_str("\nexport type ClientFailure = { kind: \"network\"; cause: unknown } | { kind: \"protocol\"; message: string } | { kind: \"unexpected_http\"; status: number; body: unknown } | { kind: \"auth\"; schemes: string[] };\n\n");
-    output.push_str("export type ClientOptions = { baseUrl: string; headers?: HeadersInit; auth?: Record<string, string>; fetch?: typeof fetch };\n\n");
+    output.push_str("\nexport type ClientFailure = { kind: \"network\"; cause: unknown } | { kind: \"timeout\"; afterMs: number } | { kind: \"aborted\"; cause: unknown } | { kind: \"protocol\"; message: string } | { kind: \"unexpected_http\"; status: number; body: unknown } | { kind: \"auth\"; schemes: string[] };\n\n");
+    output.push_str("export type ClientOptions = { baseUrl: string; headers?: HeadersInit; auth?: Record<string, string>; fetch?: typeof fetch; signal?: AbortSignal; timeout?: number };\n\n");
     output.push_str(runtime::render());
 
     let mut tree = Node::new();
@@ -358,6 +358,18 @@ fn response_type(
             ),
         ));
     }
+    if let Some(StreamKind::Ndjson { item }) = operation.stream.as_ref().map(|stream| &stream.kind)
+    {
+        let item_name = format!("{name}Item");
+        let failure_name = format!("{name}StreamError");
+        return Ok((
+            format!("AsyncIterable<Result<{item_name}, {failure_name}>>"),
+            format!(
+                "export type {item_name} = {};\nexport type {failure_name} = {{ kind: \"stream_error\"; cause: unknown }} | {{ kind: \"invalid_item\"; cause: unknown }};\n",
+                types::type_ref(item, document, names, mode)?
+            ),
+        ));
+    }
     let bodies = operation
         .responses
         .iter()
@@ -395,8 +407,12 @@ fn error_type(
             .map(|body| types::type_ref(body, document, names, mode))
             .transpose()?;
         failures.push(match body {
-            Some(body) => format!("{{ kind: \"http\"; status: {status}; body: {body} }}"),
-            None => format!("{{ kind: \"http\"; status: {status}; body: unknown }}"),
+            Some(body) => {
+                format!("{{ kind: \"http\"; status: {status}; body: {body}; headers: Headers }}")
+            }
+            None => {
+                format!("{{ kind: \"http\"; status: {status}; body: unknown; headers: Headers }}")
+            }
         });
     }
     Ok(failures.join(" | "))
@@ -433,8 +449,9 @@ fn content_name(content: ContentKind) -> &'static str {
 }
 
 fn response_descriptors(operation: &Operation) -> Result<String, EmitError> {
-    let events = match operation.stream.as_ref().map(|stream| &stream.kind) {
-        Some(StreamKind::Sse { events }) => Some(
+    let stream_descriptor = match operation.stream.as_ref().map(|stream| &stream.kind) {
+        Some(StreamKind::Sse { events }) => Some(format!(
+            "stream: \"sse\", events: [{}]",
             events
                 .iter()
                 .map(|event| {
@@ -445,8 +462,12 @@ fn response_descriptors(operation: &Operation) -> Result<String, EmitError> {
                     ))
                 })
                 .collect::<Result<Vec<_>, EmitError>>()?
-                .join(", "),
-        ),
+                .join(", ")
+        )),
+        Some(StreamKind::Ndjson { item }) => Some(format!(
+            "stream: \"ndjson\", item: {}",
+            type_ref_json(item)?
+        )),
         _ => None,
     };
     operation
@@ -459,10 +480,10 @@ fn response_descriptors(operation: &Operation) -> Result<String, EmitError> {
                 .map(type_ref_json)
                 .transpose()?
                 .unwrap_or_else(|| "undefined".into());
-            let events = if response.content == ContentKind::Stream {
-                events
+            let stream = if response.content == ContentKind::Stream {
+                stream_descriptor
                     .as_ref()
-                    .map_or(String::new(), |events| format!(", events: [{events}]"))
+                    .map_or(String::new(), |stream| format!(", {stream}"))
             } else {
                 String::new()
             };
@@ -484,7 +505,7 @@ fn response_descriptors(operation: &Operation) -> Result<String, EmitError> {
                 format!(", headers: [{headers}]")
             };
             Ok(format!(
-                "{{ status: {}, content: {}, schema: {schema}{events}{headers} }}",
+                "{{ status: {}, content: {}, schema: {schema}{stream}{headers} }}",
                 response.status,
                 string(content_name(response.content))
             ))

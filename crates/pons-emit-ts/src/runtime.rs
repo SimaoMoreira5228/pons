@@ -9,12 +9,26 @@ pub(super) fn render() -> &'static str {
   content: string | undefined,
   authGroups: string[][],
   bodySchema: unknown,
-  responses: Array<{ status: number; content: string; schema?: unknown; events?: Array<{ event: string; schema: unknown }>; headers?: Array<{ name: string; required: boolean }> }>,
+  responses: Array<{ status: number; content: string; schema?: unknown; stream?: "sse" | "ndjson"; item?: unknown; events?: Array<{ event: string; schema: unknown }>; headers?: Array<{ name: string; required: boolean }> }>,
   errors: Array<{ status: number | string; content: string; schema?: unknown; events?: Array<{ event: string; schema: unknown }> }>,
   authOptional: boolean,
   preserveWideIntegers: boolean,
   provides: { scheme: string; value: { from: string; pointer?: string; name?: string } } | undefined,
 ): Promise<Result<T, E | ClientFailure>> {
+  const timeoutController = client.timeout === undefined ? undefined : new AbortController();
+  let timedOut = false;
+  const timeoutId = timeoutController === undefined
+    ? undefined
+    : setTimeout(() => {
+        timedOut = true;
+        timeoutController.abort();
+      }, client.timeout);
+  const abortParent = () => timeoutController?.abort();
+  if (timeoutController && client.signal) {
+    if (client.signal.aborted) timeoutController.abort();
+    else client.signal.addEventListener("abort", abortParent, { once: true });
+  }
+  const signal = timeoutController?.signal ?? client.signal;
   try {
     const baseUrl = client.baseUrl.endsWith("/") ? client.baseUrl : `${client.baseUrl}/`;
     const url = new URL(path.replace(/^\/+/, ""), baseUrl);
@@ -57,7 +71,7 @@ pub(super) fn render() -> &'static str {
       else if (definition.kind === "api_key" && definition.location === "query") url.searchParams.set(definition.name!, value);
       else if (definition.kind === "api_key" && definition.location === "cookie") headers.set("cookie", `${definition.name}=${value}`);
     }
-    const init: RequestInit = { method, headers, credentials };
+    const init: RequestInit = { method, headers, credentials, signal };
     if (body !== undefined) {
       const encodedBody = ["json", "problem_json", "form", "multipart"].includes(content ?? "")
         ? encodeWire(body, bodySchema)
@@ -108,9 +122,10 @@ pub(super) fn render() -> &'static str {
       multipart: "multipart/form-data",
       text: "text/plain",
       bytes: "application/octet-stream",
-      stream: "text/event-stream",
     };
-    const expectedContentType = responseKind ? expectedContentTypes[responseKind] : undefined;
+    const expectedContentType = responseKind === "stream"
+      ? responseSchema?.stream === "ndjson" ? "application/x-ndjson" : "text/event-stream"
+      : responseKind ? expectedContentTypes[responseKind] : undefined;
     const actualContentType = responseContent.split(";", 1)[0].trim().toLowerCase();
     if (expectedContentType !== undefined && actualContentType !== expectedContentType) {
       return err({ kind: "protocol", message: `expected ${expectedContentType}, received ${responseContent || "no content type"}` });
@@ -118,6 +133,9 @@ pub(super) fn render() -> &'static str {
     if (declaredSuccess?.content === "stream") {
       if (!response.body) return err({ kind: "protocol", message: "the event stream has no response body" });
       captureCredential(client, response, provides, undefined, false);
+      if (declaredSuccess.stream === "ndjson") {
+        return ok(readNdjson(response.body, declaredSuccess.item, preserveWideIntegers) as T);
+      }
       return ok(readSse(response.body, declaredSuccess?.events ?? [], preserveWideIntegers) as T);
     }
     const jsonResponse = responseKind === "json" || responseKind === "problem_json" ||
@@ -144,13 +162,20 @@ pub(super) fn render() -> &'static str {
       : rawValue;
     if (declaredSuccess === undefined) {
       return declaredError
-        ? err({ kind: "http", status: response.status, body: value } as E)
+        ? err({ kind: "http", status: response.status, body: value, headers: response.headers } as E)
         : err({ kind: "unexpected_http", status: response.status, body: value });
     }
     captureCredential(client, response, provides, value, true);
     return ok(value as T);
   } catch (cause) {
+    if (timedOut) return err({ kind: "timeout", afterMs: client.timeout! });
+    if (typeof DOMException !== "undefined" && cause instanceof DOMException && cause.name === "AbortError") {
+      return err({ kind: "aborted", cause });
+    }
     return err({ kind: "network", cause });
+  } finally {
+    if (timeoutId !== undefined) clearTimeout(timeoutId);
+    if (timeoutController && client.signal) client.signal.removeEventListener("abort", abortParent);
   }
 }
 
@@ -221,6 +246,48 @@ async function* readSse<EventValue>(
           const value = separator < 0 ? "" : line.slice(separator + 1).replace(/^ /, "");
           if (field === "event") eventName = value;
           if (field === "data") data.push(value);
+        }
+        lineEnd = buffer.indexOf("\n");
+      }
+      if (done) break;
+    }
+  } catch (cause) {
+    yield err({ kind: "stream_error", cause });
+  } finally {
+    try {
+      await reader.cancel();
+    } catch {}
+    reader.releaseLock();
+  }
+}
+
+type NdjsonStreamFailure = { kind: "stream_error"; cause: unknown } | { kind: "invalid_item"; cause: unknown };
+
+async function* readNdjson<Item>(
+  body: ReadableStream<Uint8Array>,
+  schema: unknown,
+  preserveWideIntegers: boolean,
+): AsyncIterable<Result<Item, NdjsonStreamFailure>> {
+  const reader = body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = "";
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      buffer += decoder.decode(value, { stream: !done });
+      if (done) buffer += "\n";
+      let lineEnd = buffer.indexOf("\n");
+      while (lineEnd >= 0) {
+        let line = buffer.slice(0, lineEnd);
+        buffer = buffer.slice(lineEnd + 1);
+        if (line.endsWith("\r")) line = line.slice(0, -1);
+        if (line.trim() !== "") {
+          try {
+            const parsed = parseJson(line, preserveWideIntegers);
+            yield ok(decodeWire(parsed, schema) as Item);
+          } catch (cause) {
+            yield err({ kind: "invalid_item", cause });
+          }
         }
         lineEnd = buffer.indexOf("\n");
       }
