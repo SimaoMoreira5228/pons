@@ -1,5 +1,7 @@
 pub(super) fn render() -> &'static str {
-    r#"async function request<T, E>(
+    r#"class ResponseHeaderDecodeError extends Error {}
+
+async function request<T, E>(
   client: ClientOptions,
   method: string,
   path: string,
@@ -9,7 +11,7 @@ pub(super) fn render() -> &'static str {
   content: string | undefined,
   authGroups: string[][],
   bodySchema: unknown,
-  responses: Array<{ status: number; content: string; schema?: unknown; stream?: "sse" | "ndjson"; item?: unknown; events?: Array<{ event: string; schema: unknown }>; headers?: Array<{ name: string; required: boolean }> }>,
+  responses: Array<{ status: number; content: string; schema?: unknown; stream?: "sse" | "ndjson"; item?: unknown; events?: Array<{ event: string; schema: unknown }>; headers?: Array<{ name: string; required: boolean; schema: unknown }> }>,
   errors: Array<{ status: number | string; content: string; schema?: unknown; events?: Array<{ event: string; schema: unknown }> }>,
   authOptional: boolean,
   preserveWideIntegers: boolean,
@@ -45,10 +47,13 @@ pub(super) fn render() -> &'static str {
       if (value !== undefined && value !== null) headers.set(key, String(value));
     }
     let credentials: RequestCredentials | undefined;
-    const activeGroup = authGroups.find((group) => group.every((scheme) =>
-      (client.auth?.[scheme] !== undefined || authSchemes[scheme]?.kind === "cookie") &&
-      authSchemes[scheme]?.kind !== "custom"
-    ));
+    const activeGroup = authGroups.find((group) => group.every((scheme) => {
+      const definition = authSchemes[scheme];
+      return definition !== undefined && (
+        (definition.kind === "custom" && client.authAdapters?.[scheme] !== undefined) ||
+        (definition.kind !== "custom" && (client.auth?.[scheme] !== undefined || definition.kind === "cookie"))
+      );
+    }));
     if (authGroups.length && !activeGroup && !authOptional) {
       return err({ kind: "auth", schemes: authGroups.flat() });
     }
@@ -56,6 +61,19 @@ pub(super) fn render() -> &'static str {
       const value = client.auth?.[scheme];
       const definition = authSchemes[scheme];
       if (definition === undefined) continue;
+      if (definition.kind === "custom") {
+        const adapter = client.authAdapters?.[scheme];
+        if (adapter === undefined) continue;
+        try {
+          const attachment = await adapter({ scheme, method, url, headers });
+          for (const [key, value] of Object.entries(attachment.headers ?? {})) headers.set(key, value);
+          for (const [key, value] of Object.entries(attachment.query ?? {})) url.searchParams.set(key, value);
+          for (const [key, value] of Object.entries(attachment.cookies ?? {})) headers.append("cookie", `${key}=${value}`);
+        } catch (cause) {
+          return err({ kind: "auth_adapter", scheme, cause });
+        }
+        continue;
+      }
       if (definition.kind === "cookie") {
         credentials = "include";
         continue;
@@ -134,9 +152,9 @@ pub(super) fn render() -> &'static str {
       if (!response.body) return err({ kind: "protocol", message: "the event stream has no response body" });
       captureCredential(client, response, provides, undefined, false);
       if (declaredSuccess.stream === "ndjson") {
-        return ok(readNdjson(response.body, declaredSuccess.item, preserveWideIntegers) as T);
+        return ok(withResponseHeaders(readNdjson(response.body, declaredSuccess.item, preserveWideIntegers), response, declaredSuccess, preserveWideIntegers) as T);
       }
-      return ok(readSse(response.body, declaredSuccess?.events ?? [], preserveWideIntegers) as T);
+      return ok(withResponseHeaders(readSse(response.body, declaredSuccess.events ?? [], preserveWideIntegers), response, declaredSuccess, preserveWideIntegers) as T);
     }
     const jsonResponse = responseKind === "json" || responseKind === "problem_json" ||
       (!responseKind && responseContent.includes("json"));
@@ -166,9 +184,10 @@ pub(super) fn render() -> &'static str {
         : err({ kind: "unexpected_http", status: response.status, body: value });
     }
     captureCredential(client, response, provides, value, true);
-    return ok(value as T);
+    return ok(withResponseHeaders(value, response, declaredSuccess, preserveWideIntegers) as T);
   } catch (cause) {
     if (timedOut) return err({ kind: "timeout", afterMs: client.timeout! });
+    if (cause instanceof ResponseHeaderDecodeError) return err({ kind: "protocol", message: cause.message });
     if (typeof DOMException !== "undefined" && cause instanceof DOMException && cause.name === "AbortError") {
       return err({ kind: "aborted", cause });
     }
@@ -177,6 +196,57 @@ pub(super) fn render() -> &'static str {
     if (timeoutId !== undefined) clearTimeout(timeoutId);
     if (timeoutController && client.signal) client.signal.removeEventListener("abort", abortParent);
   }
+}
+
+function withResponseHeaders(
+  value: unknown,
+  response: Response,
+  schema: { headers?: Array<{ name: string; required: boolean; schema: unknown }> } | undefined,
+  preserveWideIntegers: boolean,
+): unknown {
+  if (!schema?.headers) return value;
+  const headers: Record<string, unknown> = {};
+  for (const header of schema.headers) {
+    const headerValue = response.headers.get(header.name);
+    if (headerValue !== null) headers[header.name] = decodeHeaderValue(headerValue, header.schema, preserveWideIntegers);
+  }
+  return { value, headers };
+}
+
+function decodeHeaderValue(value: string, schema: any, preserveWideIntegers: boolean): any {
+  try {
+    if (schema.ref) {
+      const definition = typeDefinitions[schema.ref];
+      if (definition?.kind === "newtype") return decodeHeaderValue(value, definition.inner, preserveWideIntegers);
+      if (definition?.kind === "enum") return value;
+      return decodeWire(JSON.parse(value), schema);
+    }
+    if (schema.kind === "int") {
+      if (schema.wire === "string") return value;
+      return schema.bits > 53 && preserveWideIntegers ? BigInt(value) : parseNumber(value);
+    }
+    if (schema.kind === "float") return parseNumber(value);
+    if (schema.kind === "decimal") return schema.wire === "number" ? parseNumber(value) : value;
+    if (schema.kind === "bool") {
+      if (value === "true") return true;
+      if (value === "false") return false;
+      throw new Error("invalid boolean");
+    }
+    if (schema.kind === "nullable") return decodeHeaderValue(value, schema.inner, preserveWideIntegers);
+    if (schema.kind === "array" || schema.kind === "map" || schema.kind === "tuple") {
+      return decodeWire(JSON.parse(value), schema);
+    }
+    return value;
+  } catch (cause) {
+    if (cause instanceof ResponseHeaderDecodeError) throw cause;
+    throw new ResponseHeaderDecodeError(`invalid response header value ${JSON.stringify(value)}`);
+  }
+}
+
+function parseNumber(value: string): number {
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed)) throw new Error("invalid number");
+  return parsed;
 }
 
 function captureCredential(

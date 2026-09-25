@@ -254,6 +254,16 @@ async fn raw_response() -> axum::response::Response {
     StatusCode::OK.into_response()
 }
 
+async fn dynamic_status() -> (StatusCode, pons_axum::extract::Json<User>) {
+    (
+        StatusCode::IM_A_TEAPOT,
+        pons_axum::extract::Json(User {
+            id: 1,
+            name: "Ada".into(),
+        }),
+    )
+}
+
 fn info() -> Info {
     Info {
         title: "Users".into(),
@@ -340,6 +350,19 @@ fn raw_axum_boundaries_are_diagnosed_without_inventing_contracts() {
     assert!(response.responses.is_empty());
     assert!(response.diagnostics.iter().any(|diagnostic| {
         diagnostic.code == "PONS-W101" && diagnostic.message.contains("raw Axum responses")
+    }));
+}
+
+#[test]
+fn dynamic_response_status_is_diagnosed_without_inventing_a_contract() {
+    let document = Router::<()>::new(info())
+        .route("/dynamic", get(dynamic_status))
+        .into_document()
+        .unwrap();
+    let operation = &document.operations[0];
+    assert!(operation.responses.is_empty());
+    assert!(operation.diagnostics.iter().any(|diagnostic| {
+        diagnostic.code == "PONS-W102" && diagnostic.message.contains("dynamic response status")
     }));
 }
 

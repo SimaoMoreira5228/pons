@@ -600,6 +600,18 @@ impl DescribeResponse for axum::response::Response {
     }
 }
 
+impl<R> DescribeResponse for (axum::http::StatusCode, R)
+where
+    R: DescribeResponse,
+{
+    fn describe(cx: &mut OperationCx) {
+        cx.diagnostic(
+            "PONS-W102",
+            "dynamic response status is not representable in the current IR; use WithStatus",
+        );
+    }
+}
+
 impl DescribeResponse for () {
     fn describe(cx: &mut OperationCx) {
         cx.empty_response(200);

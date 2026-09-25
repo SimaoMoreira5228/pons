@@ -2,7 +2,8 @@ use std::collections::BTreeMap;
 
 use pons_ir::{
     ApiKeyLocation, AuthScheme, ContentKind, CredentialLocator, Document, ErrorContent,
-    ErrorResponse, ErrorStatus, Operation, PathSegment, Presence, StreamKind, TypeRef,
+    ErrorResponse, ErrorStatus, Operation, PathSegment, Presence, Response, ResponseHeader,
+    StreamKind, TypeRef,
 };
 
 use crate::runtime;
@@ -52,8 +53,8 @@ pub(super) fn emit(
     );
     output.push_str(&auth_types(document));
     output.push_str(&type_definitions(document)?);
-    output.push_str("\nexport type ClientFailure = { kind: \"network\"; cause: unknown } | { kind: \"timeout\"; afterMs: number } | { kind: \"aborted\"; cause: unknown } | { kind: \"protocol\"; message: string } | { kind: \"unexpected_http\"; status: number; body: unknown } | { kind: \"auth\"; schemes: string[] };\n\n");
-    output.push_str("export type ClientOptions = { baseUrl: string; headers?: HeadersInit; auth?: Record<string, string>; fetch?: typeof fetch; signal?: AbortSignal; timeout?: number };\n\n");
+    output.push_str("\nexport type AuthAttachment = { headers?: Record<string, string>; query?: Record<string, string>; cookies?: Record<string, string> };\nexport type AuthAdapter = (context: { scheme: string; method: string; url: URL; headers: Headers }) => AuthAttachment | Promise<AuthAttachment>;\nexport type ResponseWithHeaders<T, H> = { value: T; headers: H };\nexport type ClientFailure = { kind: \"network\"; cause: unknown } | { kind: \"timeout\"; afterMs: number } | { kind: \"aborted\"; cause: unknown } | { kind: \"auth_adapter\"; scheme: string; cause: unknown } | { kind: \"protocol\"; message: string } | { kind: \"unexpected_http\"; status: number; body: unknown } | { kind: \"auth\"; schemes: string[] };\n\n");
+    output.push_str("export type ClientOptions = { baseUrl: string; headers?: HeadersInit; auth?: Record<string, string>; authAdapters?: Record<string, AuthAdapter>; fetch?: typeof fetch; signal?: AbortSignal; timeout?: number };\n\n");
     output.push_str(runtime::render());
 
     let mut tree = Node::new();
@@ -345,8 +346,10 @@ fn response_type(
                 types::type_ref(&event.data, document, names, mode)?
             ));
         }
+        let stream_type = format!("AsyncIterable<Result<{event_name}, {failure_name}>>");
+        let response_type = stream_response_type(operation, &stream_type, document, names, mode)?;
         return Ok((
-            format!("AsyncIterable<Result<{event_name}, {failure_name}>>"),
+            response_type,
             format!(
                 "export type {event_name} = {};\nexport type {failure_name} = {};\n",
                 if variants.is_empty() {
@@ -362,8 +365,9 @@ fn response_type(
     {
         let item_name = format!("{name}Item");
         let failure_name = format!("{name}StreamError");
+        let stream_type = format!("AsyncIterable<Result<{item_name}, {failure_name}>>");
         return Ok((
-            format!("AsyncIterable<Result<{item_name}, {failure_name}>>"),
+            stream_response_type(operation, &stream_type, document, names, mode)?,
             format!(
                 "export type {item_name} = {};\nexport type {failure_name} = {{ kind: \"stream_error\"; cause: unknown }} | {{ kind: \"invalid_item\"; cause: unknown }};\n",
                 types::type_ref(item, document, names, mode)?
@@ -373,9 +377,12 @@ fn response_type(
     let bodies = operation
         .responses
         .iter()
-        .map(|response| match &response.body {
-            Some(body) => types::type_ref(body, document, names, mode),
-            None => Ok("void".into()),
+        .map(|response| {
+            let body = match &response.body {
+                Some(body) => types::type_ref(body, document, names, mode),
+                None => Ok("void".into()),
+            }?;
+            response_value_type(body, response, document, names, mode)
         })
         .collect::<Result<Vec<_>, _>>()?;
     Ok((
@@ -386,6 +393,65 @@ fn response_type(
         },
         String::new(),
     ))
+}
+
+fn stream_response_type(
+    operation: &Operation,
+    stream_type: &str,
+    document: &Document,
+    names: &BTreeMap<String, String>,
+    mode: EmitMode,
+) -> Result<String, EmitError> {
+    let responses = operation
+        .responses
+        .iter()
+        .filter(|response| response.content == ContentKind::Stream)
+        .map(|response| response_value_type(stream_type.into(), response, document, names, mode))
+        .collect::<Result<Vec<_>, _>>()?;
+    if responses.is_empty() {
+        Ok(stream_type.into())
+    } else {
+        Ok(responses.join(" | "))
+    }
+}
+
+fn response_value_type(
+    body: String,
+    response: &Response,
+    document: &Document,
+    names: &BTreeMap<String, String>,
+    mode: EmitMode,
+) -> Result<String, EmitError> {
+    if response.headers.is_empty() {
+        return Ok(body);
+    }
+    let headers = response_headers_type(&response.headers, document, names, mode)?;
+    Ok(format!("ResponseWithHeaders<{body}, {headers}>"))
+}
+
+fn response_headers_type(
+    headers: &[ResponseHeader],
+    document: &Document,
+    names: &BTreeMap<String, String>,
+    mode: EmitMode,
+) -> Result<String, EmitError> {
+    let fields = headers
+        .iter()
+        .map(|header| {
+            let optional = if header.presence == Presence::Optional {
+                "?"
+            } else {
+                ""
+            };
+            Ok(format!(
+                "{}{}: {}",
+                string(&header.wire),
+                optional,
+                types::type_ref(&header.ty, document, names, mode)?
+            ))
+        })
+        .collect::<Result<Vec<_>, EmitError>>()?;
+    Ok(format!("{{ {} }}", fields.join("; ")))
 }
 
 fn error_type(
@@ -491,13 +557,14 @@ fn response_descriptors(operation: &Operation) -> Result<String, EmitError> {
                 .headers
                 .iter()
                 .map(|header| {
-                    format!(
-                        "{{ name: {}, required: {} }}",
+                    Ok(format!(
+                        "{{ name: {}, required: {}, schema: {} }}",
                         string(&header.wire),
-                        header.presence == Presence::Required
-                    )
+                        header.presence == Presence::Required,
+                        type_ref_json(&header.ty)?
+                    ))
                 })
-                .collect::<Vec<_>>()
+                .collect::<Result<Vec<_>, EmitError>>()?
                 .join(", ");
             let headers = if headers.is_empty() {
                 String::new()

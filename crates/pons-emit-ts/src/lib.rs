@@ -421,6 +421,10 @@ mod tests {
         assert!(client.contains("auth"));
         assert!(client.contains("neverthrow"));
         assert!(client.contains("kind: \"api_key\", location: \"header\""));
+        assert!(client.contains("AuthAttachment"));
+        assert!(client.contains("authAdapters?: Record<string, AuthAdapter>"));
+        assert!(client.contains("kind: \"auth_adapter\""));
+        assert!(client.contains("attachment.headers"));
         assert!(client.contains("signal?: AbortSignal"));
         assert!(client.contains("timeout?: number"));
         assert!(client.contains("signal = timeoutController?.signal ?? client.signal"));
@@ -430,11 +434,17 @@ mod tests {
         assert!(client.contains("body: Extract<Types.LoginError"));
         assert!(client.contains("headers: Headers"));
         assert!(client.contains("headers: response.headers"));
+        assert!(client.contains("ResponseWithHeaders"));
+        assert!(client.contains("withResponseHeaders"));
+        assert!(client.contains("return { value, headers }"));
         assert!(client.contains("client.auth![provides.scheme]"));
         assert!(client.contains("AsyncIterable<Result<EventsWatchEvent, EventsWatchStreamError>>"));
+        assert!(client.contains(
+            "ResponseWithHeaders<AsyncIterable<Result<EventsWatchEvent, EventsWatchStreamError>>"
+        ));
         assert!(client.contains("event: \"user\""));
         assert!(client.contains("name === \"error\""));
-        assert!(client.contains("headers: [{ name: \"X-Trace-ID\", required: true }]"));
+        assert!(client.contains("headers: [{ name: \"X-Trace-ID\", required: true, schema:"));
         assert!(client.contains("missing required response header"));
         assert!(client.contains("expectedContentTypes"));
         assert!(client.contains("application/problem+json"));
@@ -470,7 +480,9 @@ mod tests {
         let stream_capture = client
             .find("captureCredential(client, response, provides, undefined, false)")
             .unwrap();
-        let stream_return = client.find("return ok(readSse").unwrap();
+        let stream_return = client
+            .find("return ok(withResponseHeaders(readSse")
+            .unwrap();
         assert!(stream_capture < stream_return);
     }
 
@@ -484,7 +496,7 @@ mod tests {
         assert!(
             client
                 .content
-                .contains("headers: [{ name: \"X-Trace-ID\", required: false }]")
+                .contains("headers: [{ name: \"X-Trace-ID\", required: false, schema:")
         );
     }
 
