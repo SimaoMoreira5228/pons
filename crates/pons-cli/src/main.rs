@@ -7,9 +7,10 @@ use std::io::Write;
 use std::path::Path;
 use std::process::ExitCode;
 
+use pons_emit_ts::ErrorStrategy;
 use pons_ir::{ChangeLevel, Document};
 
-const HELP: &str = "Usage: pons <command> <ir.json> [arguments]\n\nCommands:\n  check <ir.json>                              Validate an IR document\n  fmt <ir.json>                                Rewrite an IR document in canonical form\n  diff <old.json> <new.json>                   Classify changes between two IR documents\n  emit --target <name> <ir.json> <output-dir> [--strict|--lossy]\n                                                Generate files (built-in: ts, openapi)\n      --strict                                 Reject unsupported capabilities (default)\n      --lossy                                  Allow explicitly lossy output with warnings\n";
+const HELP: &str = "Usage: pons <command> <ir.json> [arguments]\n\nCommands:\n  check <ir.json>                              Validate an IR document\n  fmt <ir.json>                                Rewrite an IR document in canonical form\n  diff <old.json> <new.json>                   Classify changes between two IR documents\n  emit --target <name> <ir.json> <output-dir> [--strict|--lossy] [--errors <neverthrow|throw>]\n                                                Generate files (built-in: ts, openapi)\n      --strict                                 Reject unsupported capabilities (default)\n      --lossy                                  Allow explicitly lossy output with warnings\n      --errors <neverthrow|throw>              Select the TypeScript error strategy\n";
 
 fn main() -> ExitCode {
     match run(env::args_os().skip(1).collect()) {
@@ -70,20 +71,39 @@ fn run(args: Vec<OsString>) -> Result<(), CliError> {
         let mut strict = true;
         let mut strict_flag = false;
         let mut lossy_flag = false;
-        for flag in &args[5..] {
-            match flag.to_str() {
+        let mut errors_flag = false;
+        let mut error_strategy = ErrorStrategy::Neverthrow;
+        let mut index = 5;
+        while index < args.len() {
+            match args[index].to_str() {
                 Some("--strict") if !strict_flag && !lossy_flag => strict_flag = true,
                 Some("--lossy") if !strict_flag && !lossy_flag => {
                     strict_flag = true;
                     lossy_flag = true;
                     strict = false;
                 }
+                Some("--errors") if !errors_flag => {
+                    errors_flag = true;
+                    index += 1;
+                    error_strategy = match args.get(index).and_then(|value| value.to_str()) {
+                        Some("neverthrow") => ErrorStrategy::Neverthrow,
+                        Some("throw") => ErrorStrategy::Throw,
+                        _ => return Err(CliError::Usage(HELP.into())),
+                    };
+                }
                 _ => return Err(CliError::Usage(HELP.into())),
             }
+            index += 1;
         }
         let document = read_document(Path::new(&args[3]))?;
         validate(&document)?;
-        return emit::run(target, &document, Path::new(&args[4]), strict);
+        return emit::run(
+            target,
+            &document,
+            Path::new(&args[4]),
+            strict,
+            error_strategy,
+        );
     }
     if args.len() != 2 {
         return Err(CliError::Usage(HELP.into()));

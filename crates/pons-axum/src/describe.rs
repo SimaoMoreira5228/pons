@@ -469,7 +469,14 @@ impl OperationCx {
     }
 
     pub fn diagnostic(&mut self, code: &str, message: impl Into<String>) {
-        let message = message.into();
+        self.push_diagnostic(DiagnosticSeverity::Warning, code, message.into());
+    }
+
+    pub fn error(&mut self, code: &str, message: impl Into<String>) {
+        self.push_diagnostic(DiagnosticSeverity::Error, code, message.into());
+    }
+
+    fn push_diagnostic(&mut self, severity: DiagnosticSeverity, code: &str, message: String) {
         if self
             .diagnostics
             .iter()
@@ -478,7 +485,7 @@ impl OperationCx {
             return;
         }
         self.diagnostics.push(Diagnostic {
-            severity: DiagnosticSeverity::Warning,
+            severity,
             code: code.to_owned(),
             message,
             origin: None,
@@ -593,7 +600,7 @@ impl DescribeRequest for axum::body::Bytes {
 
 impl DescribeResponse for axum::response::Response {
     fn describe(cx: &mut OperationCx) {
-        cx.diagnostic(
+        cx.error(
             "PONS-W101",
             "raw Axum responses do not expose status or body; use a typed response wrapper",
         );
@@ -605,7 +612,7 @@ where
     R: DescribeResponse,
 {
     fn describe(cx: &mut OperationCx) {
-        cx.diagnostic(
+        cx.error(
             "PONS-W102",
             "dynamic response status is not representable in the current IR; use WithStatus",
         );

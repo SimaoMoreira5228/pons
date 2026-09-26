@@ -7,7 +7,7 @@ use pons_ir::{
 };
 
 use crate::runtime;
-use crate::{EmitError, EmitMode, camel, pascal, string, types};
+use crate::{EmitError, EmitMode, ErrorStrategy, camel, pascal, string, types};
 
 struct Node {
     children: BTreeMap<String, Node>,
@@ -47,17 +47,18 @@ pub(super) fn emit(
     names: &BTreeMap<String, String>,
     mode: EmitMode,
     preserve_wide_integers: bool,
+    error_strategy: ErrorStrategy,
 ) -> Result<String, EmitError> {
     let mut output = String::from(
         "import { err, ok, type Result } from \"neverthrow\";\nimport type * as Types from \"./types.js\";\n\n",
     );
     output.push_str(&auth_types(document));
     output.push_str(&type_definitions(document)?);
-    output.push_str("\nexport type AuthAttachment = { headers?: Record<string, string>; query?: Record<string, string>; cookies?: Record<string, string> };\nexport type AuthAdapter = (context: { scheme: string; method: string; url: URL; headers: Headers }) => AuthAttachment | Promise<AuthAttachment>;\nexport type TokenStore = { get(): string | undefined | Promise<string | undefined>; set(value: string): void | Promise<void>; clear(): void | Promise<void> };\nexport type CredentialSource = string | (() => string | undefined | Promise<string | undefined>) | TokenStore;\nexport type RequestInterceptor = (context: { url: URL; init: RequestInit }) => void | Promise<void>;\nexport type ResponseInterceptor = (context: { response: Response; url: URL; init: RequestInit }) => void | Promise<void>;\nexport type Interceptors = { request?: RequestInterceptor; response?: ResponseInterceptor };\nexport type ResponseWithHeaders<T, H> = { value: T; headers: H };\nexport type ClientFailure = { kind: \"network\"; cause: unknown } | { kind: \"timeout\"; afterMs: number } | { kind: \"aborted\"; cause: unknown } | { kind: \"auth_adapter\"; scheme: string; cause: unknown } | { kind: \"auth_source\"; scheme: string; cause: unknown } | { kind: \"interceptor\"; phase: \"request\" | \"response\"; cause: unknown } | { kind: \"protocol\"; message: string } | { kind: \"unexpected_http\"; status: number; body: unknown } | { kind: \"auth\"; schemes: string[] };\n\n");
+    output.push_str("\nexport type AuthAttachment = { headers?: Record<string, string>; query?: Record<string, string>; cookies?: Record<string, string> };\nexport type AuthAdapter = (context: { scheme: string; method: string; url: URL; headers: Headers }) => AuthAttachment | Promise<AuthAttachment>;\nexport type TokenStore = { get(): string | undefined | Promise<string | undefined>; set(value: string, expiresAt?: number): void | Promise<void>; clear(): void | Promise<void> };\nexport type CredentialSource = string | (() => string | undefined | Promise<string | undefined>) | TokenStore;\nexport type RequestInterceptor = (context: { url: URL; init: RequestInit }) => void | Promise<void>;\nexport type ResponseInterceptor = (context: { response: Response; url: URL; init: RequestInit }) => void | Promise<void>;\nexport type Interceptors = { request?: RequestInterceptor; response?: ResponseInterceptor };\nexport type ResponseWithHeaders<T, H> = { value: T; headers: H };\nexport type ClientFailure = { kind: \"network\"; cause: unknown } | { kind: \"timeout\"; afterMs: number } | { kind: \"aborted\"; cause: unknown } | { kind: \"auth_adapter\"; scheme: string; cause: unknown } | { kind: \"auth_source\"; scheme: string; cause: unknown } | { kind: \"interceptor\"; phase: \"request\" | \"response\"; cause: unknown } | { kind: \"protocol\"; message: string } | { kind: \"unexpected_http\"; status: number; body: unknown } | { kind: \"auth\"; schemes: string[] };\n\n");
     output.push_str("export type RetryOptions = { attempts?: number; backoffMs?: number; maxBackoffMs?: number; jitterMs?: number };\n");
-    output.push_str("export type CallOptions = { signal?: AbortSignal; timeout?: number; retry?: RetryOptions | false };\n");
+    output.push_str("export type CallOptions = { headers?: HeadersInit; signal?: AbortSignal; timeout?: number; retry?: RetryOptions | false };\n");
     output.push_str("export type ClientOptions = { baseUrl: string; headers?: HeadersInit | (() => HeadersInit | Promise<HeadersInit>); auth?: Record<string, CredentialSource>; authAdapters?: Record<string, AuthAdapter>; fetch?: typeof fetch; signal?: AbortSignal; timeout?: number; retry?: RetryOptions; interceptors?: Interceptors };\n\n");
-    output.push_str(runtime::render());
+    output.push_str(&runtime::render());
 
     let mut tree = Node::new();
     let mut type_names = BTreeMap::new();
@@ -78,6 +79,7 @@ pub(super) fn emit(
             names,
             mode,
             preserve_wide_integers,
+            error_strategy,
         )?;
         output.push_str(&declarations);
         let (parents, leaf) = operation
@@ -100,7 +102,7 @@ pub(super) fn emit(
         }
         node.operations.push((leaf, function));
     }
-    output.push_str("export function createClient(client: ClientOptions) {\n  const auth = { ...client.auth };\n  const authValues: Record<string, string> = {};\n  const configured = { ...client, auth, authValues };\n  return ");
+    output.push_str("export function createClient(client: ClientOptions) {\n  const auth = { ...client.auth };\n  const authValues: Record<string, string> = {};\n  const authExpirations: Record<string, number> = {};\n  const configured = { ...client, auth, authValues, authExpirations };\n  return ");
     output.push_str(&tree.render(2));
     output.push_str(";\n}\n");
     Ok(output)
@@ -159,6 +161,7 @@ fn operation_function(
     names: &BTreeMap<String, String>,
     mode: EmitMode,
     preserve_wide_integers: bool,
+    error_strategy: ErrorStrategy,
 ) -> Result<(String, String), EmitError> {
     let args_name = format!("{name}Args");
     let success_name = format!("{name}Response");
@@ -228,7 +231,7 @@ fn operation_function(
         .provides
         .as_ref()
         .map(|provides| {
-            let locator = match &provides.value {
+            let locator = |locator: &CredentialLocator| match locator {
                 CredentialLocator::Body { pointer } => {
                     format!("{{ from: \"body\", pointer: {} }}", string(pointer))
                 }
@@ -239,8 +242,14 @@ fn operation_function(
                     format!("{{ from: \"set_cookie\", name: {} }}", string(name))
                 }
             };
+            let value = locator(&provides.value);
+            let expires_at = provides
+                .expires_at
+                .as_ref()
+                .map(locator)
+                .unwrap_or_else(|| "undefined".into());
             format!(
-                "{{ scheme: {}, value: {locator} }}",
+                "{{ scheme: {}, value: {value}, expiresAt: {expires_at} }}",
                 string(&provides.scheme)
             )
         })
@@ -257,10 +266,15 @@ fn operation_function(
     let declarations = format!(
         "export type {args_name} = {{ {args} }};\n{stream_types}export type {success_name} = {success};\nexport type {error_name} = {failure};\n",
     );
-    let function = format!(
-        "{args_type} request<{success_name}, {error_name}>(configured, {method:?}, {path}, {query}, {headers}, {body}, {content}, [{groups}], {body_schema}, [{response_schemas}], [{error_schemas}], {}, {}, {provides}, {options}, {})",
+    let request = format!(
+        "request<{success_name}, {error_name}>(configured, {method:?}, {path}, {query}, {headers}, {body}, {content}, [{groups}], {body_schema}, [{response_schemas}], [{error_schemas}], {}, {}, {provides}, {options}, {})",
         operation.auth.optional, preserve_wide_integers, operation.semantics.idempotent,
     );
+    let function = if error_strategy == ErrorStrategy::Throw {
+        format!("{args_type} requestOrThrow({request})")
+    } else {
+        format!("{args_type} {request}")
+    };
     Ok((declarations, function))
 }
 

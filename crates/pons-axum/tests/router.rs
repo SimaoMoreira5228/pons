@@ -320,11 +320,10 @@ fn router_describes_multipart_request_as_opaque() {
 
 #[test]
 fn raw_axum_boundaries_are_diagnosed_without_inventing_contracts() {
-    let document = Router::<()>::new(info())
+    let router = Router::<()>::new(info())
         .route("/raw-headers", get(raw_headers))
-        .route("/raw-response", get(raw_response))
-        .into_document()
-        .unwrap();
+        .route("/raw-response", get(raw_response));
+    let document = router.document();
     let headers = document
         .operations
         .iter()
@@ -351,19 +350,19 @@ fn raw_axum_boundaries_are_diagnosed_without_inventing_contracts() {
     assert!(response.diagnostics.iter().any(|diagnostic| {
         diagnostic.code == "PONS-W101" && diagnostic.message.contains("raw Axum responses")
     }));
+    assert!(router.into_document().is_err());
 }
 
 #[test]
 fn dynamic_response_status_is_diagnosed_without_inventing_a_contract() {
-    let document = Router::<()>::new(info())
-        .route("/dynamic", get(dynamic_status))
-        .into_document()
-        .unwrap();
+    let router = Router::<()>::new(info()).route("/dynamic", get(dynamic_status));
+    let document = router.document();
     let operation = &document.operations[0];
     assert!(operation.responses.is_empty());
     assert!(operation.diagnostics.iter().any(|diagnostic| {
         diagnostic.code == "PONS-W102" && diagnostic.message.contains("dynamic response status")
     }));
+    assert!(router.into_document().is_err());
 }
 
 #[test]

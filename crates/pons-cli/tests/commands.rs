@@ -131,6 +131,29 @@ fn emit_writes_a_typed_typescript_client() {
 }
 
 #[test]
+fn emit_selects_the_throwing_typescript_strategy() {
+    let directory = tempfile::tempdir().unwrap();
+    let output_dir = directory.path().join("generated");
+    let input_path = directory.path().join("api.json");
+    fs::write(&input_path, FIXTURE).unwrap();
+    let output = pons()
+        .args(["emit", "--target", "ts"])
+        .arg(&input_path)
+        .arg(&output_dir)
+        .args(["--errors", "throw"])
+        .output()
+        .unwrap();
+
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let client = fs::read_to_string(output_dir.join("client.ts")).unwrap();
+    assert!(client.contains("requestOrThrow(request<"));
+}
+
+#[test]
 fn emit_strict_uses_bigint_for_wide_typescript_numbers() {
     let directory = tempfile::tempdir().unwrap();
     let input = wide_number_input(directory.path());

@@ -4,6 +4,7 @@ use std::fs;
 use std::io::Write;
 use std::path::Path;
 
+use pons_emit_ts::ErrorStrategy;
 use pons_ir::Document;
 use pons_plugin::{DiagnosticSeverity, PluginDiagnostic};
 
@@ -19,6 +20,7 @@ pub(super) fn run(
     document: &Document,
     output: &Path,
     strict: bool,
+    error_strategy: ErrorStrategy,
 ) -> Result<(), CliError> {
     if target.is_empty()
         || !target
@@ -31,13 +33,14 @@ pub(super) fn run(
     }
 
     let (files, diagnostics, warnings, logs) = if target == "ts" {
-        let output = pons_emit_ts::emit_with_mode(
+        let output = pons_emit_ts::emit_with_strategy(
             document,
             if strict {
                 pons_emit_ts::EmitMode::Strict
             } else {
                 pons_emit_ts::EmitMode::Lossy
             },
+            error_strategy,
         )
         .map_err(|error| CliError::Failure(error.to_string()))?;
         let files = output
@@ -50,6 +53,11 @@ pub(super) fn run(
             .collect();
         (files, Vec::new(), output.warnings, Vec::new())
     } else if target == "openapi" {
+        if error_strategy == ErrorStrategy::Throw {
+            return Err(CliError::Failure(
+                "the throwing error strategy is only supported by the TypeScript target".into(),
+            ));
+        }
         let content = pons_emit_openapi::emit(document)
             .map_err(|error| CliError::Failure(error.to_string()))?;
         (

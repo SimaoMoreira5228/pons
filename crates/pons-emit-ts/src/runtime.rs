@@ -1,4 +1,4 @@
-pub(super) fn render() -> &'static str {
+fn render_core() -> &'static str {
     r#"class ResponseHeaderDecodeError extends Error {}
 class CredentialSourceError extends Error {
   constructor(readonly scheme: string, readonly sourceCause: unknown) {
@@ -6,7 +6,12 @@ class CredentialSourceError extends Error {
   }
 }
 
-type ConfiguredClient = ClientOptions & { authValues: Record<string, string> };
+type CredentialLocator =
+  | { from: "body"; pointer: string }
+  | { from: "header"; name: string }
+  | { from: "set_cookie"; name: string };
+type CredentialProvision = { scheme: string; value: CredentialLocator; expiresAt?: CredentialLocator };
+type ConfiguredClient = ClientOptions & { authValues: Record<string, string>; authExpirations: Record<string, number> };
 
 async function request<T, E>(
   client: ConfiguredClient,
@@ -22,7 +27,7 @@ async function request<T, E>(
   errors: Array<{ status: number | string; content: string; schema?: unknown; retryable?: boolean; events?: Array<{ event: string; schema: unknown }>; headers?: Array<{ name: string; required: boolean; schema: unknown }> }>,
   authOptional: boolean,
   preserveWideIntegers: boolean,
-  provides: { scheme: string; value: { from: string; pointer?: string; name?: string } } | undefined,
+  provides: CredentialProvision | undefined,
   callOptions: CallOptions | undefined,
   idempotent: boolean,
 ): Promise<Result<T, E | ClientFailure>> {
@@ -56,6 +61,9 @@ async function request<T, E>(
     }
     const configuredHeaders = typeof client.headers === "function" ? await client.headers() : client.headers;
     const headers = new Headers(configuredHeaders);
+    if (callOptions?.headers) {
+      for (const [key, value] of new Headers(callOptions.headers).entries()) headers.set(key, value);
+    }
     for (const [key, value] of Object.entries(requestHeaders ?? {})) {
       if (value !== undefined && value !== null) headers.set(key, String(value));
     }
@@ -314,18 +322,10 @@ function abortError(): Error {
   return Object.assign(new Error("The operation was aborted"), { name: "AbortError" });
 }
 
-async function credentialValue(client: ConfiguredClient, scheme: string): Promise<string | undefined> {
-  const cached = client.authValues[scheme];
-  if (cached !== undefined) return cached;
-  const source = client.auth?.[scheme];
-  try {
-    if (typeof source === "string") return source;
-    if (typeof source === "function") return (await source()) ?? undefined;
-    if (source !== undefined) return (await source.get()) ?? undefined;
-  } catch (cause) {
-    throw new CredentialSourceError(scheme, cause);
-  }
-  return undefined;
+async function requestOrThrow<T, E>(operation: Promise<Result<T, E | ClientFailure>>): Promise<T> {
+  const result = await operation;
+  if (result.isErr()) throw result.error;
+  return result.value as T;
 }
 
 function withResponseHeaders(
@@ -385,35 +385,6 @@ function parseNumber(value: string): number {
   const parsed = Number(value);
   if (!Number.isFinite(parsed)) throw new Error("invalid number");
   return parsed;
-}
-
-async function captureCredential(
-  client: ConfiguredClient,
-  response: Response,
-  provides: { scheme: string; value: { from: string; pointer?: string; name?: string } } | undefined,
-  value: unknown,
-  includeBody: boolean,
-): Promise<void> {
-  if (!provides) return;
-  const locator = provides.value;
-  let credential: unknown;
-  if (locator.from === "body" && includeBody) {
-    credential = pointerValue(value, locator.pointer ?? "");
-  } else if (locator.from === "header") {
-    credential = response.headers.get(locator.name ?? "");
-  } else if (locator.from === "set_cookie") {
-    credential = cookieValue(response.headers.get("set-cookie"), locator.name ?? "");
-  }
-  if (credential !== undefined && credential !== null) {
-    const nextCredential = String(credential);
-    const source = client.auth?.[provides.scheme];
-    try {
-      if (source !== undefined && typeof source === "object") await source.set(nextCredential);
-    } catch (cause) {
-      throw new CredentialSourceError(provides.scheme, cause);
-    }
-    client.authValues[provides.scheme] = nextCredential;
-  }
 }
 
 type SseStreamFailure = { kind: "stream_error"; cause: unknown } | { kind: "unknown_event"; event: string } | { kind: "invalid_event"; event: string; cause: unknown } | { kind: "server_error"; body: unknown };
@@ -749,4 +720,8 @@ function pointerValue(value: unknown, pointer: string): unknown {
 }
 
 "#
+}
+
+pub(super) fn render() -> String {
+    format!("{}{}", render_core(), crate::runtime_auth::render())
 }

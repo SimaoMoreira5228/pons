@@ -1,5 +1,6 @@
 mod client;
 mod runtime;
+mod runtime_auth;
 mod types;
 
 use std::collections::BTreeMap;
@@ -32,6 +33,12 @@ pub enum EmitMode {
     Lossy,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ErrorStrategy {
+    Neverthrow,
+    Throw,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EmitOutput {
     pub files: Vec<GeneratedFile>,
@@ -43,6 +50,14 @@ pub fn emit(document: &Document) -> Result<Vec<GeneratedFile>, EmitError> {
 }
 
 pub fn emit_with_mode(document: &Document, mode: EmitMode) -> Result<EmitOutput, EmitError> {
+    emit_with_strategy(document, mode, ErrorStrategy::Neverthrow)
+}
+
+pub fn emit_with_strategy(
+    document: &Document,
+    mode: EmitMode,
+    error_strategy: ErrorStrategy,
+) -> Result<EmitOutput, EmitError> {
     let mut document = document.clone();
     document.canonicalize();
     document.validate().map_err(|errors| {
@@ -92,7 +107,13 @@ pub fn emit_with_mode(document: &Document, mode: EmitMode) -> Result<EmitOutput,
         },
         GeneratedFile {
             path: "client.ts".into(),
-            content: client::emit(&document, &names, mode, preserve_wide_integers)?,
+            content: client::emit(
+                &document,
+                &names,
+                mode,
+                preserve_wide_integers,
+                error_strategy,
+            )?,
         },
     ];
     let warnings = (mode == EmitMode::Lossy && !wide_integers.is_empty())
@@ -406,8 +427,12 @@ mod tests {
 
     #[test]
     fn emits_a_client_for_the_contract_fixture() {
-        let document: Document =
+        let mut document: Document =
             serde_json::from_str(include_str!("../../../fixtures/login.json")).unwrap();
+        document.operations[0].provides.as_mut().unwrap().expires_at =
+            Some(pons_ir::CredentialLocator::Body {
+                pointer: "/expires_at".into(),
+            });
         let files = super::emit(&document).unwrap();
         let files = files
             .into_iter()
@@ -428,6 +453,8 @@ mod tests {
         assert!(client.contains("signal?: AbortSignal"));
         assert!(client.contains("timeout?: number"));
         assert!(client.contains("export type CallOptions"));
+        assert!(client.contains("headers?: HeadersInit"));
+        assert!(client.contains("callOptions?.headers"));
         assert!(client.contains("callOptions?.timeout ?? client.timeout"));
         assert!(client.contains("callOptions?.signal ?? client.signal"));
         assert!(client.contains("options?: CallOptions"));
@@ -454,8 +481,12 @@ mod tests {
         assert!(client.contains("export type TokenStore"));
         assert!(client.contains("export type CredentialSource"));
         assert!(client.contains("kind: \"auth_source\""));
-        assert!(client.contains("await source.set(nextCredential)"));
+        assert!(client.contains("await source.set(nextCredential, expiresAt)"));
         assert!(client.contains("client.authValues[provides.scheme]"));
+        assert!(client.contains("client.authExpirations[provides.scheme]"));
+        assert!(client.contains("expiresAt:"));
+        assert!(client.contains("Date.parse(value)"));
+        assert!(client.contains("source.set(nextCredential, expiresAt)"));
         assert!(client.contains("AsyncIterable<Result<EventsWatchEvent, EventsWatchStreamError>>"));
         assert!(client.contains(
             "ResponseWithHeaders<AsyncIterable<Result<EventsWatchEvent, EventsWatchStreamError>>"
@@ -502,6 +533,24 @@ mod tests {
             .find("return ok(withResponseHeaders(readSse")
             .unwrap();
         assert!(stream_capture < stream_return);
+    }
+
+    #[test]
+    fn emits_throwing_error_strategy() {
+        let document: Document =
+            serde_json::from_str(include_str!("../../../fixtures/login.json")).unwrap();
+        let output = super::emit_with_strategy(
+            &document,
+            super::EmitMode::Strict,
+            super::ErrorStrategy::Throw,
+        )
+        .unwrap();
+        let client = output
+            .files
+            .iter()
+            .find(|file| file.path == "client.ts")
+            .unwrap();
+        assert!(client.content.contains("requestOrThrow(request<"));
     }
 
     #[test]

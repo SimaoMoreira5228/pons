@@ -9,7 +9,8 @@ use crate::operation::{
     ErrorStatus, Method, OAuthFlowKind, Operation,
 };
 use crate::types::{
-    Diagnostic, EnumRepr, Field, InlineType, TypeDef, TypeKind, TypeRef, VariantPayload,
+    Diagnostic, DiagnosticSeverity, EnumRepr, Field, InlineType, TypeDef, TypeKind, TypeRef,
+    VariantPayload,
 };
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
@@ -76,8 +77,9 @@ impl Document {
                 found: self.ir_version.clone(),
             });
         }
-
+        self.validate_diagnostics("document", &self.diagnostics, &mut errors);
         for (id, definition) in &self.types {
+            self.validate_diagnostics(&format!("type {id}"), &definition.diagnostics, &mut errors);
             self.validate_type(id, definition, &mut errors);
         }
         for (id, scheme) in &self.auth_schemes {
@@ -167,6 +169,7 @@ impl Document {
         for operation in &self.operations {
             let id = operation.id.clone();
             let owner = format!("operation {id:?}");
+            self.validate_diagnostics(&owner, &operation.diagnostics, &mut errors);
             if id.is_empty()
                 || id
                     .iter()
@@ -614,6 +617,25 @@ impl Document {
         });
     }
 
+    fn validate_diagnostics(
+        &self,
+        owner: &str,
+        diagnostics: &[Diagnostic],
+        errors: &mut Vec<ValidationError>,
+    ) {
+        for diagnostic in diagnostics {
+            if diagnostic.severity == DiagnosticSeverity::Error {
+                errors.push(ValidationError::InvalidValue {
+                    path: format!("{owner} diagnostics"),
+                    message: format!(
+                        "error diagnostic {}: {}",
+                        diagnostic.code, diagnostic.message
+                    ),
+                });
+            }
+        }
+    }
+
     fn validate_error(
         &self,
         owner: &str,
@@ -902,6 +924,26 @@ mod tests {
         assert_eq!(
             document.operations[0].errors[0].status,
             ErrorStatus::Class(4)
+        );
+    }
+
+    #[test]
+    fn error_diagnostics_block_document_validation() {
+        let mut document: Document =
+            serde_json::from_str(include_str!("../../../fixtures/login.json")).unwrap();
+        document.operations[0].diagnostics.push(Diagnostic {
+            severity: DiagnosticSeverity::Error,
+            code: "PONS-E999".into(),
+            message: "unsupported boundary".into(),
+            origin: None,
+            ext: BTreeMap::new(),
+        });
+        assert!(
+            document
+                .validate()
+                .unwrap_err()
+                .iter()
+                .any(|error| error.to_string().contains("PONS-E999"))
         );
     }
 
