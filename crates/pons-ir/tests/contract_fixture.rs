@@ -1,6 +1,6 @@
 use pons_ir::{
     AuthScheme, CredentialLocator, Document, EnumRepr, ErrorStatus, InlineType, Method, OAuthFlow,
-    OAuthFlowKind, StreamKind, TypeKind, TypeRef, VariantPayload,
+    OAuthFlowKind, Presence, ResponseHeader, StreamKind, TypeKind, TypeRef, VariantPayload,
 };
 
 #[test]
@@ -285,6 +285,28 @@ fn validation_rejects_invalid_header_names() {
             .unwrap_err()
             .iter()
             .any(|error| error.to_string().contains("credential header"))
+    );
+
+    let mut document = base.clone();
+    document.operations[0].errors[0]
+        .headers
+        .push(ResponseHeader {
+            wire: "bad header".into(),
+            ty: TypeRef::Inline(InlineType::String {
+                format: None,
+                min_length: None,
+                max_length: None,
+                pattern: None,
+            }),
+            presence: Presence::Required,
+            ext: Default::default(),
+        });
+    assert!(
+        document
+            .validate()
+            .unwrap_err()
+            .iter()
+            .any(|error| error.to_string().contains("not a valid HTTP field name"))
     );
 
     let mut document = base;

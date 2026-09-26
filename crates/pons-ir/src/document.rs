@@ -49,6 +49,14 @@ impl Document {
                 .cmp(&right.status)
                 .then_with(|| left.name.cmp(&right.name))
         });
+        self.common_errors.iter_mut().for_each(|error| {
+            error.headers.sort_by(|left, right| {
+                left.wire
+                    .to_ascii_lowercase()
+                    .cmp(&right.wire.to_ascii_lowercase())
+                    .then_with(|| left.wire.cmp(&right.wire))
+            });
+        });
         self.operations
             .sort_by(|left, right| left.id.cmp(&right.id));
         self.operations.iter_mut().for_each(Operation::canonicalize);
@@ -645,6 +653,16 @@ impl Document {
                 message: format!("error content {:?} does not match its body", error.content),
             });
         }
+        let mut header_names = BTreeSet::new();
+        for header in &error.headers {
+            self.validate_header_name(
+                owner,
+                &format!("error {:?} header", error.status),
+                &header.wire,
+                &mut header_names,
+                errors,
+            );
+        }
     }
 
     fn visit_error_refs(
@@ -655,6 +673,12 @@ impl Document {
     ) {
         if let Some(body) = &error.body {
             body.visit_refs(&mut |reference| {
+                self.validate_ref(owner, reference, errors);
+                self.validate_inline(owner, reference, errors);
+            });
+        }
+        for header in &error.headers {
+            header.ty.visit_refs(&mut |reference| {
                 self.validate_ref(owner, reference, errors);
                 self.validate_inline(owner, reference, errors);
             });

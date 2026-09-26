@@ -544,6 +544,12 @@
           "type": "object",
           "additionalProperties": true
         },
+        "headers": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/ResponseHeader"
+          }
+        },
         "name": {
           "type": "array",
           "items": {

@@ -150,7 +150,8 @@ fn readable_name(words: &[String]) -> String {
 mod tests {
     use pons_ir::{
         AuthScheme, ByteEncoding, ContentKind, Direction, InlineType, NamedRef, OAuthFlow,
-        OAuthFlowKind, PathSegment, StreamKind, TypeDef, TypeKind, TypeRef,
+        OAuthFlowKind, PathSegment, Presence, ResponseHeader, StreamKind, TypeDef, TypeKind,
+        TypeRef,
     };
     use serde_json::{Value, json};
 
@@ -274,6 +275,24 @@ mod tests {
                 .as_bool()
                 .unwrap()
         );
+    }
+
+    #[test]
+    fn emits_declared_error_response_headers() {
+        let mut document = fixture();
+        document.operations[0].errors[0]
+            .headers
+            .push(ResponseHeader {
+                wire: "Retry-After".into(),
+                ty: string(),
+                presence: Presence::Required,
+                ext: Default::default(),
+            });
+        let output: Value = serde_json::from_str(&super::emit(&document).unwrap()).unwrap();
+        let header =
+            &output["paths"]["/auth/login"]["post"]["responses"]["4XX"]["headers"]["Retry-After"];
+        assert_eq!(header["required"], true);
+        assert_eq!(header["schema"]["type"], "string");
     }
 
     #[test]

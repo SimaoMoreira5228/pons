@@ -477,14 +477,15 @@ fn error_type(
             .as_ref()
             .map(|body| types::type_ref(body, document, names, mode))
             .transpose()?;
-        failures.push(match body {
-            Some(body) => {
-                format!("{{ kind: \"http\"; status: {status}; body: {body}; headers: Headers }}")
-            }
-            None => {
-                format!("{{ kind: \"http\"; status: {status}; body: unknown; headers: Headers }}")
-            }
-        });
+        let headers = if error.headers.is_empty() {
+            "Headers".to_owned()
+        } else {
+            response_headers_type(&error.headers, document, names, mode)?
+        };
+        let body = body.unwrap_or_else(|| "unknown".into());
+        failures.push(format!(
+            "{{ kind: \"http\"; status: {status}; body: {body}; headers: {headers} }}"
+        ));
     }
     Ok(failures.join(" | "))
 }
@@ -601,8 +602,26 @@ fn error_descriptor(error: &ErrorResponse) -> Result<String, EmitError> {
         .map(type_ref_json)
         .transpose()?
         .unwrap_or_else(|| "undefined".into());
+    let headers = error
+        .headers
+        .iter()
+        .map(|header| {
+            Ok(format!(
+                "{{ name: {}, required: {}, schema: {} }}",
+                string(&header.wire),
+                header.presence == Presence::Required,
+                type_ref_json(&header.ty)?
+            ))
+        })
+        .collect::<Result<Vec<_>, EmitError>>()?
+        .join(", ");
+    let headers = if headers.is_empty() {
+        String::new()
+    } else {
+        format!(", headers: [{headers}]")
+    };
     Ok(format!(
-        "{{ status: {status}, content: {}, schema: {schema} }}",
+        "{{ status: {status}, content: {}, schema: {schema}{headers} }}",
         string(content)
     ))
 }

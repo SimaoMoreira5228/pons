@@ -1,5 +1,6 @@
 mod auth;
 mod describe;
+mod error;
 mod handler;
 mod layer;
 mod metadata;
@@ -20,6 +21,7 @@ pub use describe::{
     DescribeRequest, DescribeResponse, Header, HeaderRejection, HeaderSpec, NoContent, OperationCx,
     OptionalHeader, StatusResponse, WithHeader, WithOptionalHeader, WithStatus,
 };
+pub use error::{WithErrorHeader, WithOptionalErrorHeader};
 pub use handler::DescribeHandler;
 pub use layer::DocumentedLayer;
 pub use metadata::OperationMeta;

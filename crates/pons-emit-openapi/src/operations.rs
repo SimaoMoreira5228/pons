@@ -2,7 +2,7 @@ use std::collections::BTreeMap;
 
 use pons_ir::{
     ByteEncoding, ContentKind, EnumRepr, ErrorContent, ErrorStatus, InlineType, Method, Operation,
-    PathSegment, Presence, TypeKind, TypeRef,
+    PathSegment, Presence, ResponseHeader, TypeKind, TypeRef,
 };
 use serde_json::{Map, Value, json};
 
@@ -341,26 +341,7 @@ impl Builder<'_> {
                     value["content"] = media_content(media, self.type_schema(body)?);
                 }
             }
-            if !response.headers.is_empty() {
-                let mut headers = Map::new();
-                for header in &response.headers {
-                    if header.wire.eq_ignore_ascii_case("content-type") {
-                        return Err(EmitError(format!(
-                            "response header {} is defined by the response content",
-                            header.wire
-                        )));
-                    }
-                    headers.insert(
-                        header.wire.clone(),
-                        json!({
-                            "required":header.presence == Presence::Required,
-                            "schema":self.type_schema(&header.ty)?,
-                            "x-pons":{"presence":header.presence,"ext":header.ext}
-                        }),
-                    );
-                }
-                value["headers"] = Value::Object(headers);
-            }
+            add_response_headers(self, &response.headers, &mut value, "response")?;
             value["x-pons"] =
                 json!({"body":response.body,"content":response.content,"ext":response.ext});
             insert_response(&mut responses, response.status.to_string(), value)?;
@@ -389,10 +370,11 @@ impl Builder<'_> {
                 let media = error_media_type(error.content);
                 value["content"] = media_content(media.into(), self.type_schema(body)?);
             }
+            add_response_headers(self, &error.headers, &mut value, "error response")?;
             if let Some(retryable) = error.retryable {
                 value["x-pons-retryable"] = json!(retryable);
             }
-            value["x-pons"] = json!({"name":error.name,"body":error.body,"content":error.content,"doc":error.doc,"ext":error.ext});
+            value["x-pons"] = json!({"name":error.name,"body":error.body,"headers":error.headers,"content":error.content,"doc":error.doc,"ext":error.ext});
             insert_response(&mut responses, status, value)?;
         }
         if responses.is_empty() {
@@ -582,6 +564,36 @@ fn operation_id(operation: &Operation) -> String {
         .map(|part| part.join("_"))
         .collect::<Vec<_>>()
         .join(".")
+}
+
+fn add_response_headers(
+    builder: &Builder<'_>,
+    headers: &[ResponseHeader],
+    value: &mut Value,
+    kind: &str,
+) -> Result<(), EmitError> {
+    if headers.is_empty() {
+        return Ok(());
+    }
+    let mut response_headers = Map::new();
+    for header in headers {
+        if header.wire.eq_ignore_ascii_case("content-type") {
+            return Err(EmitError(format!(
+                "{kind} header {} is defined by the response content",
+                header.wire
+            )));
+        }
+        response_headers.insert(
+            header.wire.clone(),
+            json!({
+                "required": header.presence == Presence::Required,
+                "schema": builder.type_schema(&header.ty)?,
+                "x-pons": {"presence": header.presence, "ext": header.ext}
+            }),
+        );
+    }
+    value["headers"] = Value::Object(response_headers);
+    Ok(())
 }
 
 fn error_status(status: &ErrorStatus) -> String {

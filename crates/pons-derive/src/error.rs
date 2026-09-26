@@ -65,6 +65,7 @@ pub(super) fn expand(input: &DeriveInput) -> TokenStream {
                 name: #error_name,
                 content: #content,
                 body: #body_field,
+                headers: Vec::new(),
                 retryable: #retryable,
                 doc: #doc,
                 ext: Default::default(),

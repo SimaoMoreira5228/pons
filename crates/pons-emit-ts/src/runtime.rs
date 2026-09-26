@@ -19,7 +19,7 @@ async function request<T, E>(
   authGroups: string[][],
   bodySchema: unknown,
   responses: Array<{ status: number; content: string; schema?: unknown; stream?: "sse" | "ndjson"; item?: unknown; events?: Array<{ event: string; schema: unknown }>; headers?: Array<{ name: string; required: boolean; schema: unknown }> }>,
-  errors: Array<{ status: number | string; content: string; schema?: unknown; events?: Array<{ event: string; schema: unknown }> }>,
+  errors: Array<{ status: number | string; content: string; schema?: unknown; events?: Array<{ event: string; schema: unknown }>; headers?: Array<{ name: string; required: boolean; schema: unknown }> }>,
   authOptional: boolean,
   preserveWideIntegers: boolean,
   provides: { scheme: string; value: { from: string; pointer?: string; name?: string } } | undefined,
@@ -142,11 +142,11 @@ async function request<T, E>(
     if (declaredSuccess === undefined && declaredError === undefined && response.status >= 200 && response.status < 300) {
       return err({ kind: "protocol", message: `undeclared success response ${response.status}` });
     }
-    const missingHeader = declaredSuccess?.headers?.find((header) => header.required && !response.headers.has(header.name));
+    const responseSchema = declaredSuccess ?? declaredError;
+    const missingHeader = responseSchema?.headers?.find((header) => header.required && !response.headers.has(header.name));
     if (missingHeader) {
       return err({ kind: "protocol", message: `missing required response header ${missingHeader.name}` });
     }
-    const responseSchema = declaredSuccess ?? declaredError;
     const responseKind = responseSchema?.content;
     const expectedContentTypes: Record<string, string> = {
       json: "application/json",
@@ -195,7 +195,14 @@ async function request<T, E>(
       : rawValue;
     if (declaredSuccess === undefined) {
       return declaredError
-        ? err({ kind: "http", status: response.status, body: value, headers: response.headers } as E)
+        ? err({
+            kind: "http",
+            status: response.status,
+            body: value,
+            headers: declaredError.headers
+              ? responseHeaders(response, declaredError.headers, preserveWideIntegers)
+              : response.headers,
+          } as E)
         : err({ kind: "unexpected_http", status: response.status, body: value });
     }
     await captureCredential(client, response, provides, value, true);
@@ -303,12 +310,20 @@ function withResponseHeaders(
   preserveWideIntegers: boolean,
 ): unknown {
   if (!schema?.headers) return value;
-  const headers: Record<string, unknown> = {};
-  for (const header of schema.headers) {
+  return { value, headers: responseHeaders(response, schema.headers, preserveWideIntegers) };
+}
+
+function responseHeaders(
+  response: Response,
+  headers: Array<{ name: string; required: boolean; schema: unknown }>,
+  preserveWideIntegers: boolean,
+): Record<string, unknown> {
+  const values: Record<string, unknown> = {};
+  for (const header of headers) {
     const headerValue = response.headers.get(header.name);
-    if (headerValue !== null) headers[header.name] = decodeHeaderValue(headerValue, header.schema, preserveWideIntegers);
+    if (headerValue !== null) values[header.name] = decodeHeaderValue(headerValue, header.schema, preserveWideIntegers);
   }
-  return { value, headers };
+  return values;
 }
 
 function decodeHeaderValue(value: string, schema: any, preserveWideIntegers: boolean): any {

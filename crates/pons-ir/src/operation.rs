@@ -75,6 +75,10 @@ impl Operation {
             if let Some(body) = &error.body {
                 body.visit_refs(visit);
             }
+            error
+                .headers
+                .iter()
+                .for_each(|header| header.ty.visit_refs(visit));
         });
         if let Some(stream) = &self.stream {
             stream.kind.visit_refs(visit);
@@ -101,6 +105,14 @@ impl Operation {
             left.status
                 .cmp(&right.status)
                 .then_with(|| left.name.cmp(&right.name))
+        });
+        self.errors.iter_mut().for_each(|error| {
+            error.headers.sort_by(|left, right| {
+                left.wire
+                    .to_ascii_lowercase()
+                    .cmp(&right.wire.to_ascii_lowercase())
+                    .then_with(|| left.wire.cmp(&right.wire))
+            });
         });
         self.auth
             .alternatives
@@ -217,6 +229,8 @@ pub struct ErrorResponse {
     pub content: ErrorContent,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub body: Option<TypeRef>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub headers: Vec<ResponseHeader>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub retryable: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]

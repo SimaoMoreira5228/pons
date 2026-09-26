@@ -66,7 +66,7 @@ impl<S: HeaderSpec, R> WithOptionalHeader<S, R> {
     }
 }
 
-fn insert_response_header<S>(
+pub(crate) fn insert_response_header<S>(
     response: &mut axum::response::Response,
     value: &S::Value,
 ) -> Result<(), &'static str>
@@ -82,7 +82,7 @@ where
     Ok(())
 }
 
-fn invalid_response_header() -> axum::response::Response {
+pub(crate) fn invalid_response_header() -> axum::response::Response {
     let mut response = (
         axum::http::StatusCode::INTERNAL_SERVER_ERROR,
         "invalid response header value",

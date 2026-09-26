@@ -441,10 +441,10 @@ mod tests {
         assert!(client.contains("kind: \"aborted\""));
         assert!(client.contains("body: Extract<Types.LoginError"));
         assert!(client.contains("headers: Headers"));
-        assert!(client.contains("headers: response.headers"));
+        assert!(client.contains("headers: declaredError.headers"));
         assert!(client.contains("ResponseWithHeaders"));
         assert!(client.contains("withResponseHeaders"));
-        assert!(client.contains("return { value, headers }"));
+        assert!(client.contains("return { value, headers: responseHeaders"));
         assert!(client.contains("export type TokenStore"));
         assert!(client.contains("export type CredentialSource"));
         assert!(client.contains("kind: \"auth_source\""));
@@ -469,12 +469,12 @@ mod tests {
         assert!(!client.contains("responseContent.includes(\"text/event-stream\")"));
         assert!(client.contains("response.headers.has(header.name)"));
         assert!(client.contains("header.required && !response.headers.has(header.name)"));
-        assert!(client.contains("declaredSuccess?.headers"));
+        assert!(client.contains("responseSchema?.headers"));
         let missing_header_branch = client
             .split("const missingHeader")
             .nth(1)
             .unwrap()
-            .split("const responseSchema")
+            .split("const responseKind")
             .next()
             .unwrap();
         assert!(missing_header_branch.contains("if (missingHeader)"));
@@ -509,6 +509,37 @@ mod tests {
             client
                 .content
                 .contains("headers: [{ name: \"X-Trace-ID\", required: false, schema:")
+        );
+    }
+
+    #[test]
+    fn emits_declared_error_response_headers() {
+        let mut document: Document =
+            serde_json::from_str(include_str!("../../../fixtures/login.json")).unwrap();
+        document.operations[0].errors[0]
+            .headers
+            .push(pons_ir::ResponseHeader {
+                wire: "Retry-After".into(),
+                ty: TypeRef::Inline(InlineType::String {
+                    format: None,
+                    min_length: None,
+                    max_length: None,
+                    pattern: None,
+                }),
+                presence: pons_ir::Presence::Required,
+                ext: BTreeMap::new(),
+            });
+        let files = super::emit(&document).unwrap();
+        let client = files.iter().find(|file| file.path == "client.ts").unwrap();
+        assert!(
+            client
+                .content
+                .contains("headers: { \"Retry-After\": string }")
+        );
+        assert!(
+            client
+                .content
+                .contains("headers: [{ name: \"Retry-After\", required: true, schema:")
         );
     }
 
