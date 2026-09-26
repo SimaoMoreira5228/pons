@@ -52,13 +52,12 @@ fn operation<'a>(document: &'a pons_ir::Document, literal: &str) -> &'a pons_ir:
 
 #[test]
 fn raw_extractors_report_opaque_contract_shapes() {
-    let document = Router::<()>::new(info())
+    let router = Router::<()>::new(info())
         .route("/query", get(raw_query))
         .route("/form", post(raw_form))
         .route("/path/{id}", get(raw_path))
-        .route("/request", post(raw_request))
-        .into_document()
-        .unwrap();
+        .route("/request", post(raw_request));
+    let document = router.document();
 
     let query = operation(&document, "query");
     assert!(query.query.is_none());
@@ -94,4 +93,5 @@ fn raw_extractors_report_opaque_contract_shapes() {
     assert!(request.diagnostics.iter().any(|diagnostic| {
         diagnostic.code == "PONS-W101" && diagnostic.message.contains("raw request extractors")
     }));
+    assert!(router.into_document().is_err());
 }

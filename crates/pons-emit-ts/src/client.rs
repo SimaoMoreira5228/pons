@@ -49,9 +49,15 @@ pub(super) fn emit(
     preserve_wide_integers: bool,
     error_strategy: ErrorStrategy,
 ) -> Result<String, EmitError> {
-    let mut output = String::from(
-        "import { err, ok, type Result } from \"neverthrow\";\nimport type * as Types from \"./types.js\";\n\n",
-    );
+    let mut output = if error_strategy == ErrorStrategy::Throw {
+        String::from(
+            "type Result<T, E> = { isOk(): boolean; isErr(): boolean; value?: T; error?: E };\nfunction ok<T>(value: T): Result<T, never> { return { isOk: () => true, isErr: () => false, value }; }\nfunction err<E>(error: E): Result<never, E> { return { isOk: () => false, isErr: () => true, error }; }\nimport type * as Types from \"./types.js\";\n\n",
+        )
+    } else {
+        String::from(
+            "import { err, ok, type Result } from \"neverthrow\";\nimport type * as Types from \"./types.js\";\n\n",
+        )
+    };
     output.push_str(&auth_types(document));
     output.push_str(&type_definitions(document)?);
     output.push_str("\nexport type AuthAttachment = { headers?: Record<string, string>; query?: Record<string, string>; cookies?: Record<string, string> };\nexport type AuthAdapter = (context: { scheme: string; method: string; url: URL; headers: Headers }) => AuthAttachment | Promise<AuthAttachment>;\nexport type TokenStore = { get(): string | undefined | Promise<string | undefined>; set(value: string, expiresAt?: number): void | Promise<void>; clear(): void | Promise<void> };\nexport type CredentialSource = string | (() => string | undefined | Promise<string | undefined>) | TokenStore;\nexport type RequestInterceptor = (context: { url: URL; init: RequestInit }) => void | Promise<void>;\nexport type ResponseInterceptor = (context: { response: Response; url: URL; init: RequestInit }) => void | Promise<void>;\nexport type Interceptors = { request?: RequestInterceptor; response?: ResponseInterceptor };\nexport type ResponseWithHeaders<T, H> = { value: T; headers: H };\nexport type ClientFailure = { kind: \"network\"; cause: unknown } | { kind: \"timeout\"; afterMs: number } | { kind: \"aborted\"; cause: unknown } | { kind: \"auth_adapter\"; scheme: string; cause: unknown } | { kind: \"auth_source\"; scheme: string; cause: unknown } | { kind: \"interceptor\"; phase: \"request\" | \"response\"; cause: unknown } | { kind: \"protocol\"; message: string } | { kind: \"unexpected_http\"; status: number; body: unknown } | { kind: \"auth\"; schemes: string[] };\n\n");

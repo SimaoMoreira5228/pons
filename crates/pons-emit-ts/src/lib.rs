@@ -551,6 +551,8 @@ mod tests {
             .find(|file| file.path == "client.ts")
             .unwrap();
         assert!(client.content.contains("requestOrThrow(request<"));
+        assert!(!client.content.contains("from \"neverthrow\""));
+        assert!(client.content.contains("type Result<T, E>"));
     }
 
     #[test]

@@ -513,7 +513,7 @@ impl<T: Schema> DescribeRequest for axum::extract::Form<T> {
 impl DescribeRequest for axum::extract::Multipart {
     fn describe(cx: &mut OperationCx) {
         cx.request_body::<OpaqueBody>(ContentKind::Multipart);
-        cx.diagnostic(
+        cx.error(
             "PONS-W101",
             "multipart fields are opaque; wrap them with a typed request description",
         );
@@ -523,7 +523,7 @@ impl DescribeRequest for axum::extract::Multipart {
 impl DescribeRequest for axum::extract::RawForm {
     fn describe(cx: &mut OperationCx) {
         cx.request_body::<OpaqueBody>(ContentKind::Form);
-        cx.diagnostic(
+        cx.error(
             "PONS-W101",
             "raw form fields are opaque; use Form<T> for a typed form",
         );
@@ -532,7 +532,7 @@ impl DescribeRequest for axum::extract::RawForm {
 
 impl DescribeRequest for axum::extract::RawQuery {
     fn describe(cx: &mut OperationCx) {
-        cx.diagnostic(
+        cx.error(
             "PONS-W101",
             "raw query strings are opaque; use Query<T> for typed fields",
         );
@@ -541,7 +541,7 @@ impl DescribeRequest for axum::extract::RawQuery {
 
 impl DescribeRequest for axum::extract::RawPathParams {
     fn describe(cx: &mut OperationCx) {
-        cx.diagnostic(
+        cx.error(
             "PONS-W101",
             "raw path parameters are opaque; use Path<T> for typed fields",
         );
@@ -550,7 +550,7 @@ impl DescribeRequest for axum::extract::RawPathParams {
 
 impl DescribeRequest for axum::extract::Request {
     fn describe(cx: &mut OperationCx) {
-        cx.diagnostic(
+        cx.error(
             "PONS-W101",
             "raw request extractors do not expose a stable contract; use typed extractors",
         );
@@ -579,7 +579,7 @@ impl<T> DescribeRequest for axum::extract::Extension<T> {
 
 impl DescribeRequest for axum::http::HeaderMap {
     fn describe(cx: &mut OperationCx) {
-        cx.diagnostic(
+        cx.error(
             "PONS-W101",
             "raw HeaderMap extractors do not declare named headers; use typed header wrappers",
         );

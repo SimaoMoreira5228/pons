@@ -297,10 +297,8 @@ fn router_describes_form_request_body() {
 
 #[test]
 fn router_describes_multipart_request_as_opaque() {
-    let document = Router::<()>::new(info())
-        .route("/multipart", post(multipart_user))
-        .into_document()
-        .unwrap();
+    let router = Router::<()>::new(info()).route("/multipart", post(multipart_user));
+    let document = router.document();
     let operation = document
         .operations
         .iter()
@@ -316,6 +314,7 @@ fn router_describes_multipart_request_as_opaque() {
     assert!(operation.diagnostics.iter().any(|diagnostic| {
         diagnostic.code == "PONS-W101" && diagnostic.message.contains("multipart fields are opaque")
     }));
+    assert!(router.into_document().is_err());
 }
 
 #[test]

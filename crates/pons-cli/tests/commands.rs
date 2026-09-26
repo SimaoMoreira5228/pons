@@ -151,6 +151,7 @@ fn emit_selects_the_throwing_typescript_strategy() {
     );
     let client = fs::read_to_string(output_dir.join("client.ts")).unwrap();
     assert!(client.contains("requestOrThrow(request<"));
+    assert!(!client.contains("from \"neverthrow\""));
 }
 
 #[test]
