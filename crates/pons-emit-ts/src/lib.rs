@@ -431,10 +431,16 @@ mod tests {
         assert!(client.contains("callOptions?.timeout ?? client.timeout"));
         assert!(client.contains("callOptions?.signal ?? client.signal"));
         assert!(client.contains("options?: CallOptions"));
+        assert!(client.contains("export type RequestInterceptor"));
+        assert!(client.contains("export type ResponseInterceptor"));
+        assert!(client.contains("headers?: HeadersInit |"));
+        assert!(client.contains("client.interceptors?.request"));
+        assert!(client.contains("client.interceptors?.response"));
         assert!(client.contains("export type RetryOptions"));
         assert!(client.contains("retry?: RetryOptions | false"));
         assert!(client.contains("fetchWithRetry"));
         assert!(client.contains("retry-after"));
+        assert!(client.contains("Date.parse(retryAfter)"));
         assert!(client.contains("idempotent: boolean"));
         assert!(client.contains("setTimeout"));
         assert!(client.contains("kind: \"timeout\""));
@@ -516,6 +522,7 @@ mod tests {
     fn emits_declared_error_response_headers() {
         let mut document: Document =
             serde_json::from_str(include_str!("../../../fixtures/login.json")).unwrap();
+        document.operations[0].errors[0].retryable = Some(true);
         document.operations[0].errors[0]
             .headers
             .push(pons_ir::ResponseHeader {
@@ -536,6 +543,7 @@ mod tests {
                 .content
                 .contains("headers: { \"Retry-After\": string }")
         );
+        assert!(client.content.contains("retryable: true"));
         assert!(
             client
                 .content

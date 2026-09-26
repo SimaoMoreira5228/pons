@@ -19,7 +19,7 @@ async function request<T, E>(
   authGroups: string[][],
   bodySchema: unknown,
   responses: Array<{ status: number; content: string; schema?: unknown; stream?: "sse" | "ndjson"; item?: unknown; events?: Array<{ event: string; schema: unknown }>; headers?: Array<{ name: string; required: boolean; schema: unknown }> }>,
-  errors: Array<{ status: number | string; content: string; schema?: unknown; events?: Array<{ event: string; schema: unknown }>; headers?: Array<{ name: string; required: boolean; schema: unknown }> }>,
+  errors: Array<{ status: number | string; content: string; schema?: unknown; retryable?: boolean; events?: Array<{ event: string; schema: unknown }>; headers?: Array<{ name: string; required: boolean; schema: unknown }> }>,
   authOptional: boolean,
   preserveWideIntegers: boolean,
   provides: { scheme: string; value: { from: string; pointer?: string; name?: string } } | undefined,
@@ -54,7 +54,8 @@ async function request<T, E>(
         }
       }
     }
-    const headers = new Headers(client.headers);
+    const configuredHeaders = typeof client.headers === "function" ? await client.headers() : client.headers;
+    const headers = new Headers(configuredHeaders);
     for (const [key, value] of Object.entries(requestHeaders ?? {})) {
       if (value !== undefined && value !== null) headers.set(key, String(value));
     }
@@ -132,7 +133,21 @@ async function request<T, E>(
         init.body = body as BodyInit;
       }
     }
-    const response = await fetchWithRetry(client.fetch ?? fetch, url, init, retry, idempotent, signal);
+    if (client.interceptors?.request) {
+      try {
+        await client.interceptors.request({ url, init });
+      } catch (cause) {
+        return err({ kind: "interceptor", phase: "request", cause });
+      }
+    }
+    const response = await fetchWithRetry(client.fetch ?? fetch, url, init, retry, idempotent, errors, signal);
+    if (client.interceptors?.response) {
+      try {
+        await client.interceptors.response({ response, url, init });
+      } catch (cause) {
+        return err({ kind: "interceptor", phase: "response", cause });
+      }
+    }
     const responseContent = response.headers.get("content-type") ?? "";
     const declaredSuccess = responses.find((entry) => entry.status === response.status);
     const declaredError =
@@ -227,6 +242,7 @@ async function fetchWithRetry(
   init: RequestInit,
   options: RetryOptions | undefined,
   idempotent: boolean,
+  errors: Array<{ status: number | string; retryable?: boolean }>,
   signal: AbortSignal | undefined,
 ): Promise<Response> {
   const attempts = idempotent ? Math.max(1, Math.floor(options?.attempts ?? 1)) : 1;
@@ -241,7 +257,12 @@ async function fetchWithRetry(
       attempt += 1;
       continue;
     }
-    const retryableStatus = response.status === 502 || response.status === 503 || response.status === 504;
+    const declaredError = response.status >= 400
+      ? errors.find((error) => error.status === response.status) ??
+        errors.find((error) => typeof error.status === "string" && error.status === `${Math.floor(response.status / 100)}xx`) ??
+        errors.find((error) => error.status === "default")
+      : undefined;
+    const retryableStatus = declaredError?.retryable ?? (response.status === 502 || response.status === 503 || response.status === 504);
     if (!retryableStatus || attempt + 1 >= attempts) return response;
     try {
       await response.body?.cancel();
@@ -257,6 +278,10 @@ function retryDelay(response: Response | undefined, attempt: number, options: Re
   const parsedRetryAfter = retryAfter === null || retryAfter === undefined ? undefined : Number(retryAfter);
   if (parsedRetryAfter !== undefined && Number.isFinite(parsedRetryAfter) && parsedRetryAfter >= 0) {
     return parsedRetryAfter * 1000;
+  }
+  const retryAfterDate = retryAfter === null || retryAfter === undefined ? undefined : Date.parse(retryAfter);
+  if (retryAfterDate !== undefined && Number.isFinite(retryAfterDate)) {
+    return Math.max(0, retryAfterDate - Date.now());
   }
   const backoff = Math.max(0, options?.backoffMs ?? 100);
   const maximum = Math.max(0, options?.maxBackoffMs ?? 1000);

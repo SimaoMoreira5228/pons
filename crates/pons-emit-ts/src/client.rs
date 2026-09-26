@@ -53,10 +53,10 @@ pub(super) fn emit(
     );
     output.push_str(&auth_types(document));
     output.push_str(&type_definitions(document)?);
-    output.push_str("\nexport type AuthAttachment = { headers?: Record<string, string>; query?: Record<string, string>; cookies?: Record<string, string> };\nexport type AuthAdapter = (context: { scheme: string; method: string; url: URL; headers: Headers }) => AuthAttachment | Promise<AuthAttachment>;\nexport type TokenStore = { get(): string | undefined | Promise<string | undefined>; set(value: string): void | Promise<void>; clear(): void | Promise<void> };\nexport type CredentialSource = string | (() => string | undefined | Promise<string | undefined>) | TokenStore;\nexport type ResponseWithHeaders<T, H> = { value: T; headers: H };\nexport type ClientFailure = { kind: \"network\"; cause: unknown } | { kind: \"timeout\"; afterMs: number } | { kind: \"aborted\"; cause: unknown } | { kind: \"auth_adapter\"; scheme: string; cause: unknown } | { kind: \"auth_source\"; scheme: string; cause: unknown } | { kind: \"protocol\"; message: string } | { kind: \"unexpected_http\"; status: number; body: unknown } | { kind: \"auth\"; schemes: string[] };\n\n");
+    output.push_str("\nexport type AuthAttachment = { headers?: Record<string, string>; query?: Record<string, string>; cookies?: Record<string, string> };\nexport type AuthAdapter = (context: { scheme: string; method: string; url: URL; headers: Headers }) => AuthAttachment | Promise<AuthAttachment>;\nexport type TokenStore = { get(): string | undefined | Promise<string | undefined>; set(value: string): void | Promise<void>; clear(): void | Promise<void> };\nexport type CredentialSource = string | (() => string | undefined | Promise<string | undefined>) | TokenStore;\nexport type RequestInterceptor = (context: { url: URL; init: RequestInit }) => void | Promise<void>;\nexport type ResponseInterceptor = (context: { response: Response; url: URL; init: RequestInit }) => void | Promise<void>;\nexport type Interceptors = { request?: RequestInterceptor; response?: ResponseInterceptor };\nexport type ResponseWithHeaders<T, H> = { value: T; headers: H };\nexport type ClientFailure = { kind: \"network\"; cause: unknown } | { kind: \"timeout\"; afterMs: number } | { kind: \"aborted\"; cause: unknown } | { kind: \"auth_adapter\"; scheme: string; cause: unknown } | { kind: \"auth_source\"; scheme: string; cause: unknown } | { kind: \"interceptor\"; phase: \"request\" | \"response\"; cause: unknown } | { kind: \"protocol\"; message: string } | { kind: \"unexpected_http\"; status: number; body: unknown } | { kind: \"auth\"; schemes: string[] };\n\n");
     output.push_str("export type RetryOptions = { attempts?: number; backoffMs?: number; maxBackoffMs?: number; jitterMs?: number };\n");
     output.push_str("export type CallOptions = { signal?: AbortSignal; timeout?: number; retry?: RetryOptions | false };\n");
-    output.push_str("export type ClientOptions = { baseUrl: string; headers?: HeadersInit; auth?: Record<string, CredentialSource>; authAdapters?: Record<string, AuthAdapter>; fetch?: typeof fetch; signal?: AbortSignal; timeout?: number; retry?: RetryOptions };\n\n");
+    output.push_str("export type ClientOptions = { baseUrl: string; headers?: HeadersInit | (() => HeadersInit | Promise<HeadersInit>); auth?: Record<string, CredentialSource>; authAdapters?: Record<string, AuthAdapter>; fetch?: typeof fetch; signal?: AbortSignal; timeout?: number; retry?: RetryOptions; interceptors?: Interceptors };\n\n");
     output.push_str(runtime::render());
 
     let mut tree = Node::new();
@@ -620,8 +620,12 @@ fn error_descriptor(error: &ErrorResponse) -> Result<String, EmitError> {
     } else {
         format!(", headers: [{headers}]")
     };
+    let retryable = error
+        .retryable
+        .map(|value| format!(", retryable: {value}"))
+        .unwrap_or_default();
     Ok(format!(
-        "{{ status: {status}, content: {}, schema: {schema}{headers} }}",
+        "{{ status: {status}, content: {}, schema: {schema}{retryable}{headers} }}",
         string(content)
     ))
 }
