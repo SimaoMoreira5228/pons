@@ -119,6 +119,10 @@ impl Operation {
             .iter_mut()
             .for_each(|items| items.sort());
         self.auth.alternatives.sort();
+        self.auth
+            .scopes
+            .values_mut()
+            .for_each(|scopes| scopes.sort());
         if let Some(stream) = &mut self.stream {
             stream.kind.canonicalize();
         }
@@ -161,6 +165,9 @@ pub struct HeaderParameter {
 pub struct Body {
     pub ty: TypeRef,
     pub content: ContentKind,
+    pub required: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub media_type: Option<String>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub ext: BTreeMap<String, Value>,
 }
@@ -184,6 +191,8 @@ pub struct Response {
     pub status: u16,
     pub content: ContentKind,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub media_type: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub body: Option<TypeRef>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub headers: Vec<ResponseHeader>,
@@ -195,6 +204,7 @@ impl Response {
     pub(crate) fn equivalent_ignoring_header_case(&self, other: &Self) -> bool {
         self.status == other.status
             && self.content == other.content
+            && self.media_type == other.media_type
             && self.body == other.body
             && self.ext == other.ext
             && self.headers.len() == other.headers.len()
@@ -227,6 +237,8 @@ pub struct ErrorResponse {
     pub status: ErrorStatus,
     pub name: Name,
     pub content: ErrorContent,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub media_type: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub body: Option<TypeRef>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -331,6 +343,8 @@ pub enum ErrorContent {
 pub struct AuthRequirement {
     #[serde(default)]
     pub alternatives: Vec<Vec<String>>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub scopes: BTreeMap<String, Vec<String>>,
     #[serde(default)]
     pub optional: bool,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]

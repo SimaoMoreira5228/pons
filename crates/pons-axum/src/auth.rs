@@ -20,6 +20,22 @@ impl OperationCx {
         self.require_all([scheme]);
     }
 
+    pub fn require_scopes<I, S>(&mut self, scheme: impl Into<String>, scopes: I)
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        let scheme = scheme.into();
+        self.require_all([scheme.clone()]);
+        let values = self.auth.scopes.entry(scheme).or_default();
+        for scope in scopes {
+            let scope = scope.into();
+            if !values.contains(&scope) {
+                values.push(scope);
+            }
+        }
+    }
+
     pub fn require_all<I, S>(&mut self, schemes: I)
     where
         I: IntoIterator<Item = S>,
@@ -69,6 +85,14 @@ impl OperationCx {
 }
 
 pub(crate) fn merge_auth_requirements(target: &mut AuthRequirement, source: &AuthRequirement) {
+    for (scheme, scopes) in &source.scopes {
+        let values = target.scopes.entry(scheme.clone()).or_default();
+        for scope in scopes {
+            if !values.contains(scope) {
+                values.push(scope.clone());
+            }
+        }
+    }
     if source.alternatives.is_empty() {
         return;
     }
@@ -143,12 +167,15 @@ where
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeMap;
+
     use super::*;
 
     #[test]
     fn composes_auth_requirements() {
         let mut cx = OperationCx::default();
         cx.require_all(["session"]);
+        cx.require_scopes("session", ["read", "write"]);
         cx.require_all(["tenant"]);
         cx.require_any(["api_key", "basic"]);
         cx.optional_auth();
@@ -160,5 +187,24 @@ mod tests {
             ]
         );
         assert!(cx.auth.optional);
+        assert_eq!(cx.auth.scopes["session"], ["read", "write"]);
+    }
+
+    #[test]
+    fn merges_auth_scopes() {
+        let mut target = AuthRequirement {
+            alternatives: vec![vec!["session".into()]],
+            scopes: [("session".into(), vec!["read".into()])].into(),
+            optional: false,
+            ext: BTreeMap::new(),
+        };
+        let source = AuthRequirement {
+            alternatives: vec![vec!["session".into()]],
+            scopes: [("session".into(), vec!["read".into(), "write".into()])].into(),
+            optional: false,
+            ext: BTreeMap::new(),
+        };
+        merge_auth_requirements(&mut target, &source);
+        assert_eq!(target.scopes["session"], ["read", "write"]);
     }
 }

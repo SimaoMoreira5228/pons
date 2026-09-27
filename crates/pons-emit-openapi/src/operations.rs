@@ -1,8 +1,9 @@
 use std::collections::BTreeMap;
 
 use pons_ir::{
-    ByteEncoding, ContentKind, EnumRepr, ErrorContent, ErrorStatus, InlineType, Method, Operation,
-    PathSegment, Presence, ResponseHeader, TypeKind, TypeRef,
+    ByteEncoding, ContentKind, EnumRepr, ErrorContent, ErrorStatus, InlineType, Method,
+    ObjectOpenness, Operation, PathSegment, Presence, ResponseHeader, TypeKind, TypeRef,
+    is_valid_media_type,
 };
 use serde_json::{Map, Value, json};
 
@@ -171,9 +172,9 @@ impl Builder<'_> {
             TypeKind::Struct {
                 fields,
                 flattened,
-                additional,
+                openness,
             } => {
-                if additional.is_some() {
+                if !matches!(openness, ObjectOpenness::Reject) {
                     return Err(EmitError(format!(
                         "query type {} accepts additional keys",
                         named.id
@@ -288,7 +289,7 @@ impl Builder<'_> {
                 "OpenAPI cannot describe streaming request bodies".into(),
             ));
         }
-        let media = media_type(body.content, None)?
+        let media = media_type(body.content, None, body.media_type.as_deref())?
             .ok_or_else(|| EmitError("request body cannot use empty or stream content".into()))?;
         let schema = if body.content == ContentKind::Bytes {
             self.validate_byte_body(&body.ty, &mut Vec::new())?;
@@ -297,15 +298,19 @@ impl Builder<'_> {
             self.type_schema(&body.ty)?
         };
         Ok(json!({
-            "required":true,
+            "required":body.required,
             "content":media_content(media, schema),
-            "x-pons":{"ty":body.ty,"content":body.content,"ext":body.ext}
+            "x-pons":{"ty":body.ty,"required":body.required,"content":body.content,"media_type":body.media_type,"ext":body.ext}
         }))
     }
     fn responses(&self, operation: &Operation) -> Result<Value, EmitError> {
         let mut responses = Map::new();
         for response in &operation.responses {
-            let media = media_type(response.content, operation.stream.as_ref())?;
+            let media = media_type(
+                response.content,
+                operation.stream.as_ref(),
+                response.media_type.as_deref(),
+            )?;
             let mut value = json!({"description":"Response"});
             match response.content {
                 ContentKind::Empty => {}
@@ -342,8 +347,7 @@ impl Builder<'_> {
                 }
             }
             add_response_headers(self, &response.headers, &mut value, "response")?;
-            value["x-pons"] =
-                json!({"body":response.body,"content":response.content,"ext":response.ext});
+            value["x-pons"] = json!({"body":response.body,"content":response.content,"media_type":response.media_type,"ext":response.ext});
             insert_response(&mut responses, response.status.to_string(), value)?;
         }
         let errors = if operation.errors_inherit {
@@ -367,14 +371,17 @@ impl Builder<'_> {
                 let body = error.body.as_ref().ok_or_else(|| {
                     EmitError(format!("error {:?} is missing its body", error.name))
                 })?;
-                let media = error_media_type(error.content);
-                value["content"] = media_content(media.into(), self.type_schema(body)?);
+                let media = error
+                    .media_type
+                    .clone()
+                    .unwrap_or_else(|| error_media_type(error.content).into());
+                value["content"] = media_content(media, self.type_schema(body)?);
             }
             add_response_headers(self, &error.headers, &mut value, "error response")?;
             if let Some(retryable) = error.retryable {
                 value["x-pons-retryable"] = json!(retryable);
             }
-            value["x-pons"] = json!({"name":error.name,"body":error.body,"headers":error.headers,"content":error.content,"doc":error.doc,"ext":error.ext});
+            value["x-pons"] = json!({"name":error.name,"body":error.body,"headers":error.headers,"content":error.content,"media_type":error.media_type,"doc":error.doc,"ext":error.ext});
             insert_response(&mut responses, status, value)?;
         }
         if responses.is_empty() {
@@ -494,21 +501,17 @@ fn is_ignored_request_header(name: &str) -> bool {
     )
 }
 
-fn valid_media_type(value: &str) -> bool {
-    let Some((kind, subtype)) = value.split_once('/') else {
-        return false;
-    };
-    !kind.is_empty()
-        && !subtype.is_empty()
-        && value
-            .bytes()
-            .all(|byte| byte.is_ascii_alphanumeric() || b"!#$%&'*+-.^_`|~/@;=".contains(&byte))
-}
-
 fn media_type(
     content: ContentKind,
     stream: Option<&pons_ir::StreamDescription>,
+    override_type: Option<&str>,
 ) -> Result<Option<String>, EmitError> {
+    if let Some(value) = override_type {
+        if !is_valid_media_type(value) {
+            return Err(EmitError(format!("invalid media type {value:?}")));
+        }
+        return Ok(Some(value.into()));
+    }
     Ok(Some(match content {
         ContentKind::Json => "application/json".into(),
         ContentKind::ProblemJson => "application/problem+json".into(),
@@ -520,7 +523,7 @@ fn media_type(
             Some(pons_ir::StreamKind::Sse { .. }) => "text/event-stream".into(),
             Some(pons_ir::StreamKind::Ndjson { .. }) => "application/x-ndjson".into(),
             Some(pons_ir::StreamKind::Bytes { content_type })
-                if !valid_media_type(content_type) =>
+                if !is_valid_media_type(content_type) =>
             {
                 return Err(EmitError(format!(
                     "invalid byte stream content type {content_type:?}"

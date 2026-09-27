@@ -1,8 +1,8 @@
 use std::collections::BTreeMap;
 
 use pons_ir::{
-    Document, EnumRepr, Field, InlineType, IntegerWire, TypeDef, TypeKind, TypeRef, Variant,
-    VariantPayload,
+    Document, EnumRepr, Field, InlineType, IntegerWire, ObjectOpenness, TypeDef, TypeKind, TypeRef,
+    Variant, VariantPayload,
 };
 
 use crate::{EmitError, EmitMode, string};
@@ -33,17 +33,29 @@ fn definition_type(
         TypeKind::Struct {
             fields,
             flattened,
-            additional,
+            openness,
         } => {
             let mut members = fields
                 .iter()
                 .map(|field| field_type(field, document, names, mode))
                 .collect::<Result<Vec<_>, _>>()?;
-            if let Some(additional) = additional {
-                members.push(format!(
-                    "[key: string]: {}",
-                    type_ref(additional, document, names, mode)?
-                ));
+            match openness {
+                ObjectOpenness::Reject => {}
+                ObjectOpenness::PreserveTyped { value } => {
+                    let extra = type_ref(value, document, names, mode)?;
+                    for field in fields {
+                        if type_ref(&field.ty, document, names, mode)? != extra {
+                            return Err(EmitError(
+                                "TypeScript cannot represent typed object openness when fields have different types"
+                                    .into(),
+                            ));
+                        }
+                    }
+                    members.push(format!("[key: string]: {extra}"));
+                }
+                ObjectOpenness::PreserveOpaque => {
+                    members.push("[key: string]: unknown".into());
+                }
             }
             let mut ty = format!("{{ {} }}", members.join("; "));
             for flat in flattened {

@@ -1,7 +1,7 @@
 use axum::response::IntoResponse;
 use pons_axum::http::StatusCode;
 use pons_axum::routing::post;
-use pons_axum::{Info, JsonResponse, ProblemJsonResponse, Router, WithResponse};
+use pons_axum::{Info, JsonResponse, ProblemJsonResponse, ResponseSpec, Router, WithResponse};
 use pons_core::Schema;
 use pons_ir::{ContentKind, TypeRef};
 use serde::Serialize;
@@ -12,7 +12,27 @@ struct User {
     id: u64,
 }
 
+struct VendorJson;
+
+impl ResponseSpec for VendorJson {
+    fn status() -> u16 {
+        202
+    }
+
+    fn content() -> ContentKind {
+        ContentKind::Json
+    }
+
+    fn media_type() -> Option<&'static str> {
+        Some("application/vnd.acme+json")
+    }
+}
+
 async fn created_response() -> WithResponse<User, JsonResponse<201>> {
+    WithResponse::new(StatusCode::OK.into_response())
+}
+
+async fn vendor_response() -> WithResponse<User, VendorJson> {
     WithResponse::new(StatusCode::OK.into_response())
 }
 
@@ -51,4 +71,18 @@ fn explicit_response_metadata_preserves_runtime_status() {
         operation.responses[0].body,
         Some(TypeRef::Named(_))
     ));
+    let vendor =
+        WithResponse::<User, VendorJson>::new(StatusCode::OK.into_response()).into_response();
+    assert_eq!(
+        vendor.headers()["content-type"],
+        "application/vnd.acme+json"
+    );
+    let document = Router::<()>::new(info())
+        .route("/vendor", post(vendor_response))
+        .into_document()
+        .unwrap();
+    assert_eq!(
+        document.operations[0].responses[0].media_type.as_deref(),
+        Some("application/vnd.acme+json")
+    );
 }

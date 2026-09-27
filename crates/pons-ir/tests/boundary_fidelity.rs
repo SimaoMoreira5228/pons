@@ -5,11 +5,12 @@ type InsertUnknown = fn(&mut serde_json::Value);
 #[test]
 fn numeric_values_round_trip_without_precision_loss() {
     let source = r#"{
-        "ir_version": "0.1",
+        "ir_version": "0.2",
         "info": {"title": "Example", "version": "1"},
         "types": {
             "Wide": {
                 "kind": "struct",
+                "openness": "reject",
                 "name": ["wide"],
                 "direction": "both",
                 "fields": [{
@@ -43,7 +44,7 @@ fn numeric_values_round_trip_without_precision_loss() {
 fn rejects_unknown_members_at_nested_paths() {
     let source: serde_json::Value =
         serde_json::from_str(include_str!("../../../fixtures/login.json")).unwrap();
-    let cases: [(&str, InsertUnknown); 5] = [
+    let cases: [(&str, InsertUnknown); 6] = [
         ("top", |value| {
             value
                 .as_object_mut()
@@ -67,6 +68,12 @@ fn rejects_unknown_members_at_nested_paths() {
                 .as_object_mut()
                 .unwrap()
                 .insert("future".into(), serde_json::json!(true));
+        }),
+        ("legacy-additional", |value| {
+            value["types"]["User"]
+                .as_object_mut()
+                .unwrap()
+                .insert("additional".into(), serde_json::json!(null));
         }),
         ("path", |value| {
             value["operations"][0]["path"][0]

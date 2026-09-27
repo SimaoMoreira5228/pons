@@ -51,7 +51,13 @@ impl Builder<'_> {
                     if !self.document.auth_schemes.contains_key(scheme) {
                         return Err(EmitError(format!("unknown auth scheme {scheme}")));
                     }
-                    requirement.insert(self.security_names[scheme].clone(), json!([]));
+                    let scopes = operation
+                        .auth
+                        .scopes
+                        .get(scheme)
+                        .cloned()
+                        .unwrap_or_default();
+                    requirement.insert(self.security_names[scheme].clone(), json!(scopes));
                 }
                 Ok(Value::Object(requirement))
             })

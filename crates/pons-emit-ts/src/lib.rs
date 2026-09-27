@@ -6,8 +6,8 @@ mod types;
 use std::collections::BTreeMap;
 
 use pons_ir::{
-    Document, InlineType, IntegerWire, PathSegment, StreamKind, TypeDef, TypeKind, TypeRef,
-    VariantPayload,
+    Document, InlineType, IntegerWire, ObjectOpenness, PathSegment, StreamKind, TypeDef, TypeKind,
+    TypeRef, VariantPayload,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -217,7 +217,7 @@ fn scan_definition(path: &str, definition: &TypeDef, paths: &mut Vec<String>) {
         TypeKind::Struct {
             fields,
             flattened,
-            additional,
+            openness,
         } => {
             for (index, field) in fields.iter().enumerate() {
                 scan_type_ref(&field.ty, &format!("{path}.fields[{index}].ty"), paths);
@@ -225,8 +225,8 @@ fn scan_definition(path: &str, definition: &TypeDef, paths: &mut Vec<String>) {
             for (index, reference) in flattened.iter().enumerate() {
                 scan_type_ref(reference, &format!("{path}.flattened[{index}]"), paths);
             }
-            if let Some(additional) = additional {
-                scan_type_ref(additional, &format!("{path}.additional"), paths);
+            if let ObjectOpenness::PreserveTyped { value } = openness {
+                scan_type_ref(value, &format!("{path}.openness.value"), paths);
             }
         }
         TypeKind::Enum { variants, .. } => {
@@ -421,7 +421,8 @@ pub(crate) fn string(value: &str) -> String {
 #[cfg(test)]
 mod tests {
     use pons_ir::{
-        ContentKind, Document, IR_VERSION, InlineType, IntegerWire, StreamKind, TypeKind, TypeRef,
+        ContentKind, Document, IR_VERSION, InlineType, IntegerWire, ObjectOpenness, StreamKind,
+        TypeKind, TypeRef,
     };
     use std::collections::BTreeMap;
 
@@ -499,7 +500,7 @@ mod tests {
         assert!(client.contains("application/problem+json"));
         assert!(client.contains("stream === \"ndjson\""));
         assert!(client.contains("\"text/event-stream\""));
-        assert!(client.contains("actualContentType !== expectedContentType"));
+        assert!(client.contains("actualContentType !== mediaTypeBase(expectedContentType)"));
         assert!(client.contains("const text = await response.text()"));
         assert!(client.contains("rawValue = parseJson(text, preserveWideIntegers)"));
         assert!(client.contains("invalid JSON response"));
@@ -533,6 +534,132 @@ mod tests {
             .find("return ok(withResponseHeaders(readSse")
             .unwrap();
         assert!(stream_capture < stream_return);
+    }
+
+    #[test]
+    fn emits_auth_scopes_for_custom_adapters() {
+        let mut document: Document =
+            serde_json::from_str(include_str!("../../../fixtures/login.json")).unwrap();
+        document.operations[1]
+            .auth
+            .scopes
+            .insert("tenant".into(), vec!["events:read".into()]);
+        let output = super::emit(&document).unwrap();
+        let client = output
+            .into_iter()
+            .find(|file| file.path == "client.ts")
+            .unwrap();
+        assert!(client.content.contains("\"tenant\": [\"events:read\"]"));
+        assert!(client.content.contains("scopes: authScopes[scheme]"));
+    }
+
+    #[test]
+    fn emits_object_openness_types() {
+        let mut document: Document =
+            serde_json::from_str(include_str!("../../../fixtures/login.json")).unwrap();
+        let user = document.types.get_mut("User").unwrap();
+        let TypeKind::Struct {
+            fields, flattened, ..
+        } = &user.definition
+        else {
+            unreachable!()
+        };
+        user.definition = TypeKind::Struct {
+            fields: fields.clone(),
+            flattened: flattened.clone(),
+            openness: ObjectOpenness::PreserveOpaque,
+        };
+        let login = document.types.get_mut("LoginRequest").unwrap();
+        let TypeKind::Struct {
+            fields, flattened, ..
+        } = &login.definition
+        else {
+            unreachable!()
+        };
+        login.definition = TypeKind::Struct {
+            fields: fields.clone(),
+            flattened: flattened.clone(),
+            openness: ObjectOpenness::PreserveTyped {
+                value: TypeRef::Inline(InlineType::String {
+                    format: None,
+                    min_length: None,
+                    max_length: None,
+                    pattern: None,
+                }),
+            },
+        };
+        let output = super::emit(&document).unwrap();
+        let types = output
+            .into_iter()
+            .find(|file| file.path == "types.ts")
+            .unwrap();
+        assert!(types.content.contains("[key: string]: string"));
+        assert!(types.content.contains("[key: string]: unknown"));
+    }
+
+    #[test]
+    fn emits_optional_request_body_arguments() {
+        let mut document: Document =
+            serde_json::from_str(include_str!("../../../fixtures/login.json")).unwrap();
+        document.operations[0].body.as_mut().unwrap().required = false;
+        let output = super::emit(&document).unwrap();
+        let client = output
+            .into_iter()
+            .find(|file| file.path == "client.ts")
+            .unwrap();
+        assert!(client.content.contains("body?:"));
+    }
+
+    #[test]
+    fn rejects_incompatible_typed_object_openness() {
+        let mut document: Document =
+            serde_json::from_str(include_str!("../../../fixtures/login.json")).unwrap();
+        let user = document.types.get_mut("User").unwrap();
+        let TypeKind::Struct {
+            fields, flattened, ..
+        } = &user.definition
+        else {
+            unreachable!()
+        };
+        user.definition = TypeKind::Struct {
+            fields: fields.clone(),
+            flattened: flattened.clone(),
+            openness: ObjectOpenness::PreserveTyped {
+                value: TypeRef::Inline(InlineType::Bytes {
+                    encoding: pons_ir::ByteEncoding::Base64,
+                }),
+            },
+        };
+        assert!(
+            super::emit(&document)
+                .unwrap_err()
+                .0
+                .contains("typed object openness")
+        );
+    }
+
+    #[test]
+    fn emits_custom_media_types_for_json_and_bytes() {
+        let mut document: Document =
+            serde_json::from_str(include_str!("../../../fixtures/login.json")).unwrap();
+        let login = document
+            .operations
+            .iter_mut()
+            .find(|operation| operation.id[0][0] == "auth")
+            .unwrap();
+        login.body.as_mut().unwrap().media_type = Some("application/vnd.acme+json".into());
+        login.responses[0].media_type = Some("application/vnd.acme.session+json".into());
+        let output = super::emit(&document).unwrap();
+        let client = output
+            .into_iter()
+            .find(|file| file.path == "client.ts")
+            .unwrap();
+        assert!(client.content.contains("\"application/vnd.acme+json\""));
+        assert!(
+            client
+                .content
+                .contains("mediaType: \"application/vnd.acme.session+json\"")
+        );
     }
 
     #[test]
@@ -689,7 +816,7 @@ mod tests {
         document.ir_version = "9.0".into();
         assert!(super::emit(&document).is_err());
         assert_eq!(document.ir_version, "9.0");
-        assert_eq!(IR_VERSION, "0.1");
+        assert_eq!(IR_VERSION, "0.2");
     }
 
     #[test]

@@ -1,5 +1,5 @@
 {
-  "ir_version": "0.1",
+  "ir_version": "0.2",
   "info": {
     "title": "Example",
     "version": "1",
@@ -11,6 +11,7 @@
   "types": {
     "User": {
       "kind": "struct",
+      "openness": "preserve_opaque",
       "name": ["user"],
       "direction": "output",
       "ext": {"source.type": "kept"},
@@ -32,6 +33,7 @@
     },
     "LoginRequest": {
       "kind": "struct",
+      "openness": "preserve_opaque",
       "name": ["login", "request"],
       "direction": "input",
       "fields": [
@@ -70,6 +72,7 @@
     },
     "EventQuery": {
       "kind": "struct",
+      "openness": "reject",
       "name": ["event", "query"],
       "direction": "input",
       "fields": [
@@ -91,7 +94,7 @@
       "id": [["auth"], ["login"]],
       "method": "POST",
       "path": [{"lit": "auth"}, {"lit": "login"}],
-      "body": {"ty": {"ref": "LoginRequest"}, "content": "json"},
+      "body": {"ty": {"ref": "LoginRequest"}, "content": "json", "required": true},
       "responses": [{"status": 200, "content": "json", "body": {"ref": "User"}}],
       "errors": [
         {

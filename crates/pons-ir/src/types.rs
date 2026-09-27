@@ -24,6 +24,17 @@ pub struct TypeDef {
     pub ext: BTreeMap<String, Value>,
 }
 
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields, rename_all = "snake_case")]
+pub enum ObjectOpenness {
+    #[default]
+    Reject,
+    PreserveTyped {
+        value: TypeRef,
+    },
+    PreserveOpaque,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 #[serde(tag = "kind", rename_all = "snake_case")]
@@ -33,8 +44,7 @@ pub enum TypeKind {
         fields: Vec<Field>,
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         flattened: Vec<TypeRef>,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        additional: Option<Box<TypeRef>>,
+        openness: ObjectOpenness,
     },
     Enum {
         repr: EnumRepr,
@@ -51,12 +61,12 @@ impl TypeKind {
             Self::Struct {
                 fields,
                 flattened,
-                additional,
+                openness,
             } => {
                 fields.iter().for_each(|field| field.ty.visit_refs(visit));
                 flattened.iter().for_each(|ty| ty.visit_refs(visit));
-                if let Some(ty) = additional {
-                    ty.visit_refs(visit);
+                if let ObjectOpenness::PreserveTyped { value } = openness {
+                    value.visit_refs(visit);
                 }
             }
             Self::Enum { variants, .. } => variants

@@ -60,7 +60,7 @@ pub(super) fn emit(
     };
     output.push_str(&auth_types(document));
     output.push_str(&type_definitions(document)?);
-    output.push_str("\nexport type AuthAttachment = { headers?: Record<string, string>; query?: Record<string, string>; cookies?: Record<string, string> };\nexport type AuthAdapter = (context: { scheme: string; method: string; url: URL; headers: Headers }) => AuthAttachment | Promise<AuthAttachment>;\nexport type TokenStore = { get(): string | undefined | Promise<string | undefined>; set(value: string, expiresAt?: number): void | Promise<void>; clear(): void | Promise<void> };\nexport type CredentialSource = string | (() => string | undefined | Promise<string | undefined>) | TokenStore;\nexport type RequestInterceptor = (context: { url: URL; init: RequestInit }) => void | Promise<void>;\nexport type ResponseInterceptor = (context: { response: Response; url: URL; init: RequestInit }) => void | Promise<void>;\nexport type Interceptors = { request?: RequestInterceptor; response?: ResponseInterceptor };\nexport type ResponseWithHeaders<T, H> = { value: T; headers: H };\nexport type ClientFailure = { kind: \"network\"; cause: unknown } | { kind: \"timeout\"; afterMs: number } | { kind: \"aborted\"; cause: unknown } | { kind: \"auth_adapter\"; scheme: string; cause: unknown } | { kind: \"auth_source\"; scheme: string; cause: unknown } | { kind: \"interceptor\"; phase: \"request\" | \"response\"; cause: unknown } | { kind: \"protocol\"; message: string } | { kind: \"unexpected_http\"; status: number; body: unknown } | { kind: \"auth\"; schemes: string[] };\n\n");
+    output.push_str("\nexport type AuthAttachment = { headers?: Record<string, string>; query?: Record<string, string>; cookies?: Record<string, string> };\nexport type AuthAdapter = (context: { scheme: string; scopes: readonly string[]; method: string; url: URL; headers: Headers }) => AuthAttachment | Promise<AuthAttachment>;\nexport type TokenStore = { get(): string | undefined | Promise<string | undefined>; set(value: string, expiresAt?: number): void | Promise<void>; clear(): void | Promise<void> };\nexport type CredentialSource = string | (() => string | undefined | Promise<string | undefined>) | TokenStore;\nexport type RequestInterceptor = (context: { url: URL; init: RequestInit }) => void | Promise<void>;\nexport type ResponseInterceptor = (context: { response: Response; url: URL; init: RequestInit }) => void | Promise<void>;\nexport type Interceptors = { request?: RequestInterceptor; response?: ResponseInterceptor };\nexport type ResponseWithHeaders<T, H> = { value: T; headers: H };\nexport type ClientFailure = { kind: \"network\"; cause: unknown } | { kind: \"timeout\"; afterMs: number } | { kind: \"aborted\"; cause: unknown } | { kind: \"auth_adapter\"; scheme: string; cause: unknown } | { kind: \"auth_source\"; scheme: string; cause: unknown } | { kind: \"interceptor\"; phase: \"request\" | \"response\"; cause: unknown } | { kind: \"protocol\"; message: string } | { kind: \"unexpected_http\"; status: number; body: unknown } | { kind: \"auth\"; schemes: string[] };\n\n");
     output.push_str("export type RetryOptions = { attempts?: number; backoffMs?: number; maxBackoffMs?: number; jitterMs?: number };\n");
     output.push_str("export type CallOptions = { headers?: HeadersInit; signal?: AbortSignal; timeout?: number; retry?: RetryOptions | false };\n");
     output.push_str("export type ClientOptions = { baseUrl: string; headers?: HeadersInit | (() => HeadersInit | Promise<HeadersInit>); auth?: Record<string, CredentialSource>; authAdapters?: Record<string, AuthAdapter>; fetch?: typeof fetch; signal?: AbortSignal; timeout?: number; retry?: RetryOptions; interceptors?: Interceptors };\n\n");
@@ -217,6 +217,12 @@ fn operation_function(
         .as_ref()
         .map(|body| string(content_name(body.content)))
         .unwrap_or_else(|| "undefined".into());
+    let media_type = operation
+        .body
+        .as_ref()
+        .and_then(|body| body.media_type.as_deref())
+        .map(string)
+        .unwrap_or_else(|| "undefined".into());
     let groups = operation
         .auth
         .alternatives
@@ -227,6 +233,23 @@ fn operation_function(
                 group
                     .iter()
                     .map(|scheme| string(scheme))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(", ");
+    let scopes = operation
+        .auth
+        .scopes
+        .iter()
+        .map(|(scheme, scopes)| {
+            format!(
+                "{}: [{}]",
+                string(scheme),
+                scopes
+                    .iter()
+                    .map(|scope| string(scope))
                     .collect::<Vec<_>>()
                     .join(", ")
             )
@@ -273,7 +296,7 @@ fn operation_function(
         "export type {args_name} = {{ {args} }};\n{stream_types}export type {success_name} = {success};\nexport type {error_name} = {failure};\n",
     );
     let request = format!(
-        "request<{success_name}, {error_name}>(configured, {method:?}, {path}, {query}, {headers}, {body}, {content}, [{groups}], {body_schema}, [{response_schemas}], [{error_schemas}], {}, {}, {provides}, {options}, {})",
+        "request<{success_name}, {error_name}>(configured, {method:?}, {path}, {query}, {headers}, {body}, {content}, {media_type}, [{groups}], {{{scopes}}}, {body_schema}, [{response_schemas}], [{error_schemas}], {}, {}, {provides}, {options}, {})",
         operation.auth.optional, preserve_wide_integers, operation.semantics.idempotent,
     );
     let function = if error_strategy == ErrorStrategy::Throw {
@@ -331,8 +354,9 @@ fn operation_args(
         fields.push(format!("headers: {{ {} }}", headers.join("; ")));
     }
     if let Some(body) = &operation.body {
+        let optional = if body.required { "" } else { "?" };
         fields.push(format!(
-            "body: {}",
+            "body{optional}: {}",
             types::type_ref(&body.ty, document, names, mode)?
         ));
     }
@@ -579,6 +603,11 @@ fn response_descriptors(operation: &Operation) -> Result<String, EmitError> {
             } else {
                 String::new()
             };
+            let media_type = response
+                .media_type
+                .as_deref()
+                .map(|value| format!(", mediaType: {}", string(value)))
+                .unwrap_or_default();
             let headers = response
                 .headers
                 .iter()
@@ -598,7 +627,7 @@ fn response_descriptors(operation: &Operation) -> Result<String, EmitError> {
                 format!(", headers: [{headers}]")
             };
             Ok(format!(
-                "{{ status: {}, content: {}, schema: {schema}{stream}{headers} }}",
+                "{{ status: {}, content: {}, schema: {schema}{media_type}{stream}{headers} }}",
                 response.status,
                 string(content_name(response.content))
             ))
@@ -644,8 +673,13 @@ fn error_descriptor(error: &ErrorResponse) -> Result<String, EmitError> {
         .retryable
         .map(|value| format!(", retryable: {value}"))
         .unwrap_or_default();
+    let media_type = error
+        .media_type
+        .as_deref()
+        .map(|value| format!(", mediaType: {}", string(value)))
+        .unwrap_or_default();
     Ok(format!(
-        "{{ status: {status}, content: {}, schema: {schema}{retryable}{headers} }}",
+        "{{ status: {status}, content: {}, schema: {schema}{media_type}{retryable}{headers} }}",
         string(content)
     ))
 }

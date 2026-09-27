@@ -5,6 +5,13 @@ use pons_ir::{
 use std::collections::BTreeMap;
 
 #[derive(pons_core::Schema)]
+#[serde(deny_unknown_fields)]
+#[allow(dead_code)]
+struct ClosedRequest {
+    value: String,
+}
+
+#[derive(pons_core::Schema)]
 /// Request payload for an account login.
 struct LoginRequest {
     /// Account email address.
@@ -102,6 +109,25 @@ enum StatusError {
     Client,
     #[pons(status = "default")]
     Fallback,
+}
+
+#[test]
+fn derives_object_openness_from_serde_attributes() {
+    let mut cx = TypeCx::new();
+    let open = LoginRequest::schema(&mut cx, Direction::Input);
+    let closed = ClosedRequest::schema(&mut cx, Direction::Input);
+    let TypeRef::Named(open) = open else { panic!() };
+    let TypeRef::Named(closed) = closed else {
+        panic!()
+    };
+    let TypeKind::Struct { openness, .. } = &cx.definitions()[&open.id].definition else {
+        panic!()
+    };
+    assert_eq!(openness, &pons_ir::ObjectOpenness::PreserveOpaque);
+    let TypeKind::Struct { openness, .. } = &cx.definitions()[&closed.id].definition else {
+        panic!()
+    };
+    assert_eq!(openness, &pons_ir::ObjectOpenness::Reject);
 }
 
 #[test]

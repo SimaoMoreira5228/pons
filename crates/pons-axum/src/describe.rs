@@ -383,9 +383,40 @@ impl OperationCx {
     }
 
     pub fn request_body<T: Schema>(&mut self, content: ContentKind) {
+        self.request_body_with_presence::<T>(content, None, true);
+    }
+
+    pub fn optional_request_body<T: Schema>(&mut self, content: ContentKind) {
+        self.request_body_with_presence::<T>(content, None, false);
+    }
+
+    pub fn request_body_with_media<T: Schema>(
+        &mut self,
+        content: ContentKind,
+        media_type: Option<String>,
+    ) {
+        self.request_body_with_presence::<T>(content, media_type, true);
+    }
+
+    pub fn optional_request_body_with_media<T: Schema>(
+        &mut self,
+        content: ContentKind,
+        media_type: Option<String>,
+    ) {
+        self.request_body_with_presence::<T>(content, media_type, false);
+    }
+
+    fn request_body_with_presence<T: Schema>(
+        &mut self,
+        content: ContentKind,
+        media_type: Option<String>,
+        required: bool,
+    ) {
         let body = Body {
             ty: T::schema(&mut self.types, Direction::Input),
             content,
+            required,
+            media_type,
             ext: Default::default(),
         };
         if self.body.replace(body).is_some() {
@@ -397,9 +428,19 @@ impl OperationCx {
     }
 
     pub fn response<T: Schema>(&mut self, status: u16, content: ContentKind) {
+        self.response_with_media::<T>(status, content, None);
+    }
+
+    pub fn response_with_media<T: Schema>(
+        &mut self,
+        status: u16,
+        content: ContentKind,
+        media_type: Option<String>,
+    ) {
         self.responses.push(Response {
             status,
             content,
+            media_type,
             body: Some(T::schema(&mut self.types, Direction::Output)),
             headers: Vec::new(),
             ext: Default::default(),
@@ -410,6 +451,7 @@ impl OperationCx {
         self.responses.push(Response {
             status,
             content: ContentKind::Empty,
+            media_type: None,
             body: None,
             headers: Vec::new(),
             ext: Default::default(),
@@ -428,6 +470,7 @@ impl OperationCx {
         self.responses.push(Response {
             status: 200,
             content: ContentKind::Stream,
+            media_type: None,
             body: None,
             headers: Vec::new(),
             ext: Default::default(),
@@ -443,6 +486,7 @@ impl OperationCx {
         self.responses.push(Response {
             status: 200,
             content: ContentKind::Stream,
+            media_type: None,
             body: None,
             headers: Vec::new(),
             ext: Default::default(),
@@ -458,6 +502,7 @@ impl OperationCx {
         self.responses.push(Response {
             status: 200,
             content: ContentKind::Stream,
+            media_type: None,
             body: None,
             headers: Vec::new(),
             ext: Default::default(),
@@ -729,6 +774,13 @@ mod tests {
             parse_header::<String>(&headers, "X Request ID"),
             Err(HeaderRejection::Invalid)
         );
+    }
+
+    #[test]
+    fn marks_optional_request_bodies() {
+        let mut cx = OperationCx::default();
+        cx.optional_request_body::<String>(ContentKind::Text);
+        assert!(!cx.body.as_ref().unwrap().required);
     }
 
     #[test]

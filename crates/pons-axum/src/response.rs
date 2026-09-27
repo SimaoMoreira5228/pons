@@ -9,6 +9,9 @@ use crate::describe::{DescribeResponse, OperationCx, StatusResponse};
 pub trait ResponseSpec {
     fn status() -> u16;
     fn content() -> ContentKind;
+    fn media_type() -> Option<&'static str> {
+        None
+    }
 }
 
 pub struct JsonResponse<const STATUS: u16>;
@@ -84,7 +87,7 @@ where
         if !response
             .headers()
             .contains_key(axum::http::header::CONTENT_TYPE)
-            && let Some(content_type) = media_type(S::content())
+            && let Some(content_type) = media_type(S::content(), S::media_type())
         {
             response.headers_mut().insert(
                 axum::http::header::CONTENT_TYPE,
@@ -101,7 +104,11 @@ where
     S: ResponseSpec,
 {
     fn describe(cx: &mut OperationCx) {
-        cx.response::<T>(valid_status::<S>(), S::content());
+        cx.response_with_media::<T>(
+            valid_status::<S>(),
+            S::content(),
+            S::media_type().map(str::to_owned),
+        );
     }
 }
 
@@ -112,8 +119,8 @@ where
 {
 }
 
-fn media_type(content: ContentKind) -> Option<&'static str> {
-    match content {
+fn media_type(content: ContentKind, override_type: Option<&'static str>) -> Option<&'static str> {
+    override_type.or(match content {
         ContentKind::Json => Some("application/json"),
         ContentKind::ProblemJson => Some("application/problem+json"),
         ContentKind::Text => Some("text/plain"),
@@ -121,7 +128,7 @@ fn media_type(content: ContentKind) -> Option<&'static str> {
         ContentKind::Form | ContentKind::Multipart | ContentKind::Stream | ContentKind::Empty => {
             None
         }
-    }
+    })
 }
 
 fn valid_status<S: ResponseSpec>() -> u16 {

@@ -150,8 +150,8 @@ fn readable_name(words: &[String]) -> String {
 mod tests {
     use pons_ir::{
         AuthScheme, ByteEncoding, ContentKind, Direction, InlineType, NamedRef, OAuthFlow,
-        OAuthFlowKind, PathSegment, Presence, ResponseHeader, StreamKind, TypeDef, TypeKind,
-        TypeRef,
+        OAuthFlowKind, ObjectOpenness, PathSegment, Presence, ResponseHeader, StreamKind, TypeDef,
+        TypeKind, TypeRef,
     };
     use serde_json::{Value, json};
 
@@ -175,7 +175,7 @@ mod tests {
             definition: TypeKind::Struct {
                 fields: Vec::new(),
                 flattened: Vec::new(),
-                additional: None,
+                openness: ObjectOpenness::Reject,
             },
             origin: None,
             doc: None,
@@ -293,6 +293,118 @@ mod tests {
             &output["paths"]["/auth/login"]["post"]["responses"]["4XX"]["headers"]["Retry-After"];
         assert_eq!(header["required"], true);
         assert_eq!(header["schema"]["type"], "string");
+    }
+
+    #[test]
+    fn emits_auth_scopes_in_security_requirements() {
+        let mut document = fixture();
+        document.operations[1]
+            .auth
+            .scopes
+            .insert("tenant".into(), vec!["events:read".into()]);
+        let output: Value = serde_json::from_str(&super::emit(&document).unwrap()).unwrap();
+        assert_eq!(
+            output["paths"]["/events/{cursor}"]["get"]["security"][0]["Tenant"][0],
+            "events:read"
+        );
+    }
+
+    #[test]
+    fn emits_object_openness_policies() {
+        let mut document = fixture();
+        let user = document.types.get_mut("User").unwrap();
+        let TypeKind::Struct {
+            fields, flattened, ..
+        } = &user.definition
+        else {
+            unreachable!()
+        };
+        user.definition = TypeKind::Struct {
+            fields: fields.clone(),
+            flattened: flattened.clone(),
+            openness: ObjectOpenness::PreserveTyped { value: string() },
+        };
+        let login = document.types.get_mut("LoginRequest").unwrap();
+        let TypeKind::Struct {
+            fields, flattened, ..
+        } = &login.definition
+        else {
+            unreachable!()
+        };
+        login.definition = TypeKind::Struct {
+            fields: fields.clone(),
+            flattened: flattened.clone(),
+            openness: ObjectOpenness::PreserveOpaque,
+        };
+        let output: Value = serde_json::from_str(&super::emit(&document).unwrap()).unwrap();
+        assert_eq!(
+            output["components"]["schemas"]["User"]["additionalProperties"]["type"],
+            "string"
+        );
+        assert_eq!(
+            output["components"]["schemas"]["LoginRequest"]["additionalProperties"],
+            json!(true)
+        );
+        assert_eq!(
+            output["components"]["schemas"]["EventQuery"]["additionalProperties"],
+            json!(false)
+        );
+    }
+
+    #[test]
+    fn emits_optional_request_bodies() {
+        let mut document = fixture();
+        let login = document
+            .operations
+            .iter_mut()
+            .find(|operation| operation.id[0][0] == "auth")
+            .unwrap();
+        login.body.as_mut().unwrap().required = false;
+        let output: Value = serde_json::from_str(&super::emit(&document).unwrap()).unwrap();
+        assert_eq!(
+            output["paths"]["/auth/login"]["post"]["requestBody"]["required"],
+            false
+        );
+    }
+
+    #[test]
+    fn rejects_opaque_query_objects() {
+        let mut document = fixture();
+        let query = document.types.get_mut("EventQuery").unwrap();
+        let TypeKind::Struct {
+            fields, flattened, ..
+        } = &query.definition
+        else {
+            unreachable!()
+        };
+        query.definition = TypeKind::Struct {
+            fields: fields.clone(),
+            flattened: flattened.clone(),
+            openness: ObjectOpenness::PreserveOpaque,
+        };
+        assert!(super::emit(&document).is_err());
+    }
+
+    #[test]
+    fn emits_exact_custom_media_types() {
+        let mut document = fixture();
+        let login = document
+            .operations
+            .iter_mut()
+            .find(|operation| operation.id[0][0] == "auth")
+            .unwrap();
+        login.body.as_mut().unwrap().media_type = Some("application/vnd.acme+json".into());
+        login.responses[0].media_type = Some("application/vnd.acme.session+json".into());
+        login.errors[0].media_type = Some("application/vnd.acme.error+json".into());
+        let output: Value = serde_json::from_str(&super::emit(&document).unwrap()).unwrap();
+        let login = &output["paths"]["/auth/login"]["post"];
+        assert!(login["requestBody"]["content"]["application/vnd.acme+json"].is_object());
+        assert!(
+            login["responses"]["200"]["content"]["application/vnd.acme.session+json"].is_object()
+        );
+        assert!(
+            login["responses"]["4XX"]["content"]["application/vnd.acme.error+json"].is_object()
+        );
     }
 
     #[test]

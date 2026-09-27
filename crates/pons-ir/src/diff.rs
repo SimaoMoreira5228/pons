@@ -127,12 +127,12 @@ fn diff_type(diff: &mut Diff, id: &str, old: &TypeDef, new: &TypeDef) {
             TypeKind::Struct {
                 fields: old_fields,
                 flattened: old_flattened,
-                additional: old_additional,
+                openness: old_openness,
             },
             TypeKind::Struct {
                 fields: new_fields,
                 flattened: new_flattened,
-                additional: new_additional,
+                openness: new_openness,
             },
         ) => {
             diff_fields(diff, &path, old.direction, old_fields, new_fields);
@@ -144,12 +144,12 @@ fn diff_type(diff: &mut Diff, id: &str, old: &TypeDef, new: &TypeDef) {
                     "flattened types changed",
                 );
             }
-            if old_additional != new_additional {
+            if old_openness != new_openness {
                 add(
                     diff,
                     ChangeLevel::Breaking,
                     &path,
-                    "additional property type changed",
+                    "object openness policy changed",
                 );
             }
         }
@@ -720,6 +720,14 @@ mod tests {
             level(&old, changed, "types.LoginError.variants.expired"),
             ChangeLevel::Warning
         );
+    }
+
+    #[test]
+    fn object_openness_changes_are_breaking() {
+        let old: Document = serde_json::from_value(fixture()).unwrap();
+        let mut changed = fixture();
+        changed["types"]["User"]["openness"] = serde_json::json!("reject");
+        assert_eq!(level(&old, changed, "types.User"), ChangeLevel::Breaking);
     }
 
     #[test]

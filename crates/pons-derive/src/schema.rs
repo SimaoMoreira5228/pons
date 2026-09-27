@@ -20,9 +20,12 @@ pub(super) fn expand(container: &ast::Container<'_>) -> TokenStream {
     let name = words(&ident.to_string());
     let doc = doc_value(&container.original.attrs);
     let base_definition = match &container.data {
-        ast::Data::Struct(style, fields) => {
-            struct_definition(*style, fields, container.attrs.transparent())
-        }
+        ast::Data::Struct(style, fields) => struct_definition(
+            *style,
+            fields,
+            container.attrs.transparent(),
+            container.attrs.deny_unknown_fields(),
+        ),
         ast::Data::Enum(variants) => enum_definition(variants, container.attrs.tag()),
     };
     let input_type = container
@@ -96,6 +99,7 @@ fn struct_definition(
     style: ast::Style,
     fields: &[ast::Field<'_>],
     transparent: bool,
+    deny_unknown_fields: bool,
 ) -> TokenStream {
     if transparent || matches!(style, ast::Style::Newtype) {
         let field = fields.first().expect("newtype structs have a field");
@@ -121,7 +125,12 @@ fn struct_definition(
         let mut fields = Vec::new();
         let mut flattened = Vec::new();
         #(#field_builders)*
-        ::pons_core::ir::TypeKind::Struct { fields, flattened, additional: None }
+        let openness = if #deny_unknown_fields {
+            ::pons_core::ir::ObjectOpenness::Reject
+        } else {
+            ::pons_core::ir::ObjectOpenness::PreserveOpaque
+        };
+        ::pons_core::ir::TypeKind::Struct { fields, flattened, openness }
     }
 }
 

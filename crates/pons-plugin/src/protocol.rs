@@ -1,7 +1,7 @@
 use std::collections::BTreeMap;
 use std::path::{Component, Path};
 
-use pons_ir::{Document, EnumRepr, StreamKind, TypeKind};
+use pons_ir::{Document, EnumRepr, ObjectOpenness, StreamKind, TypeKind};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -35,6 +35,8 @@ pub struct EmitterCapabilities {
     pub provides: bool,
     #[serde(default)]
     pub flattened: bool,
+    #[serde(default)]
+    pub object_openness: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -182,13 +184,29 @@ impl EmitterManifest {
                         )));
                     }
                 }
-                TypeKind::Struct { flattened, .. }
-                    if !flattened.is_empty() && !self.capabilities.flattened =>
-                {
-                    warnings.push(CapabilityWarning(format!(
-                        "{} does not declare flattened struct support in {id}",
-                        self.name
-                    )));
+                TypeKind::Struct {
+                    flattened,
+                    openness,
+                    ..
+                } => {
+                    if !flattened.is_empty() && !self.capabilities.flattened {
+                        warnings.push(CapabilityWarning(format!(
+                            "{} does not declare flattened struct support in {id}",
+                            self.name
+                        )));
+                    }
+                    let openness = object_openness_name(openness);
+                    if !self
+                        .capabilities
+                        .object_openness
+                        .iter()
+                        .any(|value| value == openness)
+                    {
+                        warnings.push(CapabilityWarning(format!(
+                            "{} does not declare {openness} object openness support in {id}",
+                            self.name
+                        )));
+                    }
                 }
                 _ => {}
             }
@@ -279,6 +297,14 @@ fn enum_name(repr: &EnumRepr) -> &'static str {
         EnumRepr::Internal { .. } => "internal",
         EnumRepr::Adjacent { .. } => "adjacent",
         EnumRepr::Untagged => "untagged",
+    }
+}
+
+fn object_openness_name(openness: &ObjectOpenness) -> &'static str {
+    match openness {
+        ObjectOpenness::Reject => "reject",
+        ObjectOpenness::PreserveTyped { .. } => "preserve_typed",
+        ObjectOpenness::PreserveOpaque => "preserve_opaque",
     }
 }
 

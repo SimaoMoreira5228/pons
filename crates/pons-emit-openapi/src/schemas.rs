@@ -1,6 +1,6 @@
 use pons_ir::{
-    Access, ByteEncoding, DecimalWire, EnumRepr, FieldDefault, InlineType, IntegerWire, Presence,
-    TypeDef, TypeKind, TypeRef, Variant, VariantPayload,
+    Access, ByteEncoding, DecimalWire, EnumRepr, FieldDefault, InlineType, IntegerWire,
+    ObjectOpenness, Presence, TypeDef, TypeKind, TypeRef, Variant, VariantPayload,
 };
 use serde_json::{Map, Value, json};
 
@@ -81,10 +81,14 @@ impl<'a> Builder<'a> {
         for (id, definition) in &self.document.types {
             let mut schema = self.definition_schema(definition)?;
             add_doc(&mut schema, definition.doc.as_ref());
+            let openness = match &definition.definition {
+                TypeKind::Struct { openness, .. } => Some(openness),
+                _ => None,
+            };
             add_extensions(
                 &mut schema,
                 "type",
-                json!({"id":id,"name":definition.name,"direction":definition.direction,"origin":definition.origin,"doc":definition.doc,"ext":definition.ext,"diagnostics":definition.diagnostics}),
+                json!({"id":id,"name":definition.name,"direction":definition.direction,"origin":definition.origin,"doc":definition.doc,"objectOpenness":openness,"ext":definition.ext,"diagnostics":definition.diagnostics}),
             );
             schemas.insert(self.schema_names[id].clone(), schema);
         }
@@ -96,15 +100,19 @@ impl<'a> Builder<'a> {
             TypeKind::Struct {
                 fields,
                 flattened,
-                additional,
+                openness,
             } => {
                 let mut object = fields_schema_with(self, fields)?;
-                if let Some(additional) = additional {
-                    object["additionalProperties"] = self.type_schema(additional)?;
-                }
+                let additional = match openness {
+                    ObjectOpenness::Reject => json!(false),
+                    ObjectOpenness::PreserveTyped { value } => self.type_schema(value)?,
+                    ObjectOpenness::PreserveOpaque => json!(true),
+                };
                 if flattened.is_empty() {
+                    object["additionalProperties"] = additional;
                     Ok(object)
                 } else {
+                    object["unevaluatedProperties"] = additional;
                     let mut all_of = vec![object];
                     for ty in flattened {
                         all_of.push(self.type_schema(ty)?);

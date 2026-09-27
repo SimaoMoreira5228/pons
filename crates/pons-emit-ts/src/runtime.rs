@@ -1,5 +1,6 @@
 fn render_core() -> &'static str {
     r#"class ResponseHeaderDecodeError extends Error {}
+class WirePolicyError extends Error {}
 class CredentialSourceError extends Error {
   constructor(readonly scheme: string, readonly sourceCause: unknown) {
     super(`credential source failed for ${scheme}`);
@@ -21,10 +22,12 @@ async function request<T, E>(
   requestHeaders: Record<string, unknown> | undefined,
   body: unknown,
   content: string | undefined,
+  mediaType: string | undefined,
   authGroups: string[][],
+  authScopes: Record<string, readonly string[]>,
   bodySchema: unknown,
-  responses: Array<{ status: number; content: string; schema?: unknown; stream?: "sse" | "ndjson"; item?: unknown; events?: Array<{ event: string; schema: unknown }>; headers?: Array<{ name: string; required: boolean; schema: unknown }> }>,
-  errors: Array<{ status: number | string; content: string; schema?: unknown; retryable?: boolean; events?: Array<{ event: string; schema: unknown }>; headers?: Array<{ name: string; required: boolean; schema: unknown }> }>,
+  responses: Array<{ status: number; content: string; mediaType?: string; schema?: unknown; stream?: "sse" | "ndjson"; item?: unknown; events?: Array<{ event: string; schema: unknown }>; headers?: Array<{ name: string; required: boolean; schema: unknown }> }>,
+  errors: Array<{ status: number | string; content: string; mediaType?: string; schema?: unknown; retryable?: boolean; events?: Array<{ event: string; schema: unknown }>; headers?: Array<{ name: string; required: boolean; schema: unknown }> }>,
   authOptional: boolean,
   preserveWideIntegers: boolean,
   provides: CredentialProvision | undefined,
@@ -85,7 +88,7 @@ async function request<T, E>(
         const adapter = client.authAdapters?.[scheme];
         if (adapter === undefined) continue;
         try {
-          const attachment = await adapter({ scheme, method, url, headers });
+          const attachment = await adapter({ scheme, scopes: authScopes[scheme] ?? [], method, url, headers });
           for (const [key, value] of Object.entries(attachment.headers ?? {})) headers.set(key, value);
           for (const [key, value] of Object.entries(attachment.query ?? {})) url.searchParams.set(key, value);
           for (const [key, value] of Object.entries(attachment.cookies ?? {})) headers.append("cookie", `${key}=${value}`);
@@ -119,14 +122,14 @@ async function request<T, E>(
         ? encodeWire(body, bodySchema)
         : body;
       if (content === "json" || content === "problem_json") {
-        headers.set("content-type", content === "problem_json" ? "application/problem+json" : "application/json");
+        headers.set("content-type", mediaType ?? (content === "problem_json" ? "application/problem+json" : "application/json"));
         init.body = stringifyJson(encodedBody);
       } else if (content === "form") {
         const form = new URLSearchParams();
         for (const [key, value] of Object.entries(encodeWire(body, bodySchema) as Record<string, unknown>)) {
           if (value !== undefined && value !== null) form.set(key, String(value));
         }
-        headers.set("content-type", "application/x-www-form-urlencoded");
+        headers.set("content-type", mediaType ?? "application/x-www-form-urlencoded");
         init.body = form;
       } else if (content === "multipart") {
         const form = new FormData();
@@ -135,9 +138,10 @@ async function request<T, E>(
         }
         init.body = form;
       } else if (content === "text") {
-        headers.set("content-type", "text/plain; charset=utf-8");
+        headers.set("content-type", mediaType ?? "text/plain; charset=utf-8");
         init.body = String(body);
       } else {
+        if (mediaType) headers.set("content-type", mediaType);
         init.body = body as BodyInit;
       }
     }
@@ -179,11 +183,11 @@ async function request<T, E>(
       text: "text/plain",
       bytes: "application/octet-stream",
     };
-    const expectedContentType = responseKind === "stream"
+    const expectedContentType = responseSchema?.mediaType ?? (responseKind === "stream"
       ? responseSchema?.stream === "ndjson" ? "application/x-ndjson" : "text/event-stream"
-      : responseKind ? expectedContentTypes[responseKind] : undefined;
+      : responseKind ? expectedContentTypes[responseKind] : undefined);
     const actualContentType = responseContent.split(";", 1)[0].trim().toLowerCase();
-    if (expectedContentType !== undefined && actualContentType !== expectedContentType) {
+    if (expectedContentType !== undefined && actualContentType !== mediaTypeBase(expectedContentType)) {
       return err({ kind: "protocol", message: `expected ${expectedContentType}, received ${responseContent || "no content type"}` });
     }
     if (declaredSuccess?.content === "stream") {
@@ -232,7 +236,7 @@ async function request<T, E>(
     return ok(withResponseHeaders(value, response, declaredSuccess, preserveWideIntegers) as T);
   } catch (cause) {
     if (timedOut) return err({ kind: "timeout", afterMs: timeoutMs! });
-    if (cause instanceof ResponseHeaderDecodeError) return err({ kind: "protocol", message: cause.message });
+    if (cause instanceof ResponseHeaderDecodeError || cause instanceof WirePolicyError) return err({ kind: "protocol", message: cause.message });
     if (cause instanceof CredentialSourceError) return err({ kind: "auth_source", scheme: cause.scheme, cause: cause.sourceCause });
     if (typeof DOMException !== "undefined" && cause instanceof DOMException && cause.name === "AbortError") {
       return err({ kind: "aborted", cause });
@@ -326,6 +330,10 @@ async function requestOrThrow<T, E>(operation: Promise<Result<T, E | ClientFailu
   const result = await operation;
   if (result.isErr()) throw result.error;
   return result.value as T;
+}
+
+function mediaTypeBase(value: string): string {
+  return value.split(";", 1)[0].trim().toLowerCase();
 }
 
 function withResponseHeaders(
@@ -607,12 +615,18 @@ function transformStruct(value: any, definition: any, mode: "encode" | "decode")
   const fields = collectFields(definition);
   const flattenedMaps = collectMapValues(definition.flattened ?? []);
   const transform = mode === "encode" ? encodeWire : decodeWire;
-  const output = { ...value };
   const known = new Set(fields.map((field: any) => field.wire));
+  const openness = definition.openness ?? "preserve_opaque";
+  const policy = typeof openness === "string" ? openness : Object.keys(openness)[0];
+  if (policy === "reject") {
+    const unknown = Object.keys(value).find((key) => !known.has(key));
+    if (unknown !== undefined) throw new WirePolicyError(`unknown property ${unknown}`);
+  }
+  const output = policy === "reject" ? {} : { ...value };
   for (const field of fields) {
     if (Object.hasOwn(value, field.wire)) output[field.wire] = transform(value[field.wire], field.ty);
   }
-  const additional = definition.additional ?? flattenedMaps[0];
+  const additional = policy === "preserve_typed" ? openness.preserve_typed.value : flattenedMaps[0];
   if (additional) {
     for (const key of Object.keys(output)) {
       if (!known.has(key)) output[key] = transform(output[key], additional);

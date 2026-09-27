@@ -16,7 +16,7 @@ use crate::types::{
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct Document {
-    #[schemars(regex(pattern = "^0\\.1$"))]
+    #[schemars(regex(pattern = "^0\\.2$"))]
     pub ir_version: String,
     pub info: Info,
     #[serde(default)]
@@ -205,16 +205,25 @@ impl Document {
                     &mut errors,
                 );
             }
-            if let Some(body) = &operation.body
-                && body.content == ContentKind::Empty
-            {
-                errors.push(ValidationError::InvalidValue {
-                    path: owner.clone(),
-                    message: format!(
-                        "request body content {:?} cannot carry a body type",
-                        body.content
-                    ),
-                });
+            if let Some(body) = &operation.body {
+                if body.content == ContentKind::Empty {
+                    errors.push(ValidationError::InvalidValue {
+                        path: owner.clone(),
+                        message: format!(
+                            "request body content {:?} cannot carry a body type",
+                            body.content
+                        ),
+                    });
+                }
+                if body.content == ContentKind::Empty && body.media_type.is_some() {
+                    errors.push(ValidationError::InvalidValue {
+                        path: owner.clone(),
+                        message: "empty request bodies cannot declare a media type".into(),
+                    });
+                }
+                if let Some(media_type) = &body.media_type {
+                    self.validate_media_type(&owner, "request body", media_type, &mut errors);
+                }
             }
             self.visit_operation_refs(&owner, operation, &mut errors);
             if let Some(stream) = &operation.stream
@@ -232,6 +241,46 @@ impl Document {
                         errors.push(ValidationError::UnknownAuthScheme {
                             owner: owner.clone(),
                             scheme: scheme.clone(),
+                        });
+                    }
+                }
+            }
+            for (scheme, scopes) in &operation.auth.scopes {
+                if !self.auth_schemes.contains_key(scheme) {
+                    errors.push(ValidationError::UnknownAuthScheme {
+                        owner: owner.clone(),
+                        scheme: scheme.clone(),
+                    });
+                }
+                if !operation
+                    .auth
+                    .alternatives
+                    .iter()
+                    .any(|alternative| alternative.iter().any(|candidate| candidate == scheme))
+                {
+                    errors.push(ValidationError::InvalidValue {
+                        path: owner.clone(),
+                        message: format!("auth scheme {scheme} has scopes but no auth requirement"),
+                    });
+                }
+                if scopes.is_empty() {
+                    errors.push(ValidationError::InvalidValue {
+                        path: owner.clone(),
+                        message: format!("auth scheme {scheme} has an empty scope list"),
+                    });
+                }
+                let mut unique = BTreeSet::new();
+                for scope in scopes {
+                    if scope.is_empty() || scope.chars().any(char::is_whitespace) {
+                        errors.push(ValidationError::InvalidValue {
+                            path: owner.clone(),
+                            message: format!("auth scheme {scheme} has an invalid scope"),
+                        });
+                    }
+                    if !unique.insert(scope) {
+                        errors.push(ValidationError::InvalidValue {
+                            path: owner.clone(),
+                            message: format!("auth scheme {scheme} repeats scope {scope}"),
                         });
                     }
                 }
@@ -284,6 +333,23 @@ impl Document {
                         path: owner.clone(),
                         message: format!("duplicate response status {}", response.status),
                     });
+                }
+                if response.content == ContentKind::Empty && response.media_type.is_some() {
+                    errors.push(ValidationError::InvalidValue {
+                        path: owner.clone(),
+                        message: format!(
+                            "empty response {} cannot declare a media type",
+                            response.status
+                        ),
+                    });
+                }
+                if let Some(media_type) = &response.media_type {
+                    self.validate_media_type(
+                        &owner,
+                        &format!("response {} body", response.status),
+                        media_type,
+                        &mut errors,
+                    );
                 }
                 let content_matches_body = match response.content {
                     ContentKind::Empty | ContentKind::Stream => response.body.is_none(),
@@ -636,6 +702,21 @@ impl Document {
         }
     }
 
+    fn validate_media_type(
+        &self,
+        owner: &str,
+        label: &str,
+        value: &str,
+        errors: &mut Vec<ValidationError>,
+    ) {
+        if !crate::is_valid_media_type(value) {
+            errors.push(ValidationError::InvalidValue {
+                path: owner.into(),
+                message: format!("{label} has invalid media type {value:?}"),
+            });
+        }
+    }
+
     fn validate_error(
         &self,
         owner: &str,
@@ -674,6 +755,15 @@ impl Document {
                 path: owner.into(),
                 message: format!("error content {:?} does not match its body", error.content),
             });
+        }
+        if error.content == ErrorContent::Empty && error.media_type.is_some() {
+            errors.push(ValidationError::InvalidValue {
+                path: owner.into(),
+                message: "empty errors cannot declare a media type".into(),
+            });
+        }
+        if let Some(media_type) = &error.media_type {
+            self.validate_media_type(owner, "error body", media_type, errors);
         }
         let mut header_names = BTreeSet::new();
         for header in &error.headers {
@@ -909,6 +999,7 @@ impl std::error::Error for ValidationError {}
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ObjectOpenness;
 
     #[test]
     fn rich_document_round_trips_and_validates() {
@@ -924,6 +1015,89 @@ mod tests {
         assert_eq!(
             document.operations[0].errors[0].status,
             ErrorStatus::Class(4)
+        );
+    }
+
+    #[test]
+    fn auth_scopes_validate_scheme_and_uniqueness() {
+        let mut document: Document =
+            serde_json::from_str(include_str!("../../../fixtures/login.json")).unwrap();
+        document.operations[1]
+            .auth
+            .scopes
+            .insert("missing".into(), vec!["read".into(), "read".into()]);
+        let errors = document.validate().unwrap_err();
+        assert!(
+            errors
+                .iter()
+                .any(|error| error.to_string().contains("missing"))
+        );
+        assert!(
+            errors
+                .iter()
+                .any(|error| error.to_string().contains("repeats scope read"))
+        );
+    }
+
+    #[test]
+    fn media_types_validate_and_empty_payloads_reject_them() {
+        let mut document: Document =
+            serde_json::from_str(include_str!("../../../fixtures/login.json")).unwrap();
+        document.operations[0]
+            .body
+            .as_mut()
+            .unwrap()
+            .media_type
+            .clone_from(&Some("application/vnd.acme+json; charset=utf-8".into()));
+        document.validate().unwrap();
+        document.operations[0].body.as_mut().unwrap().media_type = Some("not-a-media-type".into());
+        document.operations[0].responses[0].content = ContentKind::Empty;
+        document.operations[0].responses[0].body = None;
+        document.operations[0].responses[0].media_type = Some("application/json".into());
+        let errors = document.validate().unwrap_err();
+        assert!(
+            errors
+                .iter()
+                .any(|error| error.to_string().contains("invalid media type"))
+        );
+        assert!(
+            errors
+                .iter()
+                .any(|error| error.to_string().contains("empty response"))
+        );
+    }
+
+    #[test]
+    fn object_openness_is_explicit_and_typed_references_are_validated() {
+        let mut document: Document =
+            serde_json::from_str(include_str!("../../../fixtures/login.json")).unwrap();
+        let user = document.types.get_mut("User").unwrap();
+        let TypeKind::Struct {
+            fields, flattened, ..
+        } = &user.definition
+        else {
+            unreachable!()
+        };
+        user.definition = TypeKind::Struct {
+            fields: fields.clone(),
+            flattened: flattened.clone(),
+            openness: ObjectOpenness::PreserveTyped {
+                value: TypeRef::Named(crate::NamedRef {
+                    id: "Missing".into(),
+                    variant: None,
+                }),
+            },
+        };
+        let errors = document.validate().unwrap_err();
+        assert!(
+            errors
+                .iter()
+                .any(|error| error.to_string().contains("Missing"))
+        );
+        let encoded = serde_json::to_value(&document).unwrap();
+        assert_eq!(
+            encoded["types"]["User"]["openness"]["preserve_typed"]["value"]["ref"],
+            "Missing"
         );
     }
 
@@ -950,9 +1124,9 @@ mod tests {
     #[test]
     fn validation_finds_nested_unknown_types_and_bad_contract_links() {
         let json = r#"{
-            "ir_version": "0.1",
+            "ir_version": "0.2",
             "info": {"title": "Example", "version": "1"},
-            "types": {"Items": {"kind": "struct", "name": ["items"], "direction": "both", "fields": [
+            "types": {"Items": {"kind": "struct", "openness": "reject", "name": ["items"], "direction": "both", "fields": [
                 {"wire": "items", "ident": ["items"], "ty": {"kind": "array", "item": {"ref": "Missing"}}, "presence": "required"}
             ]}},
             "operations": [{
@@ -984,11 +1158,12 @@ mod tests {
     #[test]
     fn validation_rejects_inconsistent_payload_header_and_numeric_contracts() {
         let json = r#"{
-            "ir_version": "0.1",
+            "ir_version": "0.2",
             "info": {"title": "Example", "version": "1"},
             "types": {
                 "Bad": {
                     "kind": "struct",
+                    "openness": "reject",
                     "name": ["bad"],
                     "direction": "both",
                     "fields": [{
@@ -1035,7 +1210,7 @@ mod tests {
                     {"wire": "x-trace", "ident": ["trace"], "ty": {"kind": "string"}, "presence": "optional"},
                     {"wire": "bad header", "ident": ["bad"], "ty": {"kind": "string"}, "presence": "optional"}
                 ],
-                "body": {"ty": {"kind": "string"}, "content": "empty"},
+                "body": {"ty": {"kind": "string"}, "content": "empty", "required": true},
                 "responses": [
                     {"status": 200, "content": "json"},
                     {"status": 201, "content": "empty", "body": {"kind": "string"}},

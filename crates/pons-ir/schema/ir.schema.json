@@ -32,7 +32,7 @@
     },
     "ir_version": {
       "type": "string",
-      "pattern": "^0\\.1$"
+      "pattern": "^0\\.2$"
     },
     "operations": {
       "type": "array",
@@ -91,6 +91,15 @@
         "optional": {
           "type": "boolean",
           "default": false
+        },
+        "scopes": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          }
         }
       },
       "additionalProperties": false
@@ -220,6 +229,15 @@
           "type": "object",
           "additionalProperties": true
         },
+        "media_type": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "required": {
+          "type": "boolean"
+        },
         "ty": {
           "$ref": "#/$defs/TypeRef"
         }
@@ -227,7 +245,8 @@
       "additionalProperties": false,
       "required": [
         "ty",
-        "content"
+        "content",
+        "required"
       ]
     },
     "ByteEncoding": {
@@ -549,6 +568,12 @@
           "items": {
             "$ref": "#/$defs/ResponseHeader"
           }
+        },
+        "media_type": {
+          "type": [
+            "string",
+            "null"
+          ]
         },
         "name": {
           "type": "array",
@@ -1062,6 +1087,38 @@
         "implicit"
       ]
     },
+    "ObjectOpenness": {
+      "oneOf": [
+        {
+          "type": "string",
+          "enum": [
+            "reject",
+            "preserve_opaque"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "preserve_typed": {
+              "type": "object",
+              "properties": {
+                "value": {
+                  "$ref": "#/$defs/TypeRef"
+                }
+              },
+              "additionalProperties": false,
+              "required": [
+                "value"
+              ]
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "preserve_typed"
+          ]
+        }
+      ]
+    },
     "Operation": {
       "type": "object",
       "properties": {
@@ -1302,6 +1359,12 @@
             "$ref": "#/$defs/ResponseHeader"
           }
         },
+        "media_type": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "status": {
           "type": "integer",
           "format": "uint16",
@@ -1475,16 +1538,6 @@
         {
           "type": "object",
           "properties": {
-            "additional": {
-              "anyOf": [
-                {
-                  "$ref": "#/$defs/TypeRef"
-                },
-                {
-                  "type": "null"
-                }
-              ]
-            },
             "fields": {
               "type": "array",
               "default": [],
@@ -1501,10 +1554,14 @@
             "kind": {
               "type": "string",
               "const": "struct"
+            },
+            "openness": {
+              "$ref": "#/$defs/ObjectOpenness"
             }
           },
           "required": [
-            "kind"
+            "kind",
+            "openness"
           ]
         },
         {

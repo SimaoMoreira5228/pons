@@ -59,7 +59,7 @@ fn fmt_rewrites_valid_contracts_in_canonical_order() {
 fn fmt_leaves_invalid_input_untouched() {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("api.json");
-    let input = FIXTURE.replace("\"ir_version\": \"0.1\"", "\"ir_version\": \"9.0\"");
+    let input = FIXTURE.replace("\"ir_version\": \"0.2\"", "\"ir_version\": \"9.0\"");
     fs::write(&path, &input).unwrap();
 
     let output = pons().arg("fmt").arg(&path).output().unwrap();
@@ -212,7 +212,7 @@ fn emit_runs_an_external_target_and_writes_its_files() {
         &plugin,
         r##"#!/bin/sh
 if [ "$1" = describe ]; then
-  printf '%s' '{"name":"fixture","version":"1.0.0","protocol":{"min":"1.0","max":"1.0"},"ir_version":{"min":"0.1","max":"0.1"},"capabilities":{"streaming":["sse"],"enum_reprs":["string","external","internal","adjacent","untagged"],"direction_split":true,"provides":true,"flattened":true}}'
+  printf '%s' '{"name":"fixture","version":"1.0.0","protocol":{"min":"1.0","max":"1.0"},"ir_version":{"min":"0.2","max":"0.2"},"capabilities":{"streaming":["sse"],"enum_reprs":["string","external","internal","adjacent","untagged"],"direction_split":true,"provides":true,"flattened":true,"object_openness":["reject","preserve_typed","preserve_opaque"]}}'
 elif [ "$1" = emit ]; then
   i=0
   while [ "$i" -lt 2000 ]; do

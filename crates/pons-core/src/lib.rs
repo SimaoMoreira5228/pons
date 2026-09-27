@@ -3,7 +3,7 @@ use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
 use pons_ir::{
     Diagnostic, DiagnosticSeverity, Direction, Doc, InlineType, IntegerWire, Name, NamedRef,
-    TypeDef, TypeKind, TypeRef,
+    ObjectOpenness, TypeDef, TypeKind, TypeRef,
 };
 
 pub use pons_derive::{ApiError, Schema};
@@ -90,11 +90,14 @@ impl TypeCx {
         let TypeKind::Struct {
             fields,
             flattened,
-            additional: None,
+            openness,
         } = &definition.definition
         else {
             return None;
         };
+        if matches!(openness, ObjectOpenness::PreserveTyped { .. }) {
+            return None;
+        }
         Some((fields.clone(), flattened.clone()))
     }
 
