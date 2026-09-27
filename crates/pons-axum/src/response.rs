@@ -2,7 +2,7 @@ use std::marker::PhantomData;
 
 use axum::response::{IntoResponse, Response};
 use pons_core::Schema;
-use pons_ir::ContentKind;
+use pons_ir::{ContentKind, ResponseStatus};
 
 use crate::describe::{DescribeResponse, OperationCx, StatusResponse};
 
@@ -118,6 +118,42 @@ where
     S: ResponseSpec,
 {
 }
+
+pub struct WithUnknownStatus<T>(pub T);
+
+impl<T> WithUnknownStatus<T> {
+    pub fn new(response: T) -> Self {
+        Self(response)
+    }
+
+    pub fn into_inner(self) -> T {
+        self.0
+    }
+}
+
+impl<T> IntoResponse for WithUnknownStatus<T>
+where
+    T: IntoResponse,
+{
+    fn into_response(self) -> Response {
+        self.0.into_response()
+    }
+}
+
+impl<T> DescribeResponse for WithUnknownStatus<T>
+where
+    T: DescribeResponse,
+{
+    fn describe(cx: &mut OperationCx) {
+        let start = cx.responses.len();
+        T::describe(cx);
+        for response in &mut cx.responses[start..] {
+            response.status = ResponseStatus::Unknown;
+        }
+    }
+}
+
+impl<T> StatusResponse for WithUnknownStatus<T> where T: StatusResponse {}
 
 fn media_type(content: ContentKind, override_type: Option<&'static str>) -> Option<&'static str> {
     override_type.or(match content {

@@ -6,6 +6,7 @@ mod layer;
 mod metadata;
 mod ndjson;
 mod operation;
+mod operation_cx;
 mod raw_bytes;
 mod response;
 pub mod routing;
@@ -32,6 +33,7 @@ use pons_ir::{AuthScheme, Diagnostic, Document, ErrorResponse, TypeDef, Validati
 pub use raw_bytes::RawBytes;
 pub use response::{
     BytesResponse, JsonResponse, ProblemJsonResponse, ResponseSpec, TextResponse, WithResponse,
+    WithUnknownStatus,
 };
 pub use routing::MethodRoute;
 pub use sse::{Sse, SseEvent};

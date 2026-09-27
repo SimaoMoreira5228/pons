@@ -6,7 +6,7 @@ use serde_json::Value;
 use crate::IR_VERSION;
 use crate::operation::{
     ApiKeyLocation, AuthScheme, ContentKind, CredentialLocator, ErrorContent, ErrorResponse,
-    ErrorStatus, Method, OAuthFlowKind, Operation,
+    ErrorStatus, Method, OAuthFlowKind, Operation, ResponseStatus,
 };
 use crate::types::{
     Diagnostic, DiagnosticSeverity, EnumRepr, Field, InlineType, TypeDef, TypeKind, TypeRef,
@@ -322,11 +322,20 @@ impl Document {
             let mut response_statuses = BTreeSet::new();
             let mut stream_responses = 0;
             for response in &operation.responses {
-                if !(100..=599).contains(&response.status) {
-                    errors.push(ValidationError::InvalidValue {
-                        path: owner.clone(),
-                        message: format!("invalid response status {}", response.status),
-                    });
+                match response.status {
+                    ResponseStatus::Exact(status) if !(100..=599).contains(&status) => {
+                        errors.push(ValidationError::InvalidValue {
+                            path: owner.clone(),
+                            message: format!("invalid response status {status}"),
+                        });
+                    }
+                    ResponseStatus::Class(class) if !(1..=5).contains(&class) => {
+                        errors.push(ValidationError::InvalidValue {
+                            path: owner.clone(),
+                            message: format!("invalid response status class {class}xx"),
+                        });
+                    }
+                    _ => {}
                 }
                 if !response_statuses.insert(response.status) {
                     errors.push(ValidationError::InvalidValue {
@@ -364,7 +373,8 @@ impl Document {
                         ),
                     });
                 }
-                if (operation.method == Method::Head || status_forbids_body(response.status))
+                if (operation.method == Method::Head
+                    || matches!(response.status, ResponseStatus::Exact(status) if status_forbids_body(status)))
                     && (response.content != ContentKind::Empty || response.body.is_some())
                 {
                     errors.push(ValidationError::InvalidValue {
@@ -422,7 +432,7 @@ impl Document {
                     });
                 }
                 if let ErrorStatus::Exact(status) = error.status
-                    && response_statuses.contains(&status)
+                    && response_statuses.contains(&ResponseStatus::Exact(status))
                 {
                     errors.push(ValidationError::InvalidValue {
                         path: owner.clone(),
@@ -434,7 +444,7 @@ impl Document {
             if operation.errors_inherit {
                 for error in &self.common_errors {
                     if let ErrorStatus::Exact(status) = error.status
-                        && response_statuses.contains(&status)
+                        && response_statuses.contains(&ResponseStatus::Exact(status))
                     {
                         errors.push(ValidationError::InvalidValue {
                             path: owner.clone(),
@@ -1099,6 +1109,32 @@ mod tests {
             encoded["types"]["User"]["openness"]["preserve_typed"]["value"]["ref"],
             "Missing"
         );
+    }
+
+    #[test]
+    fn response_status_variants_round_trip_and_validate() {
+        let mut document: Document =
+            serde_json::from_str(include_str!("../../../fixtures/login.json")).unwrap();
+        document.operations[0].responses[0].status = ResponseStatus::Class(2);
+        document.validate().unwrap();
+        let encoded = serde_json::to_value(&document).unwrap();
+        assert_eq!(encoded["operations"][0]["responses"][0]["status"], "2xx");
+        document.operations[0].responses[0].status = ResponseStatus::Unknown;
+        document.validate().unwrap();
+        let encoded = serde_json::to_value(&document).unwrap();
+        assert_eq!(
+            encoded["operations"][0]["responses"][0]["status"],
+            "unknown"
+        );
+        document.operations[0].responses[0].status = ResponseStatus::Default;
+        document.validate().unwrap();
+        let encoded = serde_json::to_value(&document).unwrap();
+        assert_eq!(
+            encoded["operations"][0]["responses"][0]["status"],
+            "default"
+        );
+        document.operations[0].responses[0].status = ResponseStatus::Class(6);
+        assert!(document.validate().is_err());
     }
 
     #[test]

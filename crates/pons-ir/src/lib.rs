@@ -11,7 +11,7 @@ pub use operation::{
     ApiKeyLocation, AuthRequirement, AuthScheme, Body, ContentKind, CredentialLocator,
     CredentialProvision, ErrorContent, ErrorResponse, ErrorStatus, HeaderParameter, Method,
     OAuthFlow, OAuthFlowKind, Operation, OperationSemantics, Origin, PathSegment, Response,
-    ResponseHeader, StreamDescription, StreamKind, StreamMessage,
+    ResponseHeader, ResponseStatus, StreamDescription, StreamKind, StreamMessage,
 };
 pub use types::{
     Access, ByteEncoding, DecimalWire, Diagnostic, DiagnosticSeverity, Direction, Doc, EnumRepr,

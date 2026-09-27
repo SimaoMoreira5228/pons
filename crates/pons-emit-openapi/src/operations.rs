@@ -2,8 +2,8 @@ use std::collections::BTreeMap;
 
 use pons_ir::{
     ByteEncoding, ContentKind, EnumRepr, ErrorContent, ErrorStatus, InlineType, Method,
-    ObjectOpenness, Operation, PathSegment, Presence, ResponseHeader, TypeKind, TypeRef,
-    is_valid_media_type,
+    ObjectOpenness, Operation, PathSegment, Presence, ResponseHeader, ResponseStatus, TypeKind,
+    TypeRef, is_valid_media_type,
 };
 use serde_json::{Map, Value, json};
 
@@ -347,8 +347,8 @@ impl Builder<'_> {
                 }
             }
             add_response_headers(self, &response.headers, &mut value, "response")?;
-            value["x-pons"] = json!({"body":response.body,"content":response.content,"media_type":response.media_type,"ext":response.ext});
-            insert_response(&mut responses, response.status.to_string(), value)?;
+            value["x-pons"] = json!({"status":response.status,"body":response.body,"content":response.content,"media_type":response.media_type,"ext":response.ext});
+            insert_response(&mut responses, success_status(response.status), value)?;
         }
         let errors = if operation.errors_inherit {
             operation
@@ -597,6 +597,15 @@ fn add_response_headers(
     }
     value["headers"] = Value::Object(response_headers);
     Ok(())
+}
+
+fn success_status(status: ResponseStatus) -> String {
+    match status {
+        ResponseStatus::Exact(status) => status.to_string(),
+        ResponseStatus::Class(class) => format!("{class}XX"),
+        ResponseStatus::Default => "default".into(),
+        ResponseStatus::Unknown => "2XX".into(),
+    }
 }
 
 fn error_status(status: &ErrorStatus) -> String {

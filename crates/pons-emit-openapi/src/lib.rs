@@ -149,9 +149,9 @@ fn readable_name(words: &[String]) -> String {
 #[cfg(test)]
 mod tests {
     use pons_ir::{
-        AuthScheme, ByteEncoding, ContentKind, Direction, InlineType, NamedRef, OAuthFlow,
-        OAuthFlowKind, ObjectOpenness, PathSegment, Presence, ResponseHeader, StreamKind, TypeDef,
-        TypeKind, TypeRef,
+        AuthScheme, ByteEncoding, ContentKind, Direction, ErrorStatus, InlineType, NamedRef,
+        OAuthFlow, OAuthFlowKind, ObjectOpenness, PathSegment, Presence, ResponseHeader,
+        ResponseStatus, StreamKind, TypeDef, TypeKind, TypeRef,
     };
     use serde_json::{Value, json};
 
@@ -365,6 +365,29 @@ mod tests {
             output["paths"]["/auth/login"]["post"]["requestBody"]["required"],
             false
         );
+    }
+
+    #[test]
+    fn emits_success_status_variants() {
+        let mut document = fixture();
+        let login = document
+            .operations
+            .iter()
+            .position(|operation| operation.id[0][0] == "auth")
+            .unwrap();
+        document.operations[login].responses[0].status = ResponseStatus::Class(2);
+        let output: Value = serde_json::from_str(&super::emit(&document).unwrap()).unwrap();
+        assert!(output["paths"]["/auth/login"]["post"]["responses"]["2XX"].is_object());
+        document.operations[login].responses[0].status = ResponseStatus::Unknown;
+        let output: Value = serde_json::from_str(&super::emit(&document).unwrap()).unwrap();
+        assert_eq!(
+            output["paths"]["/auth/login"]["post"]["responses"]["2XX"]["x-pons"]["status"],
+            "unknown"
+        );
+        document.operations[login].errors[0].status = ErrorStatus::Default;
+        let output: Value = serde_json::from_str(&super::emit(&document).unwrap()).unwrap();
+        assert!(output["paths"]["/auth/login"]["post"]["responses"]["2XX"].is_object());
+        assert!(output["paths"]["/auth/login"]["post"]["responses"]["default"].is_object());
     }
 
     #[test]

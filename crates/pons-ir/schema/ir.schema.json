@@ -1366,10 +1366,7 @@
           ]
         },
         "status": {
-          "type": "integer",
-          "format": "uint16",
-          "maximum": 65535,
-          "minimum": 0
+          "$ref": "#/$defs/ResponseStatus"
         }
       },
       "additionalProperties": false,
@@ -1400,6 +1397,27 @@
         "wire",
         "ty",
         "presence"
+      ]
+    },
+    "ResponseStatus": {
+      "oneOf": [
+        {
+          "type": "integer",
+          "maximum": 599,
+          "minimum": 100
+        },
+        {
+          "type": "string",
+          "enum": [
+            "1xx",
+            "2xx",
+            "3xx",
+            "4xx",
+            "5xx",
+            "default",
+            "unknown"
+          ]
+        }
       ]
     },
     "StreamDescription": {

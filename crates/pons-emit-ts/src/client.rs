@@ -3,7 +3,7 @@ use std::collections::BTreeMap;
 use pons_ir::{
     ApiKeyLocation, AuthScheme, ContentKind, CredentialLocator, Document, ErrorContent,
     ErrorResponse, ErrorStatus, Operation, PathSegment, Presence, Response, ResponseHeader,
-    StreamKind, TypeRef,
+    ResponseStatus, StreamKind, TypeRef,
 };
 
 use crate::runtime;
@@ -51,16 +51,18 @@ pub(super) fn emit(
 ) -> Result<String, EmitError> {
     let mut output = if error_strategy == ErrorStrategy::Throw {
         String::from(
-            "type Result<T, E> = { isOk(): boolean; isErr(): boolean; value?: T; error?: E };\nfunction ok<T>(value: T): Result<T, never> { return { isOk: () => true, isErr: () => false, value }; }\nfunction err<E>(error: E): Result<never, E> { return { isOk: () => false, isErr: () => true, error }; }\nimport type * as Types from \"./types.js\";\n\n",
+            "type Result<T, E> = { isOk(): boolean; isErr(): boolean; value?: T; error?: E };\nfunction ok<T>(value: T): Result<T, never> { return { isOk: () => true, isErr: () => false, value }; }\nfunction err<E>(error: E): Result<never, E> { return { isOk: () => false, isErr: () => true, error }; }\n",
         )
     } else {
-        String::from(
-            "import { err, ok, type Result } from \"neverthrow\";\nimport type * as Types from \"./types.js\";\n\n",
-        )
+        String::from("import { err, ok, type Result } from \"neverthrow\";\n")
     };
+    if !document.types.is_empty() {
+        output.push_str("import type * as Types from \"./types.js\";\n");
+    }
+    output.push('\n');
     output.push_str(&auth_types(document));
     output.push_str(&type_definitions(document)?);
-    output.push_str("\nexport type AuthAttachment = { headers?: Record<string, string>; query?: Record<string, string>; cookies?: Record<string, string> };\nexport type AuthAdapter = (context: { scheme: string; scopes: readonly string[]; method: string; url: URL; headers: Headers }) => AuthAttachment | Promise<AuthAttachment>;\nexport type TokenStore = { get(): string | undefined | Promise<string | undefined>; set(value: string, expiresAt?: number): void | Promise<void>; clear(): void | Promise<void> };\nexport type CredentialSource = string | (() => string | undefined | Promise<string | undefined>) | TokenStore;\nexport type RequestInterceptor = (context: { url: URL; init: RequestInit }) => void | Promise<void>;\nexport type ResponseInterceptor = (context: { response: Response; url: URL; init: RequestInit }) => void | Promise<void>;\nexport type Interceptors = { request?: RequestInterceptor; response?: ResponseInterceptor };\nexport type ResponseWithHeaders<T, H> = { value: T; headers: H };\nexport type ClientFailure = { kind: \"network\"; cause: unknown } | { kind: \"timeout\"; afterMs: number } | { kind: \"aborted\"; cause: unknown } | { kind: \"auth_adapter\"; scheme: string; cause: unknown } | { kind: \"auth_source\"; scheme: string; cause: unknown } | { kind: \"interceptor\"; phase: \"request\" | \"response\"; cause: unknown } | { kind: \"protocol\"; message: string } | { kind: \"unexpected_http\"; status: number; body: unknown } | { kind: \"auth\"; schemes: string[] };\n\n");
+    output.push_str("\nexport type AuthAttachment = { headers?: Record<string, string>; query?: Record<string, string>; cookies?: Record<string, string> };\nexport type AuthAdapter = (context: { scheme: string; scopes: readonly string[]; method: string; url: URL; headers: Headers }) => AuthAttachment | Promise<AuthAttachment>;\nexport type TokenStore = { get(): string | undefined | Promise<string | undefined>; set(value: string, expiresAt?: number): void | Promise<void>; clear(): void | Promise<void> };\nexport type CredentialSource = string | (() => string | undefined | Promise<string | undefined>) | TokenStore;\nexport type RequestInterceptor = (context: { url: URL; init: RequestInit }) => void | Promise<void>;\nexport type ResponseInterceptor = (context: { response: Response; url: URL; init: RequestInit }) => void | Promise<void>;\nexport type Interceptors = { request?: RequestInterceptor; response?: ResponseInterceptor };\nexport type ResponseWithHeaders<T, H> = { value: T; headers: H };\nexport type ResponseWithStatus<T> = { value: T; status: number };\nexport type ClientFailure = { kind: \"network\"; cause: unknown } | { kind: \"timeout\"; afterMs: number } | { kind: \"aborted\"; cause: unknown } | { kind: \"auth_adapter\"; scheme: string; cause: unknown } | { kind: \"auth_source\"; scheme: string; cause: unknown } | { kind: \"interceptor\"; phase: \"request\" | \"response\"; cause: unknown } | { kind: \"protocol\"; message: string } | { kind: \"unexpected_http\"; status: number; body: unknown } | { kind: \"auth\"; schemes: string[] };\n\n");
     output.push_str("export type RetryOptions = { attempts?: number; backoffMs?: number; maxBackoffMs?: number; jitterMs?: number };\n");
     output.push_str("export type CallOptions = { headers?: HeadersInit; signal?: AbortSignal; timeout?: number; retry?: RetryOptions | false };\n");
     output.push_str("export type ClientOptions = { baseUrl: string; headers?: HeadersInit | (() => HeadersInit | Promise<HeadersInit>); auth?: Record<string, CredentialSource>; authAdapters?: Record<string, AuthAdapter>; fetch?: typeof fetch; signal?: AbortSignal; timeout?: number; retry?: RetryOptions; interceptors?: Interceptors };\n\n");
@@ -471,11 +473,20 @@ fn response_value_type(
     names: &BTreeMap<String, String>,
     mode: EmitMode,
 ) -> Result<String, EmitError> {
-    if response.headers.is_empty() {
-        return Ok(body);
+    let body = if response.headers.is_empty() {
+        body
+    } else {
+        let headers = response_headers_type(&response.headers, document, names, mode)?;
+        format!("ResponseWithHeaders<{body}, {headers}>")
+    };
+    if matches!(
+        response.status,
+        ResponseStatus::Default | ResponseStatus::Unknown
+    ) {
+        Ok(format!("ResponseWithStatus<{body}>"))
+    } else {
+        Ok(body)
     }
-    let headers = response_headers_type(&response.headers, document, names, mode)?;
-    Ok(format!("ResponseWithHeaders<{body}, {headers}>"))
 }
 
 fn response_headers_type(
@@ -626,9 +637,10 @@ fn response_descriptors(operation: &Operation) -> Result<String, EmitError> {
             } else {
                 format!(", headers: [{headers}]")
             };
+            let status = serde_json::to_string(&response.status)
+                .map_err(|error| EmitError(format!("cannot encode response status: {error}")))?;
             Ok(format!(
-                "{{ status: {}, content: {}, schema: {schema}{media_type}{stream}{headers} }}",
-                response.status,
+                "{{ status: {status}, content: {}, schema: {schema}{media_type}{stream}{headers} }}",
                 string(content_name(response.content))
             ))
         })

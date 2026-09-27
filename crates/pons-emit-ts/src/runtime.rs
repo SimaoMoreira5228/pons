@@ -26,7 +26,7 @@ async function request<T, E>(
   authGroups: string[][],
   authScopes: Record<string, readonly string[]>,
   bodySchema: unknown,
-  responses: Array<{ status: number; content: string; mediaType?: string; schema?: unknown; stream?: "sse" | "ndjson"; item?: unknown; events?: Array<{ event: string; schema: unknown }>; headers?: Array<{ name: string; required: boolean; schema: unknown }> }>,
+  responses: Array<{ status: number | string; content: string; mediaType?: string; schema?: unknown; stream?: "sse" | "ndjson"; item?: unknown; events?: Array<{ event: string; schema: unknown }>; headers?: Array<{ name: string; required: boolean; schema: unknown }> }>,
   errors: Array<{ status: number | string; content: string; mediaType?: string; schema?: unknown; retryable?: boolean; events?: Array<{ event: string; schema: unknown }>; headers?: Array<{ name: string; required: boolean; schema: unknown }> }>,
   authOptional: boolean,
   preserveWideIntegers: boolean,
@@ -161,11 +161,8 @@ async function request<T, E>(
       }
     }
     const responseContent = response.headers.get("content-type") ?? "";
-    const declaredSuccess = responses.find((entry) => entry.status === response.status);
-    const declaredError =
-      errors.find((error) => error.status === response.status) ??
-      errors.find((error) => typeof error.status === "string" && error.status === `${Math.floor(response.status / 100)}xx`) ??
-      errors.find((error) => error.status === "default");
+    const declaredSuccess = findSuccess(responses, response.status);
+    const declaredError = declaredSuccess === undefined ? findDeclared(errors, response.status) : undefined;
     if (declaredSuccess === undefined && declaredError === undefined && response.status >= 200 && response.status < 300) {
       return err({ kind: "protocol", message: `undeclared success response ${response.status}` });
     }
@@ -183,8 +180,8 @@ async function request<T, E>(
       text: "text/plain",
       bytes: "application/octet-stream",
     };
-    const expectedContentType = responseSchema?.mediaType ?? (responseKind === "stream"
-      ? responseSchema?.stream === "ndjson" ? "application/x-ndjson" : "text/event-stream"
+    const expectedContentType = responseSchema?.mediaType ?? (declaredSuccess?.content === "stream"
+      ? declaredSuccess.stream === "ndjson" ? "application/x-ndjson" : "text/event-stream"
       : responseKind ? expectedContentTypes[responseKind] : undefined);
     const actualContentType = responseContent.split(";", 1)[0].trim().toLowerCase();
     if (expectedContentType !== undefined && actualContentType !== mediaTypeBase(expectedContentType)) {
@@ -194,9 +191,9 @@ async function request<T, E>(
       if (!response.body) return err({ kind: "protocol", message: "the event stream has no response body" });
       await captureCredential(client, response, provides, undefined, false);
       if (declaredSuccess.stream === "ndjson") {
-        return ok(withResponseHeaders(readNdjson(response.body, declaredSuccess.item, preserveWideIntegers), response, declaredSuccess, preserveWideIntegers) as T);
+        return ok(withSuccessStatus(readNdjson(response.body, declaredSuccess.item, preserveWideIntegers), response, declaredSuccess, preserveWideIntegers) as T);
       }
-      return ok(withResponseHeaders(readSse(response.body, declaredSuccess.events ?? [], preserveWideIntegers), response, declaredSuccess, preserveWideIntegers) as T);
+      return ok(withSuccessStatus(readSse(response.body, declaredSuccess.events ?? [], preserveWideIntegers), response, declaredSuccess, preserveWideIntegers) as T);
     }
     const jsonResponse = responseKind === "json" || responseKind === "problem_json" ||
       (!responseKind && responseContent.includes("json"));
@@ -233,7 +230,7 @@ async function request<T, E>(
         : err({ kind: "unexpected_http", status: response.status, body: value });
     }
     await captureCredential(client, response, provides, value, true);
-    return ok(withResponseHeaders(value, response, declaredSuccess, preserveWideIntegers) as T);
+    return ok(withSuccessStatus(value, response, declaredSuccess, preserveWideIntegers) as T);
   } catch (cause) {
     if (timedOut) return err({ kind: "timeout", afterMs: timeoutMs! });
     if (cause instanceof ResponseHeaderDecodeError || cause instanceof WirePolicyError) return err({ kind: "protocol", message: cause.message });
@@ -269,11 +266,7 @@ async function fetchWithRetry(
       attempt += 1;
       continue;
     }
-    const declaredError = response.status >= 400
-      ? errors.find((error) => error.status === response.status) ??
-        errors.find((error) => typeof error.status === "string" && error.status === `${Math.floor(response.status / 100)}xx`) ??
-        errors.find((error) => error.status === "default")
-      : undefined;
+    const declaredError = response.status >= 400 ? findDeclared(errors, response.status) : undefined;
     const retryableStatus = declaredError?.retryable ?? (response.status === 502 || response.status === 503 || response.status === 504);
     if (!retryableStatus || attempt + 1 >= attempts) return response;
     try {
@@ -334,6 +327,31 @@ async function requestOrThrow<T, E>(operation: Promise<Result<T, E | ClientFailu
 
 function mediaTypeBase(value: string): string {
   return value.split(";", 1)[0].trim().toLowerCase();
+}
+
+function findDeclared<T extends { status: number | string }>(entries: T[], actual: number): T | undefined {
+  return entries.find((entry) => entry.status === actual)
+    ?? entries.find((entry) => typeof entry.status === "string" && entry.status === `${Math.floor(actual / 100)}xx`)
+    ?? entries.find((entry) => entry.status === "default");
+}
+
+function findSuccess<T extends { status: number | string }>(entries: T[], actual: number): T | undefined {
+  return entries.find((entry) => entry.status === actual)
+    ?? entries.find((entry) => typeof entry.status === "string" && entry.status === `${Math.floor(actual / 100)}xx`)
+    ?? (actual >= 200 && actual < 300 ? entries.find((entry) => entry.status === "unknown") : undefined)
+    ?? (actual >= 200 && actual < 300 ? entries.find((entry) => entry.status === "default") : undefined);
+}
+
+function withSuccessStatus(
+  value: unknown,
+  response: Response,
+  schema: { status: number | string; headers?: Array<{ name: string; required: boolean; schema: unknown }> } | undefined,
+  preserveWideIntegers: boolean,
+): unknown {
+  const wrapped = withResponseHeaders(value, response, schema, preserveWideIntegers);
+  return schema?.status === "unknown" || schema?.status === "default"
+    ? { value: wrapped, status: response.status }
+    : wrapped;
 }
 
 function withResponseHeaders(

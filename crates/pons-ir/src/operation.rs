@@ -188,7 +188,7 @@ pub enum ContentKind {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct Response {
-    pub status: u16,
+    pub status: ResponseStatus,
     pub content: ContentKind,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub media_type: Option<String>,
@@ -198,6 +198,104 @@ pub struct Response {
     pub headers: Vec<ResponseHeader>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub ext: BTreeMap<String, Value>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum ResponseStatus {
+    Exact(u16),
+    Class(u8),
+    Default,
+    Unknown,
+}
+
+impl JsonSchema for ResponseStatus {
+    fn schema_name() -> Cow<'static, str> {
+        "ResponseStatus".into()
+    }
+
+    fn json_schema(_: &mut SchemaGenerator) -> Schema {
+        schemars::json_schema!({
+            "oneOf": [
+                {"type": "integer", "minimum": 100, "maximum": 599},
+                {"type": "string", "enum": ["1xx", "2xx", "3xx", "4xx", "5xx", "default", "unknown"]}
+            ]
+        })
+    }
+}
+
+impl Serialize for ResponseStatus {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        match self {
+            Self::Exact(status) => serializer.serialize_u16(*status),
+            Self::Class(class) => serializer.serialize_str(&format!("{class}xx")),
+            Self::Default => serializer.serialize_str("default"),
+            Self::Unknown => serializer.serialize_str("unknown"),
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for ResponseStatus {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        struct StatusVisitor;
+
+        impl serde::de::Visitor<'_> for StatusVisitor {
+            type Value = ResponseStatus;
+
+            fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                formatter.write_str("an HTTP status, status class, default, or unknown")
+            }
+
+            fn visit_u64<E>(self, value: u64) -> Result<Self::Value, E>
+            where
+                E: serde::de::Error,
+            {
+                u16::try_from(value)
+                    .map(ResponseStatus::Exact)
+                    .map_err(|_| E::custom("HTTP status is out of range"))
+            }
+
+            fn visit_str<E>(self, value: &str) -> Result<Self::Value, E>
+            where
+                E: serde::de::Error,
+            {
+                match value {
+                    "default" => Ok(ResponseStatus::Default),
+                    "unknown" => Ok(ResponseStatus::Unknown),
+                    "1xx" => Ok(ResponseStatus::Class(1)),
+                    "2xx" => Ok(ResponseStatus::Class(2)),
+                    "3xx" => Ok(ResponseStatus::Class(3)),
+                    "4xx" => Ok(ResponseStatus::Class(4)),
+                    "5xx" => Ok(ResponseStatus::Class(5)),
+                    _ => Err(E::custom(format!("invalid HTTP status class {value}"))),
+                }
+            }
+        }
+
+        deserializer.deserialize_any(StatusVisitor)
+    }
+}
+
+impl From<u16> for ResponseStatus {
+    fn from(value: u16) -> Self {
+        Self::Exact(value)
+    }
+}
+
+impl std::fmt::Display for ResponseStatus {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Exact(status) => write!(formatter, "{status}"),
+            Self::Class(class) => write!(formatter, "{class}xx"),
+            Self::Default => formatter.write_str("default"),
+            Self::Unknown => formatter.write_str("unknown"),
+        }
+    }
 }
 
 impl Response {

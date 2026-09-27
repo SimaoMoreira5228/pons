@@ -1,9 +1,9 @@
 use axum::response::IntoResponse;
 use pons_core::{ErrorSpec, Schema, TypeCx};
 use pons_ir::{
-    AuthRequirement, Body, ContentKind, CredentialProvision, Diagnostic, DiagnosticSeverity,
-    Direction, ErrorResponse, HeaderParameter, InlineType, Presence, Response, ResponseHeader,
-    StreamDescription, StreamKind, StreamMessage, TypeRef,
+    AuthRequirement, Body, ContentKind, CredentialProvision, Diagnostic, Direction, ErrorResponse,
+    HeaderParameter, InlineType, Presence, Response, ResponseHeader, ResponseStatus,
+    StreamDescription, TypeRef,
 };
 
 #[derive(Debug, Default)]
@@ -313,7 +313,7 @@ where
         let first_response = cx.responses.len();
         R::describe(cx);
         for response in &mut cx.responses[first_response..] {
-            response.status = STATUS;
+            response.status = ResponseStatus::Exact(STATUS);
         }
     }
 }
@@ -333,215 +333,6 @@ impl DescribeResponse for NoContent {
 }
 
 impl StatusResponse for NoContent {}
-
-impl OperationCx {
-    pub fn type_ref<T: Schema>(&mut self, direction: Direction) -> TypeRef {
-        T::schema(&mut self.types, direction)
-    }
-
-    pub fn path_type<T: Schema>(&mut self) {
-        self.path_types
-            .push(T::schema(&mut self.types, Direction::Input));
-    }
-
-    pub fn request_header<T: Schema>(&mut self, wire: &str, presence: Presence) {
-        let base = if wire.len() >= 2
-            && matches!(
-                (wire.as_bytes()[0], wire.as_bytes()[1]),
-                (b'x' | b'X', b'-' | b'_')
-            ) {
-            &wire[2..]
-        } else {
-            wire
-        };
-        let ident = base
-            .split(['-', '_'])
-            .filter(|part| !part.is_empty())
-            .map(str::to_ascii_lowercase)
-            .collect::<Vec<_>>();
-        self.headers.push(HeaderParameter {
-            wire: wire.to_owned(),
-            ident: if ident.is_empty() {
-                vec!["header".to_owned()]
-            } else {
-                ident
-            },
-            ty: T::schema(&mut self.types, Direction::Input),
-            presence,
-            ext: Default::default(),
-        });
-    }
-
-    pub fn query_type<T: Schema>(&mut self) {
-        let query = T::schema(&mut self.types, Direction::Input);
-        if self.query.replace(query).is_some() {
-            self.diagnostic(
-                "PONS-W101",
-                "multiple query extractors are not represented separately",
-            );
-        }
-    }
-
-    pub fn request_body<T: Schema>(&mut self, content: ContentKind) {
-        self.request_body_with_presence::<T>(content, None, true);
-    }
-
-    pub fn optional_request_body<T: Schema>(&mut self, content: ContentKind) {
-        self.request_body_with_presence::<T>(content, None, false);
-    }
-
-    pub fn request_body_with_media<T: Schema>(
-        &mut self,
-        content: ContentKind,
-        media_type: Option<String>,
-    ) {
-        self.request_body_with_presence::<T>(content, media_type, true);
-    }
-
-    pub fn optional_request_body_with_media<T: Schema>(
-        &mut self,
-        content: ContentKind,
-        media_type: Option<String>,
-    ) {
-        self.request_body_with_presence::<T>(content, media_type, false);
-    }
-
-    fn request_body_with_presence<T: Schema>(
-        &mut self,
-        content: ContentKind,
-        media_type: Option<String>,
-        required: bool,
-    ) {
-        let body = Body {
-            ty: T::schema(&mut self.types, Direction::Input),
-            content,
-            required,
-            media_type,
-            ext: Default::default(),
-        };
-        if self.body.replace(body).is_some() {
-            self.diagnostic(
-                "PONS-W101",
-                "multiple request body extractors cannot be represented",
-            );
-        }
-    }
-
-    pub fn response<T: Schema>(&mut self, status: u16, content: ContentKind) {
-        self.response_with_media::<T>(status, content, None);
-    }
-
-    pub fn response_with_media<T: Schema>(
-        &mut self,
-        status: u16,
-        content: ContentKind,
-        media_type: Option<String>,
-    ) {
-        self.responses.push(Response {
-            status,
-            content,
-            media_type,
-            body: Some(T::schema(&mut self.types, Direction::Output)),
-            headers: Vec::new(),
-            ext: Default::default(),
-        });
-    }
-
-    pub fn empty_response(&mut self, status: u16) {
-        self.responses.push(Response {
-            status,
-            content: ContentKind::Empty,
-            media_type: None,
-            body: None,
-            headers: Vec::new(),
-            ext: Default::default(),
-        });
-    }
-
-    pub fn sse<T: Schema>(&mut self, event: &'static str) {
-        self.stream = Some(StreamDescription {
-            kind: StreamKind::Sse {
-                events: vec![StreamMessage {
-                    event: event.to_owned(),
-                    data: T::schema(&mut self.types, Direction::Output),
-                }],
-            },
-        });
-        self.responses.push(Response {
-            status: 200,
-            content: ContentKind::Stream,
-            media_type: None,
-            body: None,
-            headers: Vec::new(),
-            ext: Default::default(),
-        });
-    }
-
-    pub fn ndjson<T: Schema>(&mut self) {
-        self.stream = Some(StreamDescription {
-            kind: StreamKind::Ndjson {
-                item: T::schema(&mut self.types, Direction::Output),
-            },
-        });
-        self.responses.push(Response {
-            status: 200,
-            content: ContentKind::Stream,
-            media_type: None,
-            body: None,
-            headers: Vec::new(),
-            ext: Default::default(),
-        });
-    }
-
-    pub fn bytes_stream(&mut self, content_type: impl Into<String>) {
-        self.stream = Some(StreamDescription {
-            kind: StreamKind::Bytes {
-                content_type: content_type.into(),
-            },
-        });
-        self.responses.push(Response {
-            status: 200,
-            content: ContentKind::Stream,
-            media_type: None,
-            body: None,
-            headers: Vec::new(),
-            ext: Default::default(),
-        });
-    }
-
-    pub fn provide(&mut self, provides: CredentialProvision) {
-        self.provides = Some(provides);
-    }
-
-    pub fn diagnostic(&mut self, code: &str, message: impl Into<String>) {
-        self.push_diagnostic(DiagnosticSeverity::Warning, code, message.into());
-    }
-
-    pub fn error(&mut self, code: &str, message: impl Into<String>) {
-        self.push_diagnostic(DiagnosticSeverity::Error, code, message.into());
-    }
-
-    fn push_diagnostic(&mut self, severity: DiagnosticSeverity, code: &str, message: String) {
-        if self
-            .diagnostics
-            .iter()
-            .any(|diagnostic| diagnostic.code == code && diagnostic.message == message)
-        {
-            return;
-        }
-        self.diagnostics.push(Diagnostic {
-            severity,
-            code: code.to_owned(),
-            message,
-            origin: None,
-            ext: Default::default(),
-        });
-    }
-
-    pub(crate) fn type_definitions(&self) -> &std::collections::BTreeMap<String, pons_ir::TypeDef> {
-        self.types.definitions()
-    }
-}
 
 impl<T: Schema> DescribeRequest for axum::Json<T> {
     fn describe(cx: &mut OperationCx) {
@@ -657,10 +448,11 @@ where
     R: DescribeResponse,
 {
     fn describe(cx: &mut OperationCx) {
-        cx.error(
-            "PONS-W102",
-            "dynamic response status is not representable in the current IR; use WithStatus",
-        );
+        let start = cx.responses.len();
+        R::describe(cx);
+        for response in &mut cx.responses[start..] {
+            response.status = ResponseStatus::Unknown;
+        }
     }
 }
 

@@ -1,6 +1,7 @@
 use pons_ir::{
     AuthScheme, CredentialLocator, Document, EnumRepr, ErrorStatus, InlineType, Method, OAuthFlow,
-    OAuthFlowKind, Presence, ResponseHeader, StreamKind, TypeKind, TypeRef, VariantPayload,
+    OAuthFlowKind, Presence, ResponseHeader, ResponseStatus, StreamKind, TypeKind, TypeRef,
+    VariantPayload,
 };
 
 #[test]
@@ -129,7 +130,7 @@ fn validation_rejects_bodies_on_bodyless_http_responses() {
         serde_json::from_str(include_str!("../../../fixtures/login.json")).unwrap();
     for status in [100, 204, 205, 304] {
         let mut document = base.clone();
-        document.operations[0].responses[0].status = status;
+        document.operations[0].responses[0].status = ResponseStatus::Exact(status);
         assert!(
             document
                 .validate()
@@ -140,7 +141,7 @@ fn validation_rejects_bodies_on_bodyless_http_responses() {
     }
 
     let mut document = base.clone();
-    document.operations[1].responses[0].status = 204;
+    document.operations[1].responses[0].status = ResponseStatus::Exact(204);
     assert!(
         document
             .validate()
@@ -492,7 +493,7 @@ fn validation_rejects_exact_error_response_collisions() {
     }));
 
     let mut document = base;
-    document.operations[0].responses[0].status = 400;
+    document.operations[0].responses[0].status = ResponseStatus::Exact(400);
     assert!(document.validate().is_ok());
 }
 

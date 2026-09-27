@@ -421,8 +421,8 @@ pub(crate) fn string(value: &str) -> String {
 #[cfg(test)]
 mod tests {
     use pons_ir::{
-        ContentKind, Document, IR_VERSION, InlineType, IntegerWire, ObjectOpenness, StreamKind,
-        TypeKind, TypeRef,
+        ContentKind, Document, IR_VERSION, InlineType, IntegerWire, ObjectOpenness, ResponseStatus,
+        StreamKind, TypeKind, TypeRef,
     };
     use std::collections::BTreeMap;
 
@@ -521,7 +521,7 @@ mod tests {
         );
         assert!(missing_header_branch.contains("kind: \"protocol\""));
         assert!(client.contains("undeclared success response"));
-        assert!(client.contains("Math.floor(response.status / 100)"));
+        assert!(client.contains("findDeclared"));
         assert!(!client.contains("response.ok"));
         let declared_success = client.find("const declaredSuccess").unwrap();
         let declared_error = client.find("const declaredError").unwrap();
@@ -530,9 +530,7 @@ mod tests {
         let stream_capture = client
             .find("captureCredential(client, response, provides, undefined, false)")
             .unwrap();
-        let stream_return = client
-            .find("return ok(withResponseHeaders(readSse")
-            .unwrap();
+        let stream_return = client.find("return ok(withSuccessStatus(readSse").unwrap();
         assert!(stream_capture < stream_return);
     }
 
@@ -608,6 +606,39 @@ mod tests {
             .find(|file| file.path == "client.ts")
             .unwrap();
         assert!(client.content.contains("body?:"));
+    }
+
+    #[test]
+    fn emits_unknown_success_statuses() {
+        let mut document: Document =
+            serde_json::from_str(include_str!("../../../fixtures/login.json")).unwrap();
+        document.operations[0].responses[0].status = ResponseStatus::Unknown;
+        let output = super::emit(&document).unwrap();
+        let client = output
+            .into_iter()
+            .find(|file| file.path == "client.ts")
+            .unwrap();
+        assert!(client.content.contains("ResponseWithStatus<"));
+        assert!(client.content.contains("status: \"unknown\""));
+        assert!(
+            client
+                .content
+                .contains("const declaredSuccess = findSuccess")
+        );
+        assert!(
+            client
+                .content
+                .contains("const declaredError = declaredSuccess === undefined")
+        );
+        assert!(client.content.contains("findDeclared"));
+
+        document.operations[0].responses[0].status = ResponseStatus::Default;
+        let output = super::emit(&document).unwrap();
+        let client = output
+            .into_iter()
+            .find(|file| file.path == "client.ts")
+            .unwrap();
+        assert!(client.content.contains("ResponseWithStatus<"));
     }
 
     #[test]

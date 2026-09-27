@@ -11,7 +11,7 @@ use pons_axum::{
 use pons_core::Schema;
 use pons_ir::{
     AuthScheme, ContentKind, CredentialLocator, CredentialProvision, Info, InlineType, PathSegment,
-    TypeKind, TypeRef,
+    ResponseStatus, TypeKind, TypeRef,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -256,7 +256,7 @@ async fn raw_response() -> axum::response::Response {
 
 async fn dynamic_status() -> (StatusCode, pons_axum::extract::Json<User>) {
     (
-        StatusCode::IM_A_TEAPOT,
+        StatusCode::CREATED,
         pons_axum::extract::Json(User {
             id: 1,
             name: "Ada".into(),
@@ -353,15 +353,30 @@ fn raw_axum_boundaries_are_diagnosed_without_inventing_contracts() {
 }
 
 #[test]
-fn dynamic_response_status_is_diagnosed_without_inventing_a_contract() {
-    let router = Router::<()>::new(info()).route("/dynamic", get(dynamic_status));
-    let document = router.document();
+fn dynamic_response_status_preserves_the_body_contract() {
+    let document = Router::<()>::new(info())
+        .route("/dynamic", get(dynamic_status))
+        .into_document()
+        .unwrap();
     let operation = &document.operations[0];
-    assert!(operation.responses.is_empty());
-    assert!(operation.diagnostics.iter().any(|diagnostic| {
-        diagnostic.code == "PONS-W102" && diagnostic.message.contains("dynamic response status")
-    }));
-    assert!(router.into_document().is_err());
+    assert_eq!(operation.responses.len(), 1);
+    assert_eq!(operation.responses[0].status, ResponseStatus::Unknown);
+    assert_eq!(operation.responses[0].content, ContentKind::Json);
+    assert!(matches!(
+        operation.responses[0].body,
+        Some(TypeRef::Named(_))
+    ));
+    assert!(operation.diagnostics.is_empty());
+
+    let response = (
+        StatusCode::CREATED,
+        pons_axum::extract::Json(User {
+            id: 1,
+            name: "Ada".into(),
+        }),
+    )
+        .into_response();
+    assert_eq!(response.status(), StatusCode::CREATED);
 }
 
 #[test]
@@ -376,7 +391,7 @@ fn router_describes_no_content_response() {
         .iter()
         .find(|operation| operation.method == pons_ir::Method::Delete)
         .unwrap();
-    assert_eq!(operation.responses[0].status, 204);
+    assert_eq!(operation.responses[0].status, ResponseStatus::Exact(204));
     assert_eq!(operation.responses[0].content, ContentKind::Empty);
     assert!(operation.responses[0].body.is_none());
 }
@@ -640,7 +655,10 @@ fn router_describes_path_query_body_response_and_state() {
             })
         })
         .unwrap();
-    assert_eq!(response_headers.responses[0].status, 201);
+    assert_eq!(
+        response_headers.responses[0].status,
+        ResponseStatus::Exact(201)
+    );
     assert_eq!(response_headers.responses[0].headers[0].wire, "X-Trace-ID");
     assert_eq!(
         response_headers.responses[0].headers[0].presence,
@@ -675,7 +693,7 @@ fn router_describes_path_query_body_response_and_state() {
         .find(|operation| operation.method == pons_ir::Method::Post)
         .unwrap();
     assert_eq!(post.body.as_ref().unwrap().content, ContentKind::Json);
-    assert_eq!(post.responses[0].status, 201);
+    assert_eq!(post.responses[0].status, ResponseStatus::Exact(201));
     assert!(
         !post
             .diagnostics
@@ -737,7 +755,7 @@ fn router_describes_path_query_body_response_and_state() {
                 .any(|segment| matches!(segment, PathSegment::Literal { lit } if lit == "created"))
         })
         .unwrap();
-    assert_eq!(created.responses[0].status, 201);
+    assert_eq!(created.responses[0].status, ResponseStatus::Exact(201));
     assert_eq!(created.errors[0].status, pons_ir::ErrorStatus::Exact(404));
     assert!(document.types.values().any(|definition| {
         matches!(&definition.definition, TypeKind::Struct { fields, .. } if fields.iter().any(|field| field.wire == "name"))
