@@ -383,7 +383,7 @@ function decodeHeaderValue(value: string, schema: any, preserveWideIntegers: boo
       const definition = typeDefinitions[schema.ref];
       if (definition?.kind === "newtype") return decodeHeaderValue(value, definition.inner, preserveWideIntegers);
       if (definition?.kind === "enum") return value;
-      return decodeWire(JSON.parse(value), schema);
+      return decodeWire(parseJson(value, preserveWideIntegers), schema);
     }
     if (schema.kind === "int") {
       if (schema.wire === "string") return value;
@@ -398,7 +398,7 @@ function decodeHeaderValue(value: string, schema: any, preserveWideIntegers: boo
     }
     if (schema.kind === "nullable") return decodeHeaderValue(value, schema.inner, preserveWideIntegers);
     if (schema.kind === "array" || schema.kind === "map" || schema.kind === "tuple") {
-      return decodeWire(JSON.parse(value), schema);
+      return decodeWire(parseJson(value, preserveWideIntegers), schema);
     }
     return value;
   } catch (cause) {

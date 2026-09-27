@@ -137,6 +137,13 @@ fn wide_integer_references(document: &Document) -> Vec<String> {
         if let Some(body) = &error.body {
             scan_type_ref(body, &format!("common_errors[{index}].body"), &mut paths);
         }
+        for (header_index, header) in error.headers.iter().enumerate() {
+            scan_type_ref(
+                &header.ty,
+                &format!("common_errors[{index}].headers[{header_index}].ty"),
+                &mut paths,
+            );
+        }
     }
     for (index, operation) in document.operations.iter().enumerate() {
         let prefix = format!("operations[{index}]");
@@ -183,6 +190,13 @@ fn wide_integer_references(document: &Document) -> Vec<String> {
                 scan_type_ref(
                     body,
                     &format!("{prefix}.errors[{error_index}].body"),
+                    &mut paths,
+                );
+            }
+            for (header_index, header) in error.headers.iter().enumerate() {
+                scan_type_ref(
+                    &header.ty,
+                    &format!("{prefix}.errors[{error_index}].headers[{header_index}].ty"),
                     &mut paths,
                 );
             }
@@ -758,6 +772,55 @@ mod tests {
                 .content
                 .contains("headers: [{ name: \"Retry-After\", required: true, schema:")
         );
+    }
+
+    #[test]
+    fn preserves_wide_integers_in_error_response_headers() {
+        let mut document: Document =
+            serde_json::from_str(include_str!("../../../fixtures/login.json")).unwrap();
+        let wide_header = || pons_ir::ResponseHeader {
+            wire: "X-Retry-Count".into(),
+            ty: TypeRef::Inline(InlineType::Tuple {
+                items: vec![TypeRef::Inline(InlineType::Int {
+                    bits: 64,
+                    signed: false,
+                    wire: IntegerWire::Number,
+                    minimum: None,
+                    maximum: None,
+                    multiple_of: None,
+                })],
+            }),
+            presence: pons_ir::Presence::Required,
+            ext: BTreeMap::new(),
+        };
+        document.operations[0].errors[0].headers.push(wide_header());
+        let mut common = document.operations[0].errors[0].clone();
+        common.name = vec!["common".into()];
+        common.status = pons_ir::ErrorStatus::Class(5);
+        document.common_errors.push(common);
+
+        let output = super::emit(&document).unwrap();
+        let client = output.iter().find(|file| file.path == "client.ts").unwrap();
+        assert!(client.content.contains("\"X-Retry-Count\": [bigint]"));
+        assert!(
+            client
+                .content
+                .contains("decodeWire(parseJson(value, preserveWideIntegers), schema)")
+        );
+        assert!(
+            !client
+                .content
+                .contains("decodeWire(JSON.parse(value), schema)")
+        );
+
+        let output = super::emit_with_mode(&document, super::EmitMode::Lossy).unwrap();
+        let warning = output
+            .warnings
+            .iter()
+            .find(|warning| warning.contains("operations[0].errors[0].headers[0].ty"))
+            .unwrap();
+        assert!(warning.contains("operations[0].errors[0].headers[0].ty"));
+        assert!(warning.contains("common_errors[0].headers[0].ty"));
     }
 
     #[test]

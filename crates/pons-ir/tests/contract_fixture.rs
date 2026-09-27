@@ -494,7 +494,58 @@ fn validation_rejects_exact_error_response_collisions() {
 
     let mut document = base;
     document.operations[0].responses[0].status = ResponseStatus::Exact(400);
+    document.operations[0].errors[0].status = ErrorStatus::Class(5);
     assert!(document.validate().is_ok());
+}
+
+#[test]
+fn validation_rejects_overlapping_response_error_status_dispatch() {
+    let base: Document =
+        serde_json::from_str(include_str!("../../../fixtures/login.json")).unwrap();
+    let has_collision = |document: &Document| {
+        document.validate().unwrap_err().iter().any(|error| {
+            error
+                .to_string()
+                .contains("collides with a success response")
+        })
+    };
+
+    let mut document = base.clone();
+    document.operations[0].responses[0].status = ResponseStatus::Class(4);
+    document.operations[0].errors[0].status = ErrorStatus::Class(4);
+    assert!(has_collision(&document));
+
+    document = base.clone();
+    document.operations[0].responses[0].status = ResponseStatus::Class(4);
+    document.operations[0].errors[0].status = ErrorStatus::Exact(404);
+    assert!(has_collision(&document));
+
+    document = base.clone();
+    document.operations[0].responses[0].status = ResponseStatus::Unknown;
+    document.operations[0].errors[0].status = ErrorStatus::Class(2);
+    assert!(has_collision(&document));
+
+    document = base.clone();
+    document.operations[0].responses[0].status = ResponseStatus::Default;
+    document.operations[0].errors[0].status = ErrorStatus::Exact(201);
+    assert!(has_collision(&document));
+
+    document = base.clone();
+    document.operations[0].responses[0].status = ResponseStatus::Class(4);
+    let mut common = document.operations[0].errors[0].clone();
+    common.name = vec!["common".into()];
+    document.common_errors.push(common);
+    assert!(has_collision(&document));
+
+    document = base.clone();
+    document.operations[0].responses[0].status = ResponseStatus::Unknown;
+    document.operations[0].errors[0].status = ErrorStatus::Default;
+    document.validate().unwrap();
+
+    let mut disjoint = base;
+    disjoint.operations[0].responses[0].status = ResponseStatus::Class(2);
+    disjoint.operations[0].errors[0].status = ErrorStatus::Class(4);
+    disjoint.validate().unwrap();
 }
 
 #[test]

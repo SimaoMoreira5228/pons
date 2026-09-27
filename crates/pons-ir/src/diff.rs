@@ -1,8 +1,8 @@
 use std::collections::BTreeMap;
 
 use crate::{
-    Direction, Document, ErrorResponse, Field, InlineType, Operation, Presence, TypeDef, TypeKind,
-    TypeRef,
+    Body, Direction, Document, ErrorResponse, Field, InlineType, Operation, Presence, TypeDef,
+    TypeKind, TypeRef,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -421,14 +421,7 @@ fn diff_operation(diff: &mut Diff, path: &str, old: &Operation, new: &Operation)
         );
     }
     diff_headers(diff, path, &old.headers, &new.headers);
-    if old.body != new.body {
-        add(
-            diff,
-            ChangeLevel::Breaking,
-            format!("{path}.body"),
-            "request body changed",
-        );
-    }
+    diff_body(diff, path, old.body.as_ref(), new.body.as_ref());
     if old.responses != new.responses {
         diff_responses(diff, path, old, new);
     }
@@ -474,6 +467,47 @@ fn route_shape(path: &[crate::PathSegment]) -> Vec<String> {
             crate::PathSegment::Param { param, .. } => format!("{{{param}}}"),
         })
         .collect()
+}
+
+fn diff_body(diff: &mut Diff, path: &str, old: Option<&Body>, new: Option<&Body>) {
+    let (Some(old), Some(new)) = (old, new) else {
+        if old.is_some() || new.is_some() {
+            add(
+                diff,
+                ChangeLevel::Breaking,
+                format!("{path}.body"),
+                "request body changed",
+            );
+        }
+        return;
+    };
+    if old.ty != new.ty
+        || old.content != new.content
+        || old.media_type != new.media_type
+        || old.ext != new.ext
+    {
+        add(
+            diff,
+            ChangeLevel::Breaking,
+            format!("{path}.body"),
+            "request body changed",
+        );
+    } else if old.required != new.required {
+        add(
+            diff,
+            if old.required {
+                ChangeLevel::NonBreaking
+            } else {
+                ChangeLevel::Breaking
+            },
+            format!("{path}.body"),
+            if old.required {
+                "request body became optional"
+            } else {
+                "request body became required"
+            },
+        );
+    }
 }
 
 fn diff_headers(
@@ -756,5 +790,46 @@ mod tests {
         assert!(!diff.changes.iter().any(|change| {
             change.path == "operations.events.watch" && change.detail == "route URL changed"
         }));
+    }
+
+    #[test]
+    fn request_body_requiredness_is_classified() {
+        let old: Document = serde_json::from_value(fixture()).unwrap();
+        let mut optional = old.clone();
+        optional.operations[0].body.as_mut().unwrap().required = false;
+        let change = old
+            .diff(&optional)
+            .changes
+            .into_iter()
+            .find(|change| change.path == "operations.auth.login.body")
+            .unwrap();
+        assert_eq!(change.level, ChangeLevel::NonBreaking);
+        assert_eq!(change.detail, "request body became optional");
+
+        let mut required = optional.clone();
+        required.operations[0].body.as_mut().unwrap().required = true;
+        assert_eq!(
+            optional
+                .diff(&required)
+                .changes
+                .into_iter()
+                .find(|change| change.path == "operations.auth.login.body")
+                .unwrap()
+                .level,
+            ChangeLevel::Breaking
+        );
+
+        let mut media = old.clone();
+        media.operations[0].body.as_mut().unwrap().media_type =
+            Some("application/vnd.acme+json".into());
+        assert_eq!(
+            old.diff(&media)
+                .changes
+                .into_iter()
+                .find(|change| change.path == "operations.auth.login.body")
+                .unwrap()
+                .level,
+            ChangeLevel::Breaking
+        );
     }
 }

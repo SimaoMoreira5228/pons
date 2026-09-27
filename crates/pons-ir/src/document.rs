@@ -37,6 +37,27 @@ fn status_forbids_body(status: u16) -> bool {
     matches!(status, 100..=199 | 204 | 205 | 304)
 }
 
+fn response_status_conflicts(response: ResponseStatus, error: &ErrorStatus) -> bool {
+    match (response, error) {
+        (ResponseStatus::Exact(response), ErrorStatus::Exact(error)) => response == *error,
+        (ResponseStatus::Exact(response), ErrorStatus::Class(class)) => {
+            response / 100 == u16::from(*class)
+        }
+        (ResponseStatus::Class(response), ErrorStatus::Exact(error)) => {
+            u16::from(response) == *error / 100
+        }
+        (ResponseStatus::Class(response), ErrorStatus::Class(error)) => response == *error,
+        (ResponseStatus::Default | ResponseStatus::Unknown, ErrorStatus::Exact(status)) => {
+            (200..300).contains(status)
+        }
+        (ResponseStatus::Default | ResponseStatus::Unknown, ErrorStatus::Class(class)) => {
+            *class == 2
+        }
+        (ResponseStatus::Default | ResponseStatus::Unknown, ErrorStatus::Default) => false,
+        _ => false,
+    }
+}
+
 impl Document {
     pub fn canonicalize(&mut self) {
         self.types
@@ -431,25 +452,33 @@ impl Document {
                         message: format!("error {:?} {:?} is inherited", error.status, error.name),
                     });
                 }
-                if let ErrorStatus::Exact(status) = error.status
-                    && response_statuses.contains(&ResponseStatus::Exact(status))
+                if operation
+                    .responses
+                    .iter()
+                    .any(|response| response_status_conflicts(response.status, &error.status))
                 {
                     errors.push(ValidationError::InvalidValue {
                         path: owner.clone(),
-                        message: format!("error status {status} collides with a success response"),
+                        message: format!(
+                            "error status {:?} collides with a success response",
+                            error.status
+                        ),
                     });
                 }
                 self.validate_error(&owner, error, operation.method == Method::Head, &mut errors);
             }
             if operation.errors_inherit {
                 for error in &self.common_errors {
-                    if let ErrorStatus::Exact(status) = error.status
-                        && response_statuses.contains(&ResponseStatus::Exact(status))
+                    if operation
+                        .responses
+                        .iter()
+                        .any(|response| response_status_conflicts(response.status, &error.status))
                     {
                         errors.push(ValidationError::InvalidValue {
                             path: owner.clone(),
                             message: format!(
-                                "error status {status} collides with a success response"
+                                "error status {:?} collides with a success response",
+                                error.status
                             ),
                         });
                     }
