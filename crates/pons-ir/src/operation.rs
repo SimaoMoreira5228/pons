@@ -349,6 +349,30 @@ pub struct ErrorResponse {
     pub ext: BTreeMap<String, Value>,
 }
 
+impl ErrorResponse {
+    pub(crate) fn equivalent_ignoring_header_case(&self, other: &Self) -> bool {
+        self.status == other.status
+            && self.name == other.name
+            && self.content == other.content
+            && self.media_type == other.media_type
+            && self.body == other.body
+            && self.retryable == other.retryable
+            && self.doc == other.doc
+            && self.ext == other.ext
+            && self.headers.len() == other.headers.len()
+            && self
+                .headers
+                .iter()
+                .zip(&other.headers)
+                .all(|(left, right)| {
+                    left.wire.eq_ignore_ascii_case(&right.wire)
+                        && left.ty == right.ty
+                        && left.presence == right.presence
+                        && left.ext == right.ext
+                })
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub enum ErrorStatus {
     Exact(u16),

@@ -200,10 +200,10 @@ fn diff_type(diff: &mut Diff, id: &str, old: &TypeDef, new: &TypeDef) {
                         );
                     }
                 } else {
-                    let level = if old.direction == Direction::Input {
+                    let level = if new.direction == Direction::Input {
                         ChangeLevel::NonBreaking
                     } else {
-                        ChangeLevel::Warning
+                        ChangeLevel::Breaking
                     };
                     add(
                         diff,
@@ -644,7 +644,7 @@ fn diff_errors(diff: &mut Diff, path: &str, old: &[ErrorResponse], new: &[ErrorR
     }
     for (key, error) in new {
         match old.get(&key) {
-            Some(previous) if *previous != error => add(
+            Some(previous) if !previous.equivalent_ignoring_header_case(error) => add(
                 diff,
                 ChangeLevel::Breaking,
                 format!("{path}.errors.{}", key.1.join("_")),
@@ -652,7 +652,7 @@ fn diff_errors(diff: &mut Diff, path: &str, old: &[ErrorResponse], new: &[ErrorR
             ),
             None => add(
                 diff,
-                ChangeLevel::Info,
+                ChangeLevel::Breaking,
                 format!("{path}.errors.{}", key.1.join("_")),
                 "error status added",
             ),
@@ -750,9 +750,16 @@ mod tests {
                 "ident": ["expired"],
                 "payload": {"kind": "unit"}
             }));
+        let new: Document = serde_json::from_value(changed).unwrap();
+        let diff = old.diff(&new);
+        assert!(diff.has_breaking_changes());
         assert_eq!(
-            level(&old, changed, "types.LoginError.variants.expired"),
-            ChangeLevel::Warning
+            diff.changes
+                .iter()
+                .find(|change| change.path == "types.LoginError.variants.expired")
+                .unwrap()
+                .level,
+            ChangeLevel::Breaking
         );
     }
 
@@ -789,6 +796,34 @@ mod tests {
         }));
         assert!(!diff.changes.iter().any(|change| {
             change.path == "operations.events.watch" && change.detail == "route URL changed"
+        }));
+    }
+
+    #[test]
+    fn new_errors_are_breaking() {
+        let old: Document = serde_json::from_value(fixture()).unwrap();
+        let mut operation = old.clone();
+        let mut operation_error = operation.operations[0].errors[0].clone();
+        operation_error.status = crate::ErrorStatus::Exact(418);
+        operation_error.name = vec!["teapot".into()];
+        operation.operations[0].errors.push(operation_error);
+        let diff = old.diff(&operation);
+        assert!(diff.has_breaking_changes());
+        assert!(diff.changes.iter().any(|change| {
+            change.path == "operations.auth.login.errors.teapot"
+                && change.level == ChangeLevel::Breaking
+        }));
+
+        let mut common = old.clone();
+        let mut common_error = common.operations[0].errors[0].clone();
+        common_error.status = crate::ErrorStatus::Exact(503);
+        common_error.name = vec!["unavailable".into()];
+        common.common_errors.push(common_error);
+        let diff = old.diff(&common);
+        assert!(diff.has_breaking_changes());
+        assert!(diff.changes.iter().any(|change| {
+            change.path == "common_errors.errors.unavailable"
+                && change.level == ChangeLevel::Breaking
         }));
     }
 

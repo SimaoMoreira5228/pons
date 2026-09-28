@@ -382,7 +382,7 @@ function decodeHeaderValue(value: string, schema: any, preserveWideIntegers: boo
     if (schema.ref) {
       const definition = typeDefinitions[schema.ref];
       if (definition?.kind === "newtype") return decodeHeaderValue(value, definition.inner, preserveWideIntegers);
-      if (definition?.kind === "enum") return value;
+      if (definition?.kind === "enum") return decodeWire(value, schema);
       return decodeWire(parseJson(value, preserveWideIntegers), schema);
     }
     if (schema.kind === "int") {
@@ -587,6 +587,7 @@ function stringifyJson(value: unknown): string {
 }
 
 function encodeWire(value: any, schema: any): any {
+  validateWire(value, schema);
   if (value == null || schema == null) return value;
   if (schema.ref) {
     const definition = typeDefinitions[schema.ref];
@@ -608,6 +609,7 @@ function encodeWire(value: any, schema: any): any {
 }
 
 function decodeWire(value: any, schema: any): any {
+  validateWire(value, schema);
   if (value == null || schema == null) return value;
   if (schema.kind === "int" && schema.bits <= 53 && typeof value === "bigint") return Number(value);
   if (schema.ref) {
@@ -755,5 +757,10 @@ function pointerValue(value: unknown, pointer: string): unknown {
 }
 
 pub(super) fn render() -> String {
-    format!("{}{}", render_core(), crate::runtime_auth::render())
+    format!(
+        "{}{}{}",
+        render_core(),
+        crate::wire_validation::render(),
+        crate::runtime_auth::render()
+    )
 }

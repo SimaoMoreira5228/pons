@@ -8,3 +8,6 @@ rust-version.workspace = true
 [dependencies]
 pons-ir = { path = "../pons-ir" }
 serde_json.workspace = true
+
+[dev-dependencies]
+tempfile = "3.27.0"

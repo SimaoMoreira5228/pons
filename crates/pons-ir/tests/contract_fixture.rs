@@ -3,6 +3,7 @@ use pons_ir::{
     OAuthFlowKind, Presence, ResponseHeader, ResponseStatus, StreamKind, TypeKind, TypeRef,
     VariantPayload,
 };
+use std::collections::BTreeMap;
 
 #[test]
 fn consumer_can_load_validate_and_canonicalize_the_contract_fixture() {
@@ -18,9 +19,27 @@ fn consumer_can_load_validate_and_canonicalize_the_contract_fixture() {
 
 #[test]
 fn diff_treats_header_names_case_insensitively() {
-    let old: Document =
+    let mut old: Document =
         serde_json::from_str(include_str!("../../../fixtures/login.json")).unwrap();
+    old.operations[0].errors[0].headers.push(ResponseHeader {
+        wire: "Retry-After".into(),
+        ty: TypeRef::Inline(InlineType::String {
+            format: None,
+            min_length: None,
+            max_length: None,
+            pattern: None,
+        }),
+        presence: Presence::Required,
+        ext: BTreeMap::new(),
+    });
+    let mut common = old.operations[0].errors[0].clone();
+    common.name = vec!["common".into()];
+    common.status = ErrorStatus::Class(5);
+    old.common_errors.push(common);
+
     let mut new = old.clone();
+    new.operations[0].errors[0].headers[0].wire = "retry-after".into();
+    new.common_errors[0].headers[0].wire = "retry-after".into();
     let operation = new
         .operations
         .iter_mut()
@@ -30,6 +49,15 @@ fn diff_treats_header_names_case_insensitively() {
     operation.responses[0].headers[0].wire = "x-trace-id".into();
 
     assert!(old.diff(&new).changes.is_empty());
+
+    let mut changed = old.clone();
+    changed.operations[0].errors[0].headers[0].presence = Presence::Optional;
+    assert!(
+        old.diff(&changed)
+            .changes
+            .iter()
+            .any(|change| change.level == pons_ir::ChangeLevel::Breaking)
+    );
 }
 
 #[test]

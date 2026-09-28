@@ -2,6 +2,7 @@ mod client;
 mod runtime;
 mod runtime_auth;
 mod types;
+mod wire_validation;
 
 use std::collections::BTreeMap;
 
