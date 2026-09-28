@@ -13,11 +13,18 @@ type CredentialLocator =
   | { from: "set_cookie"; name: string };
 type CredentialProvision = { scheme: string; value: CredentialLocator; expiresAt?: CredentialLocator };
 type ConfiguredClient = ClientOptions & { authValues: Record<string, string>; authExpirations: Record<string, number> };
+type RequestInputDescriptor = {
+  path: Array<{ name: string; required: boolean; schema: unknown }>;
+  query?: unknown;
+  headers: Array<{ name: string; required: boolean; schema: unknown }>;
+  bodyRequired: boolean;
+};
 
 async function request<T, E>(
   client: ConfiguredClient,
   method: string,
-  path: string,
+  path: string | ((values: Record<string, unknown>) => string),
+  pathValues: Record<string, unknown> | undefined,
   query: unknown,
   requestHeaders: Record<string, unknown> | undefined,
   body: unknown,
@@ -26,6 +33,7 @@ async function request<T, E>(
   authGroups: string[][],
   authScopes: Record<string, readonly string[]>,
   bodySchema: unknown,
+  inputs: RequestInputDescriptor,
   responses: Array<{ status: number | string; content: string; mediaType?: string; schema?: unknown; stream?: "sse" | "ndjson"; item?: unknown; events?: Array<{ event: string; schema: unknown }>; headers?: Array<{ name: string; required: boolean; schema: unknown }> }>,
   errors: Array<{ status: number | string; content: string; mediaType?: string; schema?: unknown; retryable?: boolean; events?: Array<{ event: string; schema: unknown }>; headers?: Array<{ name: string; required: boolean; schema: unknown }> }>,
   authOptional: boolean,
@@ -52,10 +60,18 @@ async function request<T, E>(
   }
   const signal = timeoutController?.signal ?? parentSignal;
   try {
+    const encodedPathValues = preflightPath(pathValues, inputs.path);
+    const encodedQuery = preflightQuery(query, inputs.query);
+    const encodedRequestHeaders = preflightHeaders(requestHeaders, inputs.headers);
+    if (inputs.bodyRequired && body === undefined) {
+      throw new WirePolicyError("missing required request body");
+    }
+    const encodedBody = preflightBody(body, bodySchema, content);
     const baseUrl = client.baseUrl.endsWith("/") ? client.baseUrl : `${client.baseUrl}/`;
-    const url = new URL(path.replace(/^\/+/, ""), baseUrl);
-    if (query && typeof query === "object") {
-      for (const [key, value] of Object.entries(query)) {
+    const resolvedPath = typeof path === "function" ? path(encodedPathValues) : path;
+    const url = new URL(resolvedPath.replace(/^\/+/, ""), baseUrl);
+    if (encodedQuery && typeof encodedQuery === "object") {
+      for (const [key, value] of Object.entries(encodedQuery)) {
         if (value === undefined || value === null) continue;
         for (const item of Array.isArray(value) ? value : [value]) {
           url.searchParams.append(key, String(item));
@@ -67,7 +83,7 @@ async function request<T, E>(
     if (callOptions?.headers) {
       for (const [key, value] of new Headers(callOptions.headers).entries()) headers.set(key, value);
     }
-    for (const [key, value] of Object.entries(requestHeaders ?? {})) {
+    for (const [key, value] of Object.entries(encodedRequestHeaders)) {
       if (value !== undefined && value !== null) headers.set(key, String(value));
     }
     let credentials: RequestCredentials | undefined;
@@ -117,16 +133,13 @@ async function request<T, E>(
       else if (definition.kind === "api_key" && definition.location === "cookie") headers.set("cookie", `${definition.name}=${value}`);
     }
     const init: RequestInit = { method, headers, credentials, signal };
-    if (body !== undefined) {
-      const encodedBody = ["json", "problem_json", "form", "multipart"].includes(content ?? "")
-        ? encodeWire(body, bodySchema)
-        : body;
+    if (encodedBody !== undefined) {
       if (content === "json" || content === "problem_json") {
         headers.set("content-type", mediaType ?? (content === "problem_json" ? "application/problem+json" : "application/json"));
         init.body = stringifyJson(encodedBody);
       } else if (content === "form") {
         const form = new URLSearchParams();
-        for (const [key, value] of Object.entries(encodeWire(body, bodySchema) as Record<string, unknown>)) {
+        for (const [key, value] of Object.entries(encodedBody as Record<string, unknown>)) {
           if (value !== undefined && value !== null) form.set(key, String(value));
         }
         headers.set("content-type", mediaType ?? "application/x-www-form-urlencoded");
@@ -139,10 +152,10 @@ async function request<T, E>(
         init.body = form;
       } else if (content === "text") {
         headers.set("content-type", mediaType ?? "text/plain; charset=utf-8");
-        init.body = String(body);
+        init.body = String(encodedBody);
       } else {
         if (mediaType) headers.set("content-type", mediaType);
-        init.body = body as BodyInit;
+        init.body = encodedBody as BodyInit;
       }
     }
     if (client.interceptors?.request) {
@@ -329,6 +342,58 @@ function mediaTypeBase(value: string): string {
   return value.split(";", 1)[0].trim().toLowerCase();
 }
 
+function preflightPath(
+  values: Record<string, unknown> | undefined,
+  descriptors: Array<{ name: string; required: boolean; schema: unknown }>,
+): Record<string, unknown> {
+  const output = { ...(values ?? {}) };
+  for (const descriptor of descriptors) {
+    const value = output[descriptor.name];
+    if (value === undefined) {
+      if (descriptor.required) {
+        throw new WirePolicyError(`missing required path parameter ${descriptor.name}`);
+      }
+      continue;
+    }
+    output[descriptor.name] = encodeWire(value, descriptor.schema);
+  }
+  return output;
+}
+
+function preflightQuery(value: unknown, schema: unknown): unknown {
+  if (schema == null) return value;
+  if (value === undefined) throw new WirePolicyError("missing request query");
+  return encodeWire(value, schema);
+}
+
+function preflightHeaders(
+  values: Record<string, unknown> | undefined,
+  descriptors: Array<{ name: string; required: boolean; schema: unknown }>,
+): Record<string, unknown> {
+  const output = { ...(values ?? {}) };
+  for (const descriptor of descriptors) {
+    const value = output[descriptor.name];
+    if (value === undefined || value === null) {
+      if (descriptor.required) {
+        throw new WirePolicyError(`missing required request header ${descriptor.name}`);
+      }
+      delete output[descriptor.name];
+      continue;
+    }
+    output[descriptor.name] = encodeWire(value, descriptor.schema);
+  }
+  return output;
+}
+
+function preflightBody(value: unknown, schema: unknown, content: string | undefined): unknown {
+  if (value === undefined || schema == null) return value;
+  if (["json", "problem_json", "form", "multipart"].includes(content ?? "")) {
+    return encodeWire(value, schema);
+  }
+  validateWire(value, schema, "encode");
+  return value;
+}
+
 function findDeclared<T extends { status: number | string }>(entries: T[], actual: number): T | undefined {
   return entries.find((entry) => entry.status === actual)
     ?? entries.find((entry) => typeof entry.status === "string" && entry.status === `${Math.floor(actual / 100)}xx`)
@@ -386,8 +451,12 @@ function decodeHeaderValue(value: string, schema: any, preserveWideIntegers: boo
       return decodeWire(parseJson(value, preserveWideIntegers), schema);
     }
     if (schema.kind === "int") {
-      if (schema.wire === "string") return value;
-      return schema.bits > 53 && preserveWideIntegers ? BigInt(value) : parseNumber(value);
+      const parsed = schema.wire === "string"
+        ? value
+        : schema.bits > 53 && preserveWideIntegers
+          ? BigInt(value)
+          : parseNumber(value);
+      return decodeWire(parsed, schema);
     }
     if (schema.kind === "float") return parseNumber(value);
     if (schema.kind === "decimal") return schema.wire === "number" ? parseNumber(value) : value;
@@ -519,7 +588,23 @@ async function* readNdjson<Item>(
 
 function parseJson(text: string, preserveWideIntegers: boolean): unknown {
   if (!preserveWideIntegers) return JSON.parse(text);
-  const marker = "\u0000pons-bigint:";
+  const strings: string[] = [];
+  const pending: unknown[] = [JSON.parse(text)];
+  while (pending.length > 0) {
+    const value = pending.pop();
+    if (typeof value === "string") {
+      strings.push(value);
+    } else if (Array.isArray(value)) {
+      for (const item of value) pending.push(item);
+    } else if (value !== null && typeof value === "object") {
+      for (const [key, item] of Object.entries(value)) {
+        strings.push(key);
+        pending.push(item);
+      }
+    }
+  }
+  let marker = "\u0000pons-bigint:";
+  while (strings.some((value) => value.startsWith(marker))) marker += "\u0000";
   let output = "";
   let index = 0;
   let inString = false;
@@ -567,10 +652,9 @@ function parseJson(text: string, preserveWideIntegers: boolean): unknown {
     index += 1;
   }
   return JSON.parse(output, (_key: string, value: unknown) => {
-    if (typeof value === "string" && value.startsWith(marker)) {
-      return BigInt(value.slice(marker.length));
-    }
-    return value;
+    if (typeof value !== "string" || !value.startsWith(marker)) return value;
+    const token = value.slice(marker.length);
+    return /^-?\d+$/.test(token) ? BigInt(token) : value;
   });
 }
 
@@ -587,7 +671,7 @@ function stringifyJson(value: unknown): string {
 }
 
 function encodeWire(value: any, schema: any): any {
-  validateWire(value, schema);
+  const selectedVariant = validateWire(value, schema, "encode");
   if (value == null || schema == null) return value;
   if (schema.ref) {
     const definition = typeDefinitions[schema.ref];
@@ -596,7 +680,7 @@ function encodeWire(value: any, schema: any): any {
       return transformVariant(value, definition, definition.variants.find((variant: any) => variant.wire === schema.variant), "encode");
     }
     if (definition.kind === "struct") return transformStruct(value, definition, "encode");
-    if (definition.kind === "enum") return transformEnum(value, definition, "encode");
+    if (definition.kind === "enum") return transformEnum(value, definition, "encode", selectedVariant);
     if (definition.kind === "newtype") return encodeWire(value, definition.inner);
     return value;
   }
@@ -609,7 +693,7 @@ function encodeWire(value: any, schema: any): any {
 }
 
 function decodeWire(value: any, schema: any): any {
-  validateWire(value, schema);
+  const selectedVariant = validateWire(value, schema, "decode");
   if (value == null || schema == null) return value;
   if (schema.kind === "int" && schema.bits <= 53 && typeof value === "bigint") return Number(value);
   if (schema.ref) {
@@ -619,7 +703,7 @@ function decodeWire(value: any, schema: any): any {
       return transformVariant(value, definition, definition.variants.find((variant: any) => variant.wire === schema.variant), "decode");
     }
     if (definition.kind === "struct") return transformStruct(value, definition, "decode");
-    if (definition.kind === "enum") return transformEnum(value, definition, "decode");
+    if (definition.kind === "enum") return transformEnum(value, definition, "decode", selectedVariant);
     if (definition.kind === "newtype") return decodeWire(value, definition.inner);
     return value;
   }
@@ -681,7 +765,7 @@ function collectMapValues(references: any[]): any[] {
   });
 }
 
-function transformEnum(value: any, definition: any, mode: "encode" | "decode"): any {
+function transformEnum(value: any, definition: any, mode: "encode" | "decode", selectedVariant?: any): any {
   const repr = definition.repr;
   let variant: any;
   let payload: unknown;
@@ -698,7 +782,8 @@ function transformEnum(value: any, definition: any, mode: "encode" | "decode"): 
     variant = definition.variants.find((entry: any) => entry.wire === value[repr.tag]);
     payload = value[repr.content];
   } else {
-    return value;
+    variant = selectedVariant ?? selectUntaggedVariant(value, definition, undefined, mode);
+    payload = value;
   }
   return transformVariant(value, definition, variant, mode, payload);
 }

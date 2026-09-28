@@ -150,9 +150,10 @@ fn type_definitions(document: &Document) -> Result<String, EmitError> {
         .types
         .iter()
         .map(|(id, definition)| {
-            serde_json::to_value(&definition.definition)
-                .map(|value| (id.clone(), value))
-                .map_err(|error| EmitError(format!("cannot encode type metadata: {error}")))
+            let mut value = serde_json::to_value(&definition.definition)
+                .map_err(|error| EmitError(format!("cannot encode type metadata: {error}")))?;
+            normalize_integer_constraints(&mut value);
+            Ok((id.clone(), value))
         })
         .collect::<Result<BTreeMap<_, _>, _>>()?;
     let definitions = serde_json::to_string(&definitions)
@@ -208,6 +209,16 @@ fn operation_function(
         .map(|body| type_ref_json(&body.ty))
         .transpose()?
         .unwrap_or_else(|| "undefined".into());
+    let request_inputs = request_input_descriptor(operation)?;
+    let path_values = if operation
+        .path
+        .iter()
+        .any(|segment| matches!(segment, PathSegment::Param { .. }))
+    {
+        "args.path"
+    } else {
+        "undefined"
+    };
     let response_schemas = response_descriptors(operation)?;
     let error_schemas = errors
         .iter()
@@ -298,7 +309,7 @@ fn operation_function(
         "export type {args_name} = {{ {args} }};\n{stream_types}export type {success_name} = {success};\nexport type {error_name} = {failure};\n",
     );
     let request = format!(
-        "request<{success_name}, {error_name}>(configured, {method:?}, {path}, {query}, {headers}, {body}, {content}, {media_type}, [{groups}], {{{scopes}}}, {body_schema}, [{response_schemas}], [{error_schemas}], {}, {}, {provides}, {options}, {})",
+        "request<{success_name}, {error_name}>(configured, {method:?}, {path}, {path_values}, {query}, {headers}, {body}, {content}, {media_type}, [{groups}], {{{scopes}}}, {body_schema}, {request_inputs}, [{response_schemas}], [{error_schemas}], {}, {}, {provides}, {options}, {})",
         operation.auth.optional, preserve_wide_integers, operation.semantics.idempotent,
     );
     let function = if error_strategy == ErrorStrategy::Throw {
@@ -545,21 +556,72 @@ fn error_type(
     Ok(failures.join(" | "))
 }
 
+fn request_input_descriptor(operation: &Operation) -> Result<String, EmitError> {
+    let path = operation
+        .path
+        .iter()
+        .filter_map(|segment| match segment {
+            PathSegment::Param { param, ty } => Some((param, ty)),
+            PathSegment::Literal { .. } => None,
+        })
+        .map(|(param, ty)| {
+            Ok(format!(
+                "{{ name: {}, required: true, schema: {} }}",
+                string(param),
+                type_ref_json(ty)?
+            ))
+        })
+        .collect::<Result<Vec<_>, EmitError>>()?
+        .join(", ");
+    let query = operation
+        .query
+        .as_ref()
+        .map(type_ref_json)
+        .transpose()?
+        .unwrap_or_else(|| "undefined".into());
+    let headers = operation
+        .headers
+        .iter()
+        .map(|header| {
+            Ok(format!(
+                "{{ name: {}, required: {}, schema: {} }}",
+                string(&header.wire),
+                header.presence == Presence::Required,
+                type_ref_json(&header.ty)?
+            ))
+        })
+        .collect::<Result<Vec<_>, EmitError>>()?
+        .join(", ");
+    let body_required = operation.body.as_ref().is_some_and(|body| body.required);
+    Ok(format!(
+        "{{ path: [{path}], query: {query}, headers: [{headers}], bodyRequired: {body_required} }}"
+    ))
+}
+
 fn path_expression(operation: &Operation) -> String {
     if operation.path.is_empty() {
         return "\"/\"".into();
     }
+    let has_params = operation
+        .path
+        .iter()
+        .any(|segment| matches!(segment, PathSegment::Param { .. }));
     let segments = operation
         .path
         .iter()
         .map(|segment| match segment {
             PathSegment::Literal { lit } => string(lit),
             PathSegment::Param { param, .. } => {
-                format!("encodeURIComponent(String(args.path[{}]))", string(param))
+                format!("encodeURIComponent(String(pathValues[{}]))", string(param))
             }
         })
         .collect::<Vec<_>>();
-    format!("[\"\", {}].join(\"/\")", segments.join(", "))
+    let path = format!("[\"\", {}].join(\"/\")", segments.join(", "));
+    if has_params {
+        format!("(pathValues) => {path}")
+    } else {
+        path
+    }
 }
 
 fn content_name(content: ContentKind) -> &'static str {
@@ -697,6 +759,33 @@ fn error_descriptor(error: &ErrorResponse) -> Result<String, EmitError> {
 }
 
 fn type_ref_json(reference: &TypeRef) -> Result<String, EmitError> {
-    serde_json::to_string(reference)
+    let mut value = serde_json::to_value(reference)
+        .map_err(|error| EmitError(format!("cannot encode type reference: {error}")))?;
+    normalize_integer_constraints(&mut value);
+    serde_json::to_string(&value)
         .map_err(|error| EmitError(format!("cannot encode type reference: {error}")))
+}
+
+fn normalize_integer_constraints(value: &mut serde_json::Value) {
+    match value {
+        serde_json::Value::Object(fields) => {
+            if fields.get("kind").and_then(serde_json::Value::as_str) == Some("int") {
+                for key in ["minimum", "maximum", "multiple_of"] {
+                    if let Some(serde_json::Value::Number(number)) = fields.get(key) {
+                        let encoded = number.to_string();
+                        fields.insert(key.into(), serde_json::Value::String(encoded));
+                    }
+                }
+            }
+            for child in fields.values_mut() {
+                normalize_integer_constraints(child);
+            }
+        }
+        serde_json::Value::Array(values) => {
+            for child in values {
+                normalize_integer_constraints(child);
+            }
+        }
+        _ => {}
+    }
 }

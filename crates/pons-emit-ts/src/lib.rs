@@ -98,7 +98,13 @@ pub fn emit_with_strategy(
             "the TypeScript emitter supports SSE and NDJSON streams only".into(),
         ));
     }
-    let wide_integers = wide_integer_references(&document);
+    let integer_scan = scan_integer_references(&document);
+    if let Some(path) = integer_scan.fractional_constraint_paths.first() {
+        return Err(EmitError(format!(
+            "the TypeScript emitter cannot enforce fractional integer constraint {path}"
+        )));
+    }
+    let wide_integers = integer_scan.wide_paths;
     let names = type_names(&document);
     let preserve_wide_integers = mode == EmitMode::Strict && !wide_integers.is_empty();
     let files = vec![
@@ -129,20 +135,26 @@ pub fn emit_with_strategy(
     Ok(EmitOutput { files, warnings })
 }
 
-fn wide_integer_references(document: &Document) -> Vec<String> {
-    let mut paths = Vec::new();
+#[derive(Default)]
+struct IntegerScan {
+    wide_paths: Vec<String>,
+    fractional_constraint_paths: Vec<String>,
+}
+
+fn scan_integer_references(document: &Document) -> IntegerScan {
+    let mut scan = IntegerScan::default();
     for (id, definition) in &document.types {
-        scan_definition(&format!("types.{id}"), definition, &mut paths);
+        scan_definition(&format!("types.{id}"), definition, &mut scan);
     }
     for (index, error) in document.common_errors.iter().enumerate() {
         if let Some(body) = &error.body {
-            scan_type_ref(body, &format!("common_errors[{index}].body"), &mut paths);
+            scan_type_ref(body, &format!("common_errors[{index}].body"), &mut scan);
         }
         for (header_index, header) in error.headers.iter().enumerate() {
             scan_type_ref(
                 &header.ty,
                 &format!("common_errors[{index}].headers[{header_index}].ty"),
-                &mut paths,
+                &mut scan,
             );
         }
     }
@@ -150,39 +162,35 @@ fn wide_integer_references(document: &Document) -> Vec<String> {
         let prefix = format!("operations[{index}]");
         for (segment_index, segment) in operation.path.iter().enumerate() {
             if let PathSegment::Param { ty, .. } = segment {
-                scan_type_ref(
-                    ty,
-                    &format!("{prefix}.path[{segment_index}].ty"),
-                    &mut paths,
-                );
+                scan_type_ref(ty, &format!("{prefix}.path[{segment_index}].ty"), &mut scan);
             }
         }
         if let Some(query) = &operation.query {
-            scan_type_ref(query, &format!("{prefix}.query"), &mut paths);
+            scan_type_ref(query, &format!("{prefix}.query"), &mut scan);
         }
         for (header_index, header) in operation.headers.iter().enumerate() {
             scan_type_ref(
                 &header.ty,
                 &format!("{prefix}.headers[{header_index}].ty"),
-                &mut paths,
+                &mut scan,
             );
         }
         if let Some(body) = &operation.body {
-            scan_type_ref(&body.ty, &format!("{prefix}.body.ty"), &mut paths);
+            scan_type_ref(&body.ty, &format!("{prefix}.body.ty"), &mut scan);
         }
         for (response_index, response) in operation.responses.iter().enumerate() {
             if let Some(body) = &response.body {
                 scan_type_ref(
                     body,
                     &format!("{prefix}.responses[{response_index}].body"),
-                    &mut paths,
+                    &mut scan,
                 );
             }
             for (header_index, header) in response.headers.iter().enumerate() {
                 scan_type_ref(
                     &header.ty,
                     &format!("{prefix}.responses[{response_index}].headers[{header_index}].ty"),
-                    &mut paths,
+                    &mut scan,
                 );
             }
         }
@@ -191,14 +199,14 @@ fn wide_integer_references(document: &Document) -> Vec<String> {
                 scan_type_ref(
                     body,
                     &format!("{prefix}.errors[{error_index}].body"),
-                    &mut paths,
+                    &mut scan,
                 );
             }
             for (header_index, header) in error.headers.iter().enumerate() {
                 scan_type_ref(
                     &header.ty,
                     &format!("{prefix}.errors[{error_index}].headers[{header_index}].ty"),
-                    &mut paths,
+                    &mut scan,
                 );
             }
         }
@@ -209,25 +217,25 @@ fn wide_integer_references(document: &Document) -> Vec<String> {
                         scan_type_ref(
                             &event.data,
                             &format!("{prefix}.stream.events[{event_index}].data"),
-                            &mut paths,
+                            &mut scan,
                         );
                     }
                 }
                 StreamKind::Ndjson { item } => {
-                    scan_type_ref(item, &format!("{prefix}.stream.item"), &mut paths);
+                    scan_type_ref(item, &format!("{prefix}.stream.item"), &mut scan);
                 }
                 StreamKind::Websocket { client, server } => {
-                    scan_type_ref(client, &format!("{prefix}.stream.client"), &mut paths);
-                    scan_type_ref(server, &format!("{prefix}.stream.server"), &mut paths);
+                    scan_type_ref(client, &format!("{prefix}.stream.client"), &mut scan);
+                    scan_type_ref(server, &format!("{prefix}.stream.server"), &mut scan);
                 }
                 StreamKind::Bytes { .. } => {}
             }
         }
     }
-    paths
+    scan
 }
 
-fn scan_definition(path: &str, definition: &TypeDef, paths: &mut Vec<String>) {
+fn scan_definition(path: &str, definition: &TypeDef, scan: &mut IntegerScan) {
     match &definition.definition {
         TypeKind::Struct {
             fields,
@@ -235,13 +243,13 @@ fn scan_definition(path: &str, definition: &TypeDef, paths: &mut Vec<String>) {
             openness,
         } => {
             for (index, field) in fields.iter().enumerate() {
-                scan_type_ref(&field.ty, &format!("{path}.fields[{index}].ty"), paths);
+                scan_type_ref(&field.ty, &format!("{path}.fields[{index}].ty"), scan);
             }
             for (index, reference) in flattened.iter().enumerate() {
-                scan_type_ref(reference, &format!("{path}.flattened[{index}]"), paths);
+                scan_type_ref(reference, &format!("{path}.flattened[{index}]"), scan);
             }
             if let ObjectOpenness::PreserveTyped { value } = openness {
-                scan_type_ref(value, &format!("{path}.openness.value"), paths);
+                scan_type_ref(value, &format!("{path}.openness.value"), scan);
             }
         }
         TypeKind::Enum { variants, .. } => {
@@ -249,52 +257,80 @@ fn scan_definition(path: &str, definition: &TypeDef, paths: &mut Vec<String>) {
                 scan_payload(
                     &variant.payload,
                     &format!("{path}.variants[{variant_index}].payload"),
-                    paths,
+                    scan,
                 );
             }
         }
-        TypeKind::Newtype { inner } => scan_type_ref(inner, &format!("{path}.inner"), paths),
+        TypeKind::Newtype { inner } => scan_type_ref(inner, &format!("{path}.inner"), scan),
     }
 }
 
-fn scan_payload(payload: &VariantPayload, path: &str, paths: &mut Vec<String>) {
+fn scan_payload(payload: &VariantPayload, path: &str, scan: &mut IntegerScan) {
     match payload {
         VariantPayload::Unit => {}
-        VariantPayload::Newtype { ty } => scan_type_ref(ty, &format!("{path}.ty"), paths),
+        VariantPayload::Newtype { ty } => scan_type_ref(ty, &format!("{path}.ty"), scan),
         VariantPayload::Tuple { items } => {
             for (index, item) in items.iter().enumerate() {
-                scan_type_ref(item, &format!("{path}.items[{index}]"), paths);
+                scan_type_ref(item, &format!("{path}.items[{index}]"), scan);
             }
         }
         VariantPayload::Struct { fields } => {
             for (index, field) in fields.iter().enumerate() {
-                scan_type_ref(&field.ty, &format!("{path}.fields[{index}].ty"), paths);
+                scan_type_ref(&field.ty, &format!("{path}.fields[{index}].ty"), scan);
             }
         }
     }
 }
 
-fn scan_type_ref(reference: &TypeRef, path: &str, paths: &mut Vec<String>) {
+fn scan_type_ref(reference: &TypeRef, path: &str, scan: &mut IntegerScan) {
     let TypeRef::Inline(inline) = reference else {
         return;
     };
     match inline {
-        InlineType::Int { bits, wire, .. } if *wire == IntegerWire::Number && *bits > 53 => {
-            paths.push(path.to_owned())
+        InlineType::Int {
+            bits,
+            wire,
+            minimum,
+            maximum,
+            multiple_of,
+            ..
+        } => {
+            if *wire == IntegerWire::Number && *bits > 53 {
+                scan.wide_paths.push(path.to_owned());
+            }
+            for (name, value) in [
+                ("minimum", minimum),
+                ("maximum", maximum),
+                ("multiple_of", multiple_of),
+            ] {
+                if value
+                    .as_ref()
+                    .is_some_and(|value| !is_integer_number(value))
+                {
+                    scan.fractional_constraint_paths
+                        .push(format!("{path}.{name}"));
+                }
+            }
         }
-        InlineType::Nullable { inner } => scan_type_ref(inner, &format!("{path}.inner"), paths),
-        InlineType::Array { item, .. } => scan_type_ref(item, &format!("{path}.item"), paths),
+        InlineType::Nullable { inner } => scan_type_ref(inner, &format!("{path}.inner"), scan),
+        InlineType::Array { item, .. } => scan_type_ref(item, &format!("{path}.item"), scan),
         InlineType::Map { key, value } => {
-            scan_type_ref(key, &format!("{path}.key"), paths);
-            scan_type_ref(value, &format!("{path}.value"), paths);
+            scan_type_ref(key, &format!("{path}.key"), scan);
+            scan_type_ref(value, &format!("{path}.value"), scan);
         }
         InlineType::Tuple { items } => {
             for (index, item) in items.iter().enumerate() {
-                scan_type_ref(item, &format!("{path}.items[{index}]"), paths);
+                scan_type_ref(item, &format!("{path}.items[{index}]"), scan);
             }
         }
         _ => {}
     }
+}
+
+fn is_integer_number(value: &serde_json::Value) -> bool {
+    value
+        .as_number()
+        .is_some_and(|number| number.as_i128().is_some() || number.as_u128().is_some())
 }
 
 fn type_names(document: &Document) -> BTreeMap<String, String> {

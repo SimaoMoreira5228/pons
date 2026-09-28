@@ -1,5 +1,5 @@
 pub(super) fn render() -> &'static str {
-    r#"function validateWire(value: any, schema: any): void {
+    r#"function validateWire(value: any, schema: any, mode: "encode" | "decode"): any {
   if (schema == null) return;
   if (value === undefined) throw new WirePolicyError("missing value");
   if (schema.ref) {
@@ -8,13 +8,13 @@ pub(super) fn render() -> &'static str {
     if (schema.variant && definition.kind === "enum") {
       const variant = definition.variants.find((entry: any) => entry.wire === schema.variant);
       if (!variant) throw new WirePolicyError(`unknown enum variant ${schema.variant}`);
-      validateEnum(value, definition, variant);
+      return validateEnum(value, definition, variant, mode);
     } else if (definition.kind === "struct") {
-      validateStruct(value, definition);
+      return validateStruct(value, definition, mode);
     } else if (definition.kind === "enum") {
-      validateEnum(value, definition);
+      return validateEnum(value, definition, undefined, mode);
     } else if (definition.kind === "newtype") {
-      validateWire(value, definition.inner);
+      return validateWire(value, definition.inner, mode);
     }
     return;
   }
@@ -24,7 +24,7 @@ pub(super) fn render() -> &'static str {
     return;
   }
   if (schema.kind === "nullable") {
-    if (value !== null) validateWire(value, schema.inner);
+    if (value !== null) validateWire(value, schema.inner, mode);
     return;
   }
   if (schema.kind === "bool") {
@@ -32,15 +32,7 @@ pub(super) fn render() -> &'static str {
     return;
   }
   if (schema.kind === "int") {
-    if (schema.wire === "string") {
-      if (typeof value !== "string" || !/^-?\d+$/.test(value)) {
-        throw new WirePolicyError("expected integer string");
-      }
-    } else if (typeof value !== "number" && typeof value !== "bigint") {
-      throw new WirePolicyError("expected integer");
-    } else if (typeof value === "number" && !Number.isInteger(value)) {
-      throw new WirePolicyError("expected integer");
-    }
+    validateInteger(value, schema);
     return;
   }
   if (schema.kind === "float") {
@@ -66,10 +58,12 @@ pub(super) fn render() -> &'static str {
     return;
   }
   if (schema.kind === "bytes") {
-    if (schema.encoding === "array") {
+    if (mode === "encode") {
       if (!(value instanceof Uint8Array || Array.isArray(value))) {
         throw new WirePolicyError("expected byte array");
       }
+    } else if (schema.encoding === "array") {
+      if (!Array.isArray(value)) throw new WirePolicyError("expected byte array");
     } else if (typeof value !== "string") {
       throw new WirePolicyError("expected encoded bytes");
     }
@@ -77,24 +71,66 @@ pub(super) fn render() -> &'static str {
   }
   if (schema.kind === "array") {
     if (!Array.isArray(value)) throw new WirePolicyError("expected array");
-    for (const item of value) validateWire(item, schema.item);
+    for (const item of value) validateWire(item, schema.item, mode);
     return;
   }
   if (schema.kind === "map") {
     if (!isRecord(value)) throw new WirePolicyError("expected object");
-    for (const item of Object.values(value)) validateWire(item, schema.value);
+    for (const item of Object.values(value)) validateWire(item, schema.value, mode);
     return;
   }
   if (schema.kind === "tuple") {
     if (!Array.isArray(value) || value.length !== schema.items.length) {
       throw new WirePolicyError("expected tuple");
     }
-    schema.items.forEach((item: any, index: number) => validateWire(value[index], item));
+    schema.items.forEach((item: any, index: number) => validateWire(value[index], item, mode));
     return;
   }
 }
 
-function validateStruct(value: any, definition: any): void {
+function validateInteger(value: any, schema: any): void {
+  let integer: bigint;
+  if (schema.wire === "string") {
+    if (typeof value !== "string" || !/^-?\d+$/.test(value)) {
+      throw new WirePolicyError("expected integer string");
+    }
+    integer = BigInt(value);
+  } else if (typeof value === "bigint") {
+    integer = value;
+  } else if (typeof value === "number" && Number.isSafeInteger(value)) {
+    integer = BigInt(value);
+  } else {
+    throw new WirePolicyError("expected an exact integer");
+  }
+  const bits = BigInt(schema.bits);
+  const magnitude = 1n << (schema.signed ? bits - 1n : bits);
+  const minimum = schema.signed ? -magnitude : 0n;
+  const maximum = magnitude - 1n;
+  if (integer < minimum || integer > maximum) {
+    throw new WirePolicyError("integer is outside its native range");
+  }
+  if (schema.minimum !== undefined && integer < integerConstraint(schema.minimum)) {
+    throw new WirePolicyError("integer is below its minimum");
+  }
+  if (schema.maximum !== undefined && integer > integerConstraint(schema.maximum)) {
+    throw new WirePolicyError("integer is above its maximum");
+  }
+  if (schema.multiple_of !== undefined) {
+    const divisor = integerConstraint(schema.multiple_of);
+    if (divisor <= 0n || integer % divisor !== 0n) {
+      throw new WirePolicyError("integer does not match its multiple");
+    }
+  }
+}
+
+function integerConstraint(value: any): bigint {
+  if (typeof value === "bigint") return value;
+  if (typeof value === "string" && /^-?\d+$/.test(value)) return BigInt(value);
+  if (typeof value === "number" && Number.isSafeInteger(value)) return BigInt(value);
+  throw new WirePolicyError("invalid integer constraint");
+}
+
+function validateStruct(value: any, definition: any, mode: "encode" | "decode"): void {
   if (!isRecord(value)) throw new WirePolicyError("expected object");
   for (const field of collectFields(definition)) {
     const present = Object.hasOwn(value, field.wire) && value[field.wire] !== undefined;
@@ -104,11 +140,11 @@ function validateStruct(value: any, definition: any): void {
       }
       continue;
     }
-    validateWire(value[field.wire], field.ty);
+    validateWire(value[field.wire], field.ty, mode);
   }
 }
 
-function validateEnum(value: any, definition: any, expected?: any): void {
+function validateEnum(value: any, definition: any, expected: any, mode: "encode" | "decode"): any {
   const repr = definition.repr;
   const variantFor = (wire: any) => definition.variants.find((entry: any) => entry.wire === wire);
   const matchesExpected = (variant: any) => expected === undefined || variant.wire === expected.wire;
@@ -117,18 +153,10 @@ function validateEnum(value: any, definition: any, expected?: any): void {
     if (!variant || variant.payload.kind !== "unit" || !matchesExpected(variant)) {
       throw new WirePolicyError(`invalid enum variant ${String(value)}`);
     }
-    return;
+    return variant;
   }
   if (repr.kind === "untagged") {
-    const variants = expected === undefined ? definition.variants : [expected];
-    for (const variant of variants) {
-      try {
-        validateVariantPayload(value, variant, "untagged");
-        return;
-      } catch {
-      }
-    }
-    throw new WirePolicyError("value does not match an enum variant");
+    return selectUntaggedVariant(value, definition, expected, mode);
   }
   if (repr.kind === "external") {
     if (typeof value === "string") {
@@ -136,7 +164,7 @@ function validateEnum(value: any, definition: any, expected?: any): void {
       if (!variant || variant.payload.kind !== "unit" || !matchesExpected(variant)) {
         throw new WirePolicyError(`invalid enum variant ${value}`);
       }
-      return;
+      return variant;
     }
     if (!isRecord(value)) throw new WirePolicyError("expected enum object");
     const keys = Object.keys(value);
@@ -145,8 +173,8 @@ function validateEnum(value: any, definition: any, expected?: any): void {
     if (!variant || !matchesExpected(variant)) {
       throw new WirePolicyError(`invalid enum variant ${keys[0]}`);
     }
-    validateVariantPayload(value[keys[0]], variant, "external");
-    return;
+    validateVariantPayload(value[keys[0]], variant, mode, "external");
+    return variant;
   }
   if (!isRecord(value)) throw new WirePolicyError("expected enum object");
   const variant = variantFor(value[repr.tag]);
@@ -155,28 +183,41 @@ function validateEnum(value: any, definition: any, expected?: any): void {
   }
   if (variant.payload.kind !== "unit") {
     const payload = repr.kind === "adjacent" ? value[repr.content] : value;
-    validateVariantPayload(payload, variant, repr.kind);
+    validateVariantPayload(payload, variant, mode, repr.kind);
   }
+  return variant;
 }
 
-function validateVariantPayload(value: any, variant: any, mode: string): void {
+function selectUntaggedVariant(value: any, definition: any, expected: any, mode: "encode" | "decode"): any {
+  const variants = expected === undefined ? definition.variants : [expected];
+  for (const variant of variants) {
+    try {
+      validateVariantPayload(value, variant, mode, "untagged");
+      return variant;
+    } catch {
+    }
+  }
+  throw new WirePolicyError("value does not match an enum variant");
+}
+
+function validateVariantPayload(value: any, variant: any, mode: "encode" | "decode", representation: string): void {
   const payload = variant.payload;
   if (payload.kind === "unit") {
-    if (mode === "untagged" && value !== null) throw new WirePolicyError("expected null enum payload");
+    if (representation === "untagged" && value !== null) throw new WirePolicyError("expected null enum payload");
     return;
   }
   if (payload.kind === "newtype") {
-    validateWire(value, payload.ty);
+    validateWire(value, payload.ty, mode);
     return;
   }
   if (payload.kind === "tuple") {
     if (!Array.isArray(value) || value.length !== payload.items.length) {
       throw new WirePolicyError("expected enum tuple");
     }
-    payload.items.forEach((item: any, index: number) => validateWire(value[index], item));
+    payload.items.forEach((item: any, index: number) => validateWire(value[index], item, mode));
     return;
   }
-  validateStruct(value, { kind: "struct", fields: payload.fields, flattened: [], openness: "preserve_opaque" });
+  validateStruct(value, { kind: "struct", fields: payload.fields, flattened: [], openness: "preserve_opaque" }, mode);
 }
 
 function isRecord(value: any): boolean {
