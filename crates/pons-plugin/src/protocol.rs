@@ -36,6 +36,8 @@ pub struct EmitterCapabilities {
     #[serde(default)]
     pub flattened: bool,
     #[serde(default)]
+    pub wide_integers: bool,
+    #[serde(default)]
     pub object_openness: Vec<String>,
 }
 
@@ -118,6 +120,12 @@ impl EmitterManifest {
 
     pub fn unsupported_features(&self, document: &Document) -> Vec<CapabilityWarning> {
         let mut warnings = Vec::new();
+        if document.has_wide_integer() && !self.capabilities.wide_integers {
+            warnings.push(CapabilityWarning(format!(
+                "{} does not declare lossless wide integer support",
+                self.name
+            )));
+        }
         for operation in &document.operations {
             if let Some(stream) = &operation.stream {
                 let kind = match stream.kind {
@@ -320,6 +328,41 @@ fn operation_path(operation: &pons_ir::Operation) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn wide_integers_require_declared_capability() {
+        let mut value: serde_json::Value =
+            serde_json::from_str(include_str!("../../../fixtures/login.json")).unwrap();
+        value["types"]["User"]["fields"][0]["ty"]["wire"] = serde_json::json!("number");
+        let document: Document = serde_json::from_value(value).unwrap();
+        let manifest = EmitterManifest {
+            name: "fixture".into(),
+            version: "1.0.0".into(),
+            protocol: VersionRange {
+                min: "1.0".into(),
+                max: "1.0".into(),
+            },
+            ir_version: VersionRange {
+                min: "0.2".into(),
+                max: "0.2".into(),
+            },
+            capabilities: EmitterCapabilities::default(),
+        };
+        assert!(
+            manifest
+                .unsupported_features(&document)
+                .iter()
+                .any(|warning| warning.0.contains("wide integer"))
+        );
+        let mut supported = manifest;
+        supported.capabilities.wide_integers = true;
+        assert!(
+            !supported
+                .unsupported_features(&document)
+                .iter()
+                .any(|warning| warning.0.contains("wide integer"))
+        );
+    }
 
     #[test]
     fn rejects_unsafe_or_duplicate_output_paths() {

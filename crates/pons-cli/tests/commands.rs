@@ -86,6 +86,24 @@ fn diff_returns_nonzero_for_removed_operations() {
 }
 
 #[test]
+fn diff_returns_nonzero_for_idempotency_changes() {
+    let directory = tempfile::tempdir().unwrap();
+    let old = directory.path().join("old.json");
+    let new = directory.path().join("new.json");
+    fs::write(&old, FIXTURE).unwrap();
+    let mut input: Value = serde_json::from_str(FIXTURE).unwrap();
+    input["operations"][0]["semantics"]["idempotent"] = serde_json::json!(true);
+    fs::write(&new, serde_json::to_vec(&input).unwrap()).unwrap();
+
+    let output = pons().arg("diff").arg(&old).arg(&new).output().unwrap();
+    assert_eq!(output.status.code(), Some(1));
+    assert!(
+        String::from_utf8_lossy(&output.stdout)
+            .contains("BREAKING operations.auth.login.semantics: operation idempotency changed")
+    );
+}
+
+#[test]
 fn diff_accepts_identical_contracts() {
     let directory = tempfile::tempdir().unwrap();
     let old = directory.path().join("old.json");
@@ -258,7 +276,7 @@ fi
         .args(["emit", "--target", "fixture"])
         .arg(&input)
         .arg(&output_dir)
-        .env("PATH", path)
+        .env("PATH", &path)
         .env("PONS_REQUEST", &request_path)
         .output()
         .unwrap();
@@ -279,6 +297,48 @@ fi
     let mut expected: pons_ir::Document = serde_json::from_value(contract).unwrap();
     expected.canonicalize();
     assert_eq!(actual, expected);
+
+    let wide_input = wide_number_input(directory.path());
+    let strict_output_dir = directory.path().join("strict-generated");
+    let strict_request = directory.path().join("strict-request.json");
+    let strict_output = Command::new("timeout")
+        .args(["10s", env!("CARGO_BIN_EXE_pons")])
+        .args(["emit", "--target", "fixture"])
+        .arg(&wide_input)
+        .arg(&strict_output_dir)
+        .env("PATH", &path)
+        .env("PONS_REQUEST", &strict_request)
+        .output()
+        .unwrap();
+    assert!(!strict_output.status.success());
+    assert!(
+        String::from_utf8_lossy(&strict_output.stderr).contains("lossless wide integer support")
+    );
+    assert!(!strict_request.exists());
+    assert!(!strict_output_dir.exists());
+
+    let lossy_output_dir = directory.path().join("lossy-generated");
+    let lossy_request = directory.path().join("lossy-request.json");
+    let lossy_output = Command::new("timeout")
+        .args(["10s", env!("CARGO_BIN_EXE_pons")])
+        .args(["emit", "--target", "fixture"])
+        .arg(&wide_input)
+        .arg(&lossy_output_dir)
+        .arg("--lossy")
+        .env("PATH", &path)
+        .env("PONS_REQUEST", &lossy_request)
+        .output()
+        .unwrap();
+    assert!(
+        lossy_output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&lossy_output.stderr)
+    );
+    assert!(
+        String::from_utf8_lossy(&lossy_output.stderr).contains("lossless wide integer support")
+    );
+    assert!(lossy_request.exists());
+    assert!(lossy_output_dir.join("nested/client.ts").exists());
 }
 
 #[test]

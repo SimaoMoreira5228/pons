@@ -9,8 +9,8 @@ use crate::operation::{
     ErrorStatus, Method, OAuthFlowKind, Operation, ResponseStatus,
 };
 use crate::types::{
-    Diagnostic, DiagnosticSeverity, EnumRepr, Field, InlineType, TypeDef, TypeKind, TypeRef,
-    VariantPayload,
+    Diagnostic, DiagnosticSeverity, EnumRepr, Field, InlineType, IntegerWire, TypeDef, TypeKind,
+    TypeRef, VariantPayload,
 };
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
@@ -82,6 +82,38 @@ impl Document {
         self.operations
             .sort_by(|left, right| left.id.cmp(&right.id));
         self.operations.iter_mut().for_each(Operation::canonicalize);
+    }
+
+    pub fn has_wide_integer(&self) -> bool {
+        let mut found = false;
+        let mut visit = |reference: &TypeRef| {
+            if matches!(
+                reference,
+                TypeRef::Inline(InlineType::Int {
+                    bits,
+                    wire: IntegerWire::Number,
+                    ..
+                }) if *bits > 53
+            ) {
+                found = true;
+            }
+        };
+        self.types
+            .values()
+            .for_each(|definition| definition.definition.visit_refs(&mut visit));
+        self.common_errors.iter().for_each(|error| {
+            if let Some(body) = &error.body {
+                body.visit_refs(&mut visit);
+            }
+            error
+                .headers
+                .iter()
+                .for_each(|header| header.ty.visit_refs(&mut visit));
+        });
+        self.operations
+            .iter()
+            .for_each(|operation| operation.visit_refs(&mut visit));
+        found
     }
 
     pub fn to_canonical_json(&self) -> Result<String, serde_json::Error> {

@@ -363,6 +363,14 @@ fn diff_operation(diff: &mut Diff, path: &str, old: &Operation, new: &Operation)
     if old.method != new.method {
         add(diff, ChangeLevel::Breaking, path, "HTTP method changed");
     }
+    if old.semantics.idempotent != new.semantics.idempotent {
+        add(
+            diff,
+            ChangeLevel::Breaking,
+            format!("{path}.semantics"),
+            "operation idempotency changed",
+        );
+    }
     if route_shape(&old.path) != route_shape(&new.path) {
         add(diff, ChangeLevel::NonBreaking, path, "route URL changed");
     }
@@ -769,6 +777,21 @@ mod tests {
         let mut changed = fixture();
         changed["types"]["User"]["openness"] = serde_json::json!("reject");
         assert_eq!(level(&old, changed, "types.User"), ChangeLevel::Breaking);
+    }
+
+    #[test]
+    fn idempotency_changes_are_breaking() {
+        let old: Document = serde_json::from_value(fixture()).unwrap();
+        let mut new = old.clone();
+        new.operations[0].semantics.idempotent = true;
+        let change = old
+            .diff(&new)
+            .changes
+            .into_iter()
+            .find(|change| change.path == "operations.auth.login.semantics")
+            .unwrap();
+        assert_eq!(change.level, ChangeLevel::Breaking);
+        assert_eq!(change.detail, "operation idempotency changed");
     }
 
     #[test]

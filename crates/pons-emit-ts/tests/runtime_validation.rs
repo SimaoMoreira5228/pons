@@ -17,6 +17,24 @@ fn constrained_integer(wire: IntegerWire, bits: u16) -> TypeRef {
     })
 }
 
+fn wide_number_document() -> pons_ir::Document {
+    let mut document: pons_ir::Document =
+        serde_json::from_str(include_str!("../../../fixtures/login.json")).unwrap();
+    let user = document.types.get_mut("User").unwrap();
+    let TypeKind::Struct { fields, .. } = &mut user.definition else {
+        unreachable!()
+    };
+    fields[0].ty = TypeRef::Inline(InlineType::Int {
+        bits: 64,
+        signed: false,
+        wire: IntegerWire::Number,
+        minimum: None,
+        maximum: None,
+        multiple_of: None,
+    });
+    document
+}
+
 fn request_input_document(required: bool) -> pons_ir::Document {
     let mut document: pons_ir::Document =
         serde_json::from_str(include_str!("../../../fixtures/login.json")).unwrap();
@@ -339,21 +357,7 @@ await expectFailure(() => signedHeader.auth.login({ body: { email: 250 } }), "in
 
 #[test]
 fn preserves_wide_integer_values_without_touching_strings() {
-    let mut document: pons_ir::Document =
-        serde_json::from_str(include_str!("../../../fixtures/login.json")).unwrap();
-    let user = document.types.get_mut("User").unwrap();
-    let TypeKind::Struct { fields, .. } = &mut user.definition else {
-        unreachable!()
-    };
-    fields[0].ty = TypeRef::Inline(InlineType::Int {
-        bits: 64,
-        signed: false,
-        wire: IntegerWire::Number,
-        minimum: None,
-        maximum: None,
-        multiple_of: None,
-    });
-
+    let document = wide_number_document();
     let files = emit_with_strategy(&document, EmitMode::Strict, ErrorStrategy::Throw)
         .unwrap()
         .files;
@@ -371,6 +375,45 @@ if (value.id !== 9007199254740993n) throw new Error("unsafe number was not prese
 if (value.nickname !== sentinel + "123") throw new Error("sentinel string was changed");
 if (value[sentinel + "text"] !== "key") throw new Error("sentinel key was changed");
 if (value.quoted !== "9007199254740993") throw new Error("quoted number was changed");
+"#;
+    run_bun(&files, harness);
+}
+
+#[test]
+fn normalizes_safe_wide_integers_in_responses_and_streams() {
+    let document = wide_number_document();
+    let files = emit_with_strategy(&document, EmitMode::Strict, ErrorStrategy::Throw)
+        .unwrap()
+        .files;
+    let harness = r#"
+import { createClient } from "./client.ts";
+
+const client = createClient({
+  baseUrl: "http://example.test",
+  fetch: async () => new Response('{"id":42}', { status: 200, headers: { "content-type": "application/json" } }),
+});
+const value = await client.auth.login({ body: { email: "person@example.test" } });
+if (value.id !== 42n) throw new Error("safe response number was not normalized");
+
+const streamBody = new ReadableStream({
+  start(controller) {
+    controller.enqueue(new TextEncoder().encode('event: user\ndata: {"id":42}\n\n'));
+    controller.close();
+  },
+});
+const streamClient = createClient({
+  baseUrl: "http://example.test",
+  auth: { tenant: "tenant" },
+  fetch: async () => new Response(streamBody, { status: 200, headers: { "content-type": "text/event-stream", "X-Trace-ID": "trace" } }),
+});
+const stream = await streamClient.events.watch({ path: { cursor: "cursor" }, query: {}, headers: {} });
+let seen;
+for await (const item of stream.value) {
+  if (item.isErr()) throw new Error("stream item failed");
+  seen = item.value.data.id;
+  break;
+}
+if (seen !== 42n) throw new Error("safe stream number was not normalized");
 "#;
     run_bun(&files, harness);
 }

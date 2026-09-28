@@ -228,7 +228,7 @@ async function request<T, E>(
       rawValue = new Uint8Array(await response.arrayBuffer());
     }
     const value = jsonResponse && responseSchema?.schema
-      ? decodeWire(rawValue, responseSchema.schema)
+      ? decodeWire(rawValue, responseSchema.schema, preserveWideIntegers)
       : rawValue;
     if (declaredSuccess === undefined) {
       return declaredError
@@ -447,8 +447,8 @@ function decodeHeaderValue(value: string, schema: any, preserveWideIntegers: boo
     if (schema.ref) {
       const definition = typeDefinitions[schema.ref];
       if (definition?.kind === "newtype") return decodeHeaderValue(value, definition.inner, preserveWideIntegers);
-      if (definition?.kind === "enum") return decodeWire(value, schema);
-      return decodeWire(parseJson(value, preserveWideIntegers), schema);
+      if (definition?.kind === "enum") return decodeWire(value, schema, preserveWideIntegers);
+      return decodeWire(parseJson(value, preserveWideIntegers), schema, preserveWideIntegers);
     }
     if (schema.kind === "int") {
       const parsed = schema.wire === "string"
@@ -456,7 +456,7 @@ function decodeHeaderValue(value: string, schema: any, preserveWideIntegers: boo
         : schema.bits > 53 && preserveWideIntegers
           ? BigInt(value)
           : parseNumber(value);
-      return decodeWire(parsed, schema);
+      return decodeWire(parsed, schema, preserveWideIntegers);
     }
     if (schema.kind === "float") return parseNumber(value);
     if (schema.kind === "decimal") return schema.wire === "number" ? parseNumber(value) : value;
@@ -467,7 +467,7 @@ function decodeHeaderValue(value: string, schema: any, preserveWideIntegers: boo
     }
     if (schema.kind === "nullable") return decodeHeaderValue(value, schema.inner, preserveWideIntegers);
     if (schema.kind === "array" || schema.kind === "map" || schema.kind === "tuple") {
-      return decodeWire(parseJson(value, preserveWideIntegers), schema);
+      return decodeWire(parseJson(value, preserveWideIntegers), schema, preserveWideIntegers);
     }
     return value;
   } catch (cause) {
@@ -513,7 +513,7 @@ async function* readSse<EventValue>(
             } else {
               try {
                 const parsed = parseJson(data.join("\n"), preserveWideIntegers);
-                const decoded = decodeWire(parsed, descriptor.schema);
+                const decoded = decodeWire(parsed, descriptor.schema, preserveWideIntegers);
                 if (name === "error") yield err({ kind: "server_error", body: decoded });
                 else yield ok({ event: name, data: decoded } as EventValue);
               } catch (cause) {
@@ -567,7 +567,7 @@ async function* readNdjson<Item>(
         if (line.trim() !== "") {
           try {
             const parsed = parseJson(line, preserveWideIntegers);
-            yield ok(decodeWire(parsed, schema) as Item);
+            yield ok(decodeWire(parsed, schema, preserveWideIntegers) as Item);
           } catch (cause) {
             yield err({ kind: "invalid_item", cause });
           }
@@ -692,33 +692,38 @@ function encodeWire(value: any, schema: any): any {
   return value;
 }
 
-function decodeWire(value: any, schema: any): any {
+function decodeWire(value: any, schema: any, preserveWideIntegers = false): any {
   const selectedVariant = validateWire(value, schema, "decode");
   if (value == null || schema == null) return value;
-  if (schema.kind === "int" && schema.bits <= 53 && typeof value === "bigint") return Number(value);
+  if (schema.kind === "int") {
+    if (schema.bits <= 53 && typeof value === "bigint") return Number(value);
+    if (schema.wire === "number" && schema.bits > 53 && preserveWideIntegers && typeof value === "number") return BigInt(value);
+  }
   if (schema.ref) {
     const definition = typeDefinitions[schema.ref];
     if (!definition) return value;
     if (schema.variant && definition.kind === "enum") {
-      return transformVariant(value, definition, definition.variants.find((variant: any) => variant.wire === schema.variant), "decode");
+      return transformVariant(value, definition, definition.variants.find((variant: any) => variant.wire === schema.variant), "decode", preserveWideIntegers);
     }
-    if (definition.kind === "struct") return transformStruct(value, definition, "decode");
-    if (definition.kind === "enum") return transformEnum(value, definition, "decode", selectedVariant);
-    if (definition.kind === "newtype") return decodeWire(value, definition.inner);
+    if (definition.kind === "struct") return transformStruct(value, definition, "decode", preserveWideIntegers);
+    if (definition.kind === "enum") return transformEnum(value, definition, "decode", selectedVariant, preserveWideIntegers);
+    if (definition.kind === "newtype") return decodeWire(value, definition.inner, preserveWideIntegers);
     return value;
   }
   if (schema.kind === "bytes") return decodeBytes(value, schema.encoding);
-  if (schema.kind === "nullable") return decodeWire(value, schema.inner);
-  if (schema.kind === "array") return value.map((item: unknown) => decodeWire(item, schema.item));
-  if (schema.kind === "tuple") return schema.items.map((item: unknown, index: number) => decodeWire(value[index], item));
-  if (schema.kind === "map") return Object.fromEntries(Object.entries(value).map(([key, item]) => [key, decodeWire(item, schema.value)]));
+  if (schema.kind === "nullable") return decodeWire(value, schema.inner, preserveWideIntegers);
+  if (schema.kind === "array") return value.map((item: unknown) => decodeWire(item, schema.item, preserveWideIntegers));
+  if (schema.kind === "tuple") return schema.items.map((item: unknown, index: number) => decodeWire(value[index], item, preserveWideIntegers));
+  if (schema.kind === "map") return Object.fromEntries(Object.entries(value).map(([key, item]) => [key, decodeWire(item, schema.value, preserveWideIntegers)]));
   return value;
 }
 
-function transformStruct(value: any, definition: any, mode: "encode" | "decode"): any {
+function transformStruct(value: any, definition: any, mode: "encode" | "decode", preserveWideIntegers = false): any {
   const fields = collectFields(definition);
   const flattenedMaps = collectMapValues(definition.flattened ?? []);
-  const transform = mode === "encode" ? encodeWire : decodeWire;
+  const transform = (item: unknown, itemSchema: any) => mode === "encode"
+    ? encodeWire(item, itemSchema)
+    : decodeWire(item, itemSchema, preserveWideIntegers);
   const known = new Set(fields.map((field: any) => field.wire));
   const openness = definition.openness ?? "preserve_opaque";
   const policy = typeof openness === "string" ? openness : Object.keys(openness)[0];
@@ -765,7 +770,7 @@ function collectMapValues(references: any[]): any[] {
   });
 }
 
-function transformEnum(value: any, definition: any, mode: "encode" | "decode", selectedVariant?: any): any {
+function transformEnum(value: any, definition: any, mode: "encode" | "decode", selectedVariant?: any, preserveWideIntegers = false): any {
   const repr = definition.repr;
   let variant: any;
   let payload: unknown;
@@ -785,17 +790,19 @@ function transformEnum(value: any, definition: any, mode: "encode" | "decode", s
     variant = selectedVariant ?? selectUntaggedVariant(value, definition, undefined, mode);
     payload = value;
   }
-  return transformVariant(value, definition, variant, mode, payload);
+  return transformVariant(value, definition, variant, mode, preserveWideIntegers, payload);
 }
 
-function transformVariant(value: any, definition: any, variant: any, mode: "encode" | "decode", payloadValue: any = value): any {
+function transformVariant(value: any, definition: any, variant: any, mode: "encode" | "decode", preserveWideIntegers = false, payloadValue: any = value): any {
   if (!variant || variant.payload.kind === "unit") return value;
   const payload = variant.payload;
-  const transform = mode === "encode" ? encodeWire : decodeWire;
+  const transform = (item: unknown, itemSchema: any) => mode === "encode"
+    ? encodeWire(item, itemSchema)
+    : decodeWire(item, itemSchema, preserveWideIntegers);
   const transformPayload = (current: any): any => {
     if (payload.kind === "newtype") return transform(current, payload.ty);
     if (payload.kind === "tuple") return payload.items.map((item: unknown, index: number) => transform(current[index], item));
-    if (payload.kind === "struct") return transformStruct(current, { kind: "struct", fields: payload.fields }, mode);
+    if (payload.kind === "struct") return transformStruct(current, { kind: "struct", fields: payload.fields }, mode, preserveWideIntegers);
     return current;
   };
   const repr = definition.repr;

@@ -839,11 +839,9 @@ mod tests {
         let output = super::emit(&document).unwrap();
         let client = output.iter().find(|file| file.path == "client.ts").unwrap();
         assert!(client.content.contains("\"X-Retry-Count\": [bigint]"));
-        assert!(
-            client
-                .content
-                .contains("decodeWire(parseJson(value, preserveWideIntegers), schema)")
-        );
+        assert!(client.content.contains(
+            "decodeWire(parseJson(value, preserveWideIntegers), schema, preserveWideIntegers)"
+        ));
         assert!(
             !client
                 .content
