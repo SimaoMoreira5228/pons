@@ -104,6 +104,23 @@ fn diff_returns_nonzero_for_idempotency_changes() {
 }
 
 #[test]
+fn diff_returns_nonzero_for_type_name_changes() {
+    let directory = tempfile::tempdir().unwrap();
+    let old = directory.path().join("old.json");
+    let new = directory.path().join("new.json");
+    fs::write(&old, FIXTURE).unwrap();
+    let mut input: Value = serde_json::from_str(FIXTURE).unwrap();
+    input["types"]["User"]["name"] = serde_json::json!(["account"]);
+    fs::write(&new, serde_json::to_vec(&input).unwrap()).unwrap();
+
+    let output = pons().arg("diff").arg(&old).arg(&new).output().unwrap();
+    assert_eq!(output.status.code(), Some(1));
+    assert!(
+        String::from_utf8_lossy(&output.stdout).contains("BREAKING types.User: type name changed")
+    );
+}
+
+#[test]
 fn diff_accepts_identical_contracts() {
     let directory = tempfile::tempdir().unwrap();
     let old = directory.path().join("old.json");

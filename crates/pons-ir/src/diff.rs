@@ -119,6 +119,9 @@ fn diff_auth_schemes(diff: &mut Diff, old: &Document, new: &Document) {
 
 fn diff_type(diff: &mut Diff, id: &str, old: &TypeDef, new: &TypeDef) {
     let path = format!("types.{id}");
+    if old.name != new.name {
+        add(diff, ChangeLevel::Breaking, &path, "type name changed");
+    }
     if old.direction != new.direction {
         add(diff, ChangeLevel::Breaking, &path, "type direction changed");
     }
@@ -777,6 +780,21 @@ mod tests {
         let mut changed = fixture();
         changed["types"]["User"]["openness"] = serde_json::json!("reject");
         assert_eq!(level(&old, changed, "types.User"), ChangeLevel::Breaking);
+    }
+
+    #[test]
+    fn type_name_changes_are_breaking() {
+        let old: Document = serde_json::from_value(fixture()).unwrap();
+        let mut new = old.clone();
+        new.types.get_mut("User").unwrap().name = vec!["account".into()];
+        let change = old
+            .diff(&new)
+            .changes
+            .into_iter()
+            .find(|change| change.path == "types.User")
+            .unwrap();
+        assert_eq!(change.level, ChangeLevel::Breaking);
+        assert_eq!(change.detail, "type name changed");
     }
 
     #[test]

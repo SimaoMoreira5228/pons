@@ -2,8 +2,8 @@ use std::{collections::BTreeMap, fs, process::Command};
 
 use pons_emit_ts::{EmitMode, ErrorStrategy, GeneratedFile, emit_with_strategy};
 use pons_ir::{
-    ByteEncoding, Direction, EnumRepr, InlineType, IntegerWire, NamedRef, PathSegment, Presence,
-    ResponseHeader, TypeKind, TypeRef, Variant, VariantPayload,
+    ByteEncoding, CredentialLocator, Direction, EnumRepr, InlineType, IntegerWire, NamedRef,
+    PathSegment, Presence, ResponseHeader, TypeKind, TypeRef, Variant, VariantPayload,
 };
 
 fn constrained_integer(wire: IntegerWire, bits: u16) -> TypeRef {
@@ -380,6 +380,62 @@ if (value.quoted !== "9007199254740993") throw new Error("quoted number was chan
 }
 
 #[test]
+fn refreshes_expired_cached_credentials() {
+    let mut document: pons_ir::Document =
+        serde_json::from_str(include_str!("../../../fixtures/login.json")).unwrap();
+    let operation = &mut document.operations[0];
+    operation.auth.alternatives = vec![vec!["session".into()]];
+    let provides = operation.provides.as_mut().unwrap();
+    provides.value = CredentialLocator::Header {
+        name: "X-Token".into(),
+    };
+    provides.expires_at = Some(CredentialLocator::Header {
+        name: "X-Expires".into(),
+    });
+
+    let files = emit_with_strategy(&document, EmitMode::Strict, ErrorStrategy::Throw)
+        .unwrap()
+        .files;
+    let harness = r#"
+import { createClient } from "./client.ts";
+
+const sent: string[] = [];
+let gets = 0;
+let clears = 0;
+const store = {
+  get: async () => {
+    gets += 1;
+    return gets === 1 ? "initial" : "fresh";
+  },
+  set: async () => {},
+  clear: async () => {
+    clears += 1;
+  },
+};
+const client = createClient({
+  baseUrl: "http://example.test",
+  auth: { session: store },
+  fetch: async (_url, init) => {
+    sent.push(init.headers.get("authorization") ?? "");
+    return new Response(JSON.stringify({ id: "1" }), {
+      status: 200,
+      headers: {
+        "content-type": "application/json",
+        "X-Token": "expired",
+        "X-Expires": "2000-01-01T00:00:00Z",
+      },
+    });
+  },
+});
+await client.auth.login({ body: { email: "person@example.test" } });
+await client.auth.login({ body: { email: "person@example.test" } });
+if (sent[0] !== "Bearer initial" || sent[1] !== "Bearer fresh") throw new Error(`unexpected credentials: ${sent.join(",")}`);
+if (gets !== 2 || clears !== 1) throw new Error(`unexpected source calls: ${gets},${clears}`);
+"#;
+    run_bun(&files, harness);
+}
+
+#[test]
 fn normalizes_safe_wide_integers_in_responses_and_streams() {
     let document = wide_number_document();
     let files = emit_with_strategy(&document, EmitMode::Strict, ErrorStrategy::Throw)
@@ -477,6 +533,8 @@ await expectFailure(() => client.events.watch({ path: { cursor: 250 }, query: {}
 if (sent !== 1) throw new Error("invalid header was sent");
 await expectFailure(() => client.auth.login({}), "missing required request body");
 if (sent !== 1) throw new Error("missing body was sent");
+await client.events.watch({ path: { cursor: 250 }, query: { limit: undefined }, headers: {} });
+if (sent !== 2) throw new Error("optional undefined was rejected");
 "#;
     run_bun(&optional_files, optional_harness);
 

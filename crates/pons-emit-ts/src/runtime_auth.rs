@@ -1,6 +1,5 @@
 pub(super) fn render() -> &'static str {
     r#"async function credentialValue(client: ConfiguredClient, scheme: string): Promise<string | undefined> {
-  const cached = client.authValues[scheme];
   const expiration = client.authExpirations[scheme];
   if (expiration !== undefined && expiration <= Date.now()) {
     delete client.authValues[scheme];
@@ -12,6 +11,7 @@ pub(super) fn render() -> &'static str {
       throw new CredentialSourceError(scheme, cause);
     }
   }
+  const cached = client.authValues[scheme];
   if (cached !== undefined) return cached;
   const source = client.auth?.[scheme];
   try {

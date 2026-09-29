@@ -1,6 +1,8 @@
 use std::collections::BTreeMap;
 use std::ffi::OsStr;
 use std::io::{Read, Write};
+#[cfg(unix)]
+use std::os::unix::process::CommandExt;
 use std::process::{Command, Output, Stdio};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -136,6 +138,8 @@ fn run_command_with_timeout(
         })
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
+    #[cfg(unix)]
+    command.process_group(0);
     let mut child = command.spawn().map_err(|error| {
         PluginError(format!(
             "cannot start {}: {error}",
@@ -188,6 +192,7 @@ fn run_command_with_timeout(
             }
         }
     };
+    terminate(&mut child);
     if let Some(writer) = writer {
         join_before(writer, deadline, executable, command_name, "stdin writer")?
             .map_err(|error| PluginError(format!("cannot send request to emitter: {error}")))?;
@@ -243,6 +248,10 @@ fn timeout_error(executable: &OsStr, command: &str) -> PluginError {
 }
 
 fn terminate(child: &mut std::process::Child) {
+    #[cfg(unix)]
+    unsafe {
+        let _ = libc::kill(-(child.id() as i32), libc::SIGKILL);
+    }
     let _ = child.kill();
     let _ = child.wait();
 }
@@ -314,13 +323,20 @@ mod tests {
         .unwrap_err();
         assert!(error.0.contains("timed out"));
 
-        let error = run_command_with_timeout(
+        let marker =
+            std::env::temp_dir().join(format!("pons-plugin-descendant-{}", std::process::id()));
+        let _ = std::fs::remove_file(&marker);
+        let command = format!("(sleep 0.2; touch {}) & exit 0", marker.display());
+        let output = run_command_with_timeout(
             OsStr::new("sh"),
-            &["-c", "sleep 1 & exit 0"],
+            &["-c", &command],
             None,
-            Duration::from_millis(20),
+            Duration::from_millis(100),
         )
-        .unwrap_err();
-        assert!(error.0.contains("timed out"));
+        .unwrap();
+        assert!(output.status.success());
+        std::thread::sleep(Duration::from_millis(300));
+        assert!(!marker.exists());
+        let _ = std::fs::remove_file(marker);
     }
 }

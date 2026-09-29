@@ -379,6 +379,7 @@ dependencies = [
 name = "pons-plugin"
 version = "0.1.0"
 dependencies = [
+ "libc",
  "pons-ir",
  "serde",
  "serde_json",

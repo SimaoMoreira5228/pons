@@ -733,12 +733,14 @@ function transformStruct(value: any, definition: any, mode: "encode" | "decode",
   }
   const output = policy === "reject" ? {} : { ...value };
   for (const field of fields) {
-    if (Object.hasOwn(value, field.wire)) output[field.wire] = transform(value[field.wire], field.ty);
+    if (Object.hasOwn(value, field.wire) && value[field.wire] !== undefined) {
+      output[field.wire] = transform(value[field.wire], field.ty);
+    }
   }
   const additional = policy === "preserve_typed" ? openness.preserve_typed.value : flattenedMaps[0];
   if (additional) {
     for (const key of Object.keys(output)) {
-      if (!known.has(key)) output[key] = transform(output[key], additional);
+      if (!known.has(key) && output[key] !== undefined) output[key] = transform(output[key], additional);
     }
   }
   return output;
