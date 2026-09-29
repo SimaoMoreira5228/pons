@@ -62,11 +62,14 @@ pub(super) fn render() -> &'static str {
   }
   if (schema.kind === "string") {
     if (typeof value !== "string") throw new WirePolicyError("expected string");
-    if (schema.min_length !== undefined && value.length < schema.min_length) {
-      throw new WirePolicyError("string is shorter than the contract");
-    }
-    if (schema.max_length !== undefined && value.length > schema.max_length) {
-      throw new WirePolicyError("string is longer than the contract");
+    if (schema.min_length !== undefined || schema.max_length !== undefined) {
+      const length = [...value].length;
+      if (schema.min_length !== undefined && length < schema.min_length) {
+        throw new WirePolicyError("string is shorter than the contract");
+      }
+      if (schema.max_length !== undefined && length > schema.max_length) {
+        throw new WirePolicyError("string is longer than the contract");
+      }
     }
     if (schema.pattern !== undefined && !new RegExp(schema.pattern).test(value)) {
       throw new WirePolicyError("string does not match the contract");

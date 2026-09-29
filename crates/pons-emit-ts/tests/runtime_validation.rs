@@ -4410,3 +4410,363 @@ if (requested.join(",") !== "first,none,none") throw new Error(`stale credential
 "#;
     run_bun(&files, harness);
 }
+
+#[test]
+fn drops_direction_invisible_fields_from_preserved_objects() {
+    let mut raw: serde_json::Value =
+        serde_json::from_str(include_str!("../../../fixtures/login.json")).unwrap();
+    raw["types"]["Envelope"] = serde_json::json!({
+        "kind": "struct",
+        "name": ["envelope"],
+        "direction": "both",
+        "openness": "preserve_opaque",
+        "fields": [
+            { "wire": "note", "ident": ["note"], "ty": { "kind": "string" }, "presence": "required" },
+            { "wire": "secret", "ident": ["secret"], "ty": { "kind": "string" }, "presence": "optional", "access": "write_only" },
+            {
+                "wire": "trace",
+                "ident": ["trace"],
+                "ty": { "kind": "opaque", "codec": "trace.codec", "wire": "json" },
+                "presence": "optional",
+                "access": "read_only"
+            }
+        ]
+    });
+    raw["operations"]
+        .as_array_mut()
+        .unwrap()
+        .push(serde_json::json!({
+            "id": [["session"], ["echo"]],
+            "method": "POST",
+            "path": [{"lit": "session"}, {"lit": "echo"}],
+            "body": {"ty": {"ref": "Envelope"}, "content": "json", "required": true},
+            "responses": [{"status": 200, "content": "json", "body": {"ref": "Envelope"}}],
+            "errors": [],
+            "auth": {"alternatives": [], "optional": false},
+            "semantics": {"safe": false, "idempotent": false}
+        }));
+    let document: pons_ir::Document = serde_json::from_value(raw).unwrap();
+    let files = emit_with_strategy(&document, EmitMode::Strict, ErrorStrategy::Throw)
+        .unwrap()
+        .files;
+    let harness = r#"
+import { createClient } from "./client.ts";
+
+const codecCalls: string[] = [];
+let sent = "";
+const client = createClient({
+  baseUrl: "https://example.test",
+  opaqueCodecs: {
+    "trace.codec": {
+      encode(value: unknown, wire: string) {
+        codecCalls.push(`encode:${String(value)}`);
+        return `wire:${String(value)}`;
+      },
+      decode(value: unknown, wire: string) {
+        codecCalls.push(`decode:${String(value)}`);
+        return `plain:${String(value)}`;
+      },
+    },
+  },
+  fetch: async (_url, init) => {
+    sent = String(init?.body);
+    return new Response(JSON.stringify({ note: "hello", secret: "server-secret", trace: "wire:server-trace", extra: "kept" }), {
+      status: 200,
+      headers: { "content-type": "application/json" },
+    });
+  },
+});
+const value = await client.session.echo({
+  body: { note: "hello", secret: "client-secret", trace: "client-trace", extra: "carried" },
+});
+if (codecCalls.join(",") !== "decode:wire:server-trace") {
+  throw new Error(`direction-invisible field was encoded: ${codecCalls.join(",")}`);
+}
+if (sent.includes("trace")) {
+  throw new Error(`read_only field reached the wire: ${sent}`);
+}
+if (!sent.includes("secret")) throw new Error(`write_only field was dropped from the request: ${sent}`);
+if (!sent.includes("carried")) throw new Error(`unknown key was dropped: ${sent}`);
+if (Object.hasOwn(value, "secret")) throw new Error(`write_only field surfaced: ${JSON.stringify(value)}`);
+if (value.trace !== "plain:wire:server-trace") throw new Error(`read_only field was not decoded: ${JSON.stringify(value)}`);
+if (value.extra !== "kept") throw new Error(`unknown key was not preserved: ${JSON.stringify(value)}`);
+"#;
+    run_bun(&files, harness);
+}
+
+#[test]
+fn counts_unicode_code_points_in_string_length_bounds() {
+    let mut raw: serde_json::Value =
+        serde_json::from_str(include_str!("../../../fixtures/login.json")).unwrap();
+    raw["types"]["LoginRequest"]["fields"][0]["ty"] = serde_json::json!({
+        "kind": "string",
+        "min_length": 3,
+        "max_length": 4
+    });
+    raw["types"]["User"]["fields"][0]["ty"] = serde_json::json!({
+        "kind": "string",
+        "min_length": 3,
+        "max_length": 4
+    });
+    raw["operations"][0]["provides"] = serde_json::Value::Null;
+    let document: pons_ir::Document = serde_json::from_value(raw).unwrap();
+    let files = emit_with_strategy(&document, EmitMode::Strict, ErrorStrategy::Throw)
+        .unwrap()
+        .files;
+    let harness = r#"
+import { createClient } from "./client.ts";
+
+let sent = "";
+let calls = 0;
+const client = createClient({
+  baseUrl: "https://example.test",
+  fetch: async (_url, init) => {
+    calls += 1;
+    sent = String(init?.body);
+    return new Response(JSON.stringify({ id: "\u{1F600}\u{1F600}\u{1F600}" }), {
+      status: 200,
+      headers: { "content-type": "application/json" },
+    });
+  },
+});
+const value = await client.auth.login({ body: { email: "\u{1F600}\u{1F600}\u{1F600}" } });
+if (value.id !== "\u{1F600}\u{1F600}\u{1F600}") throw new Error(`response was not decoded: ${JSON.stringify(value)}`);
+if (!sent.includes("\u{1F600}")) throw new Error(`request was not encoded: ${sent}`);
+
+let shortRequest = 0;
+const tooShort = createClient({
+  baseUrl: "https://example.test",
+  fetch: async () => {
+    shortRequest += 1;
+    return new Response("{}", { status: 200, headers: { "content-type": "application/json" } });
+  },
+});
+try {
+  await tooShort.auth.login({ body: { email: "\u{1F600}\u{1F600}" } });
+  throw new Error("a two code point request was accepted");
+} catch (cause) {
+  if (cause?.kind !== "protocol") throw new Error(JSON.stringify(cause));
+}
+if (shortRequest !== 0) throw new Error("a short request reached the wire");
+
+let longRequest = 0;
+const tooLong = createClient({
+  baseUrl: "https://example.test",
+  fetch: async () => {
+    longRequest += 1;
+    return new Response("{}", { status: 200, headers: { "content-type": "application/json" } });
+  },
+});
+try {
+  await tooLong.auth.login({ body: { email: "\u{1F600}\u{1F600}\u{1F600}\u{1F600}\u{1F600}" } });
+  throw new Error("a five code point request was accepted");
+} catch (cause) {
+  if (cause?.kind !== "protocol") throw new Error(JSON.stringify(cause));
+}
+if (longRequest !== 0) throw new Error("a long request reached the wire");
+
+const tooShortResponse = createClient({
+  baseUrl: "https://example.test",
+  fetch: async () => new Response(JSON.stringify({ id: "\u{1F600}\u{1F600}" }), {
+    status: 200,
+    headers: { "content-type": "application/json" },
+  }),
+});
+try {
+  await tooShortResponse.auth.login({ body: { email: "\u{1F600}\u{1F600}\u{1F600}" } });
+  throw new Error("a two code point response was accepted");
+} catch (cause) {
+  if (cause?.kind !== "protocol") throw new Error(JSON.stringify(cause));
+}
+
+const tooLongResponse = createClient({
+  baseUrl: "https://example.test",
+  fetch: async () => new Response(JSON.stringify({ id: "\u{1F600}\u{1F600}\u{1F600}\u{1F600}\u{1F600}" }), {
+    status: 200,
+    headers: { "content-type": "application/json" },
+  }),
+});
+try {
+  await tooLongResponse.auth.login({ body: { email: "\u{1F600}\u{1F600}\u{1F600}" } });
+  throw new Error("a five code point response was accepted");
+} catch (cause) {
+  if (cause?.kind !== "protocol") throw new Error(JSON.stringify(cause));
+}
+if (calls !== 1) throw new Error(`unexpected calls ${calls}`);
+"#;
+    run_bun(&files, harness);
+}
+
+#[test]
+fn follows_cross_origin_redirects_that_carry_no_credentials() {
+    let mut document: pons_ir::Document =
+        serde_json::from_str(include_str!("../../../fixtures/login.json")).unwrap();
+    document.operations[1].auth.alternatives = Vec::new();
+    document.operations[1].headers = vec![pons_ir::HeaderParameter {
+        wire: "Accept".into(),
+        ident: vec!["accept".into()],
+        ty: TypeRef::Inline(InlineType::String {
+            format: None,
+            min_length: None,
+            max_length: None,
+            pattern: None,
+        }),
+        presence: Presence::Required,
+        ext: BTreeMap::new(),
+    }];
+    let files = emit_with_strategy(&document, EmitMode::Strict, ErrorStrategy::Throw)
+        .unwrap()
+        .files;
+    let harness = r#"
+import { createClient } from "./client.ts";
+
+const requested: string[] = [];
+let calls = 0;
+const client = createClient({
+  baseUrl: "https://a.test",
+  fetch: async (url, init) => {
+    calls += 1;
+    requested.push(`${url.origin}${url.pathname} ${new Headers(init?.headers).get("accept")}`);
+    if (calls === 1) return new Response(null, { status: 302, headers: { location: "https://b.test/events/redirected" } });
+    return new Response(new ReadableStream({ start(controller) { controller.close(); } }), {
+      status: 200,
+      headers: { "content-type": "text/event-stream", "X-Trace-ID": "trace" },
+    });
+  },
+});
+await client.events.watch({ path: { cursor: "cursor" }, query: {}, headers: { Accept: "application/json" } });
+if (calls !== 2) throw new Error(`cross-origin redirect was refused: ${JSON.stringify(requested)}`);
+if (!requested[1].startsWith("https://b.test/events/redirected application/json")) {
+  throw new Error(`wrong redirect target: ${requested[1]}`);
+}
+"#;
+    run_bun(&files, harness);
+}
+
+#[test]
+fn refuses_cross_origin_redirects_without_capturing_their_credentials() {
+    let document: pons_ir::Document =
+        serde_json::from_str(include_str!("../../../fixtures/login.json")).unwrap();
+    let files = emit_with_strategy(&document, EmitMode::Strict, ErrorStrategy::Throw)
+        .unwrap()
+        .files;
+    let harness = r#"
+import { createClient } from "./client.ts";
+
+let stored = 0;
+let calls = 0;
+const client = createClient({
+  baseUrl: "https://a.test",
+  auth: {
+    session: {
+      get: async () => undefined,
+      set: async () => {
+        stored += 1;
+      },
+      clear: async () => {},
+    },
+  },
+  fetch: async () => {
+    calls += 1;
+    if (calls === 1) {
+      return new Response(JSON.stringify({ token: "captured", id: "1" }), {
+        status: 307,
+        headers: { "content-type": "application/json", location: "https://b.test/auth/login" },
+      });
+    }
+    return new Response(JSON.stringify({ id: "1" }), {
+      status: 200,
+      headers: { "content-type": "application/json" },
+    });
+  },
+});
+let failure: any;
+try {
+  await client.auth.login({ body: { email: "person@example.test" } });
+} catch (cause) {
+  failure = cause;
+}
+if (failure?.kind !== "protocol") throw new Error(`unexpected failure ${JSON.stringify(failure)}`);
+if (calls !== 1) throw new Error("a refused redirect was followed");
+if (stored !== 0) throw new Error(`a refused redirect stored ${stored} credentials`);
+"#;
+    run_bun(&files, harness);
+}
+
+#[test]
+fn reports_a_body_credential_locator_on_a_stream_as_an_auth_source_failure() {
+    let mut document: pons_ir::Document =
+        serde_json::from_str(include_str!("../../../fixtures/login.json")).unwrap();
+    document.operations[1].auth.alternatives = Vec::new();
+    document.operations[1].provides = Some(pons_ir::CredentialProvision {
+        scheme: "session".into(),
+        value: CredentialLocator::Body {
+            pointer: "/token".into(),
+        },
+        expires_at: None,
+        ext: BTreeMap::new(),
+    });
+    let files = emit_with_strategy(&document, EmitMode::Strict, ErrorStrategy::Throw)
+        .unwrap()
+        .files;
+    let harness = r#"
+import { createClient } from "./client.ts";
+
+const client = createClient({
+  baseUrl: "https://example.test",
+  fetch: async () => new Response(new ReadableStream({ start(controller) { controller.close(); } }), {
+    status: 200,
+    headers: { "content-type": "text/event-stream", "X-Trace-ID": "trace" },
+  }),
+});
+let failure: any;
+try {
+  await client.events.watch({ path: { cursor: "cursor" }, query: {}, headers: {} });
+} catch (cause) {
+  failure = cause;
+}
+if (failure?.kind !== "auth_source") throw new Error(`unexpected failure ${JSON.stringify(failure)}`);
+if (failure.scheme !== "session") throw new Error(`unexpected scheme ${JSON.stringify(failure)}`);
+if (String(failure.cause?.message).includes("stream") === false) {
+  throw new Error(`unhelpful cause ${JSON.stringify(failure.cause)}`);
+}
+"#;
+    run_bun(&files, harness);
+}
+
+#[test]
+fn rejects_request_headers_the_runtime_overwrites() {
+    let mut document: pons_ir::Document =
+        serde_json::from_str(include_str!("../../../fixtures/login.json")).unwrap();
+    let mut header = document.operations[1].headers[0].clone();
+    header.presence = Presence::Required;
+    assert!(
+        emit_with_strategy(&document, EmitMode::Strict, ErrorStrategy::Throw).is_ok(),
+        "a request header the runtime keeps must still emit"
+    );
+    header.wire = "Content-Type".into();
+    header.ident = vec!["content".into(), "type".into()];
+    document.operations[0].headers = vec![header.clone()];
+    let rejection = emit_with_strategy(&document, EmitMode::Strict, ErrorStrategy::Throw)
+        .expect_err("a request header the runtime overwrites must be rejected");
+    assert!(
+        rejection.0.contains("Content-Type")
+            && rejection.0.contains("operations[0].headers")
+            && rejection.0.contains("overwrites"),
+        "{}",
+        rejection
+    );
+
+    let mut authorization = header;
+    authorization.wire = "authorization".into();
+    authorization.ident = vec!["authorization".into()];
+    document.operations[0].headers = Vec::new();
+    document.operations[1].headers = vec![authorization];
+    let rejection = emit_with_strategy(&document, EmitMode::Strict, ErrorStrategy::Throw)
+        .expect_err("an authorization request header must be rejected");
+    assert!(
+        rejection.0.contains("authorization") && rejection.0.contains("operations[1].headers"),
+        "{}",
+        rejection
+    );
+}

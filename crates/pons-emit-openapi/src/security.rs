@@ -51,12 +51,16 @@ impl Builder<'_> {
                     if !self.document.auth_schemes.contains_key(scheme) {
                         return Err(EmitError(format!("unknown auth scheme {scheme}")));
                     }
-                    let scopes = operation
-                        .auth
-                        .scopes
-                        .get(scheme)
-                        .cloned()
-                        .unwrap_or_default();
+
+                    let scopes = match self.document.auth_schemes[scheme] {
+                        AuthScheme::OAuth2 { .. } => operation
+                            .auth
+                            .scopes
+                            .get(scheme)
+                            .cloned()
+                            .unwrap_or_default(),
+                        _ => Vec::new(),
+                    };
                     requirement.insert(self.security_names[scheme].clone(), json!(scopes));
                 }
                 Ok(Value::Object(requirement))
@@ -177,5 +181,66 @@ fn flow_name(kind: OAuthFlowKind) -> &'static str {
         OAuthFlowKind::ClientCredentials => "clientCredentials",
         OAuthFlowKind::Password => "password",
         OAuthFlowKind::Implicit => "implicit",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use pons_ir::{AuthScheme, OAuthFlow, OAuthFlowKind};
+    use serde_json::{Value, json};
+
+    fn fixture() -> pons_ir::Document {
+        serde_json::from_str(include_str!("../../../fixtures/login.json")).unwrap()
+    }
+
+    #[test]
+    fn emits_scopes_only_for_oauth2_schemes() {
+        let mut document = fixture();
+        document.auth_schemes.insert(
+            "oauth".into(),
+            AuthScheme::OAuth2 {
+                flows: vec![OAuthFlow {
+                    kind: OAuthFlowKind::ClientCredentials,
+                    authorization_url: None,
+                    token_url: Some("https://auth.example.test/token".into()),
+                    scopes: Default::default(),
+                    ext: Default::default(),
+                }],
+            },
+        );
+        let events = &mut document.operations[1];
+        events.auth.alternatives = vec![
+            vec!["session".into(), "tenant".into()],
+            vec!["oauth".into()],
+        ];
+        for scheme in ["session", "tenant", "oauth"] {
+            events
+                .auth
+                .scopes
+                .insert(scheme.into(), vec!["events:read".into()]);
+        }
+        let output: Value = serde_json::from_str(&crate::emit(&document).unwrap()).unwrap();
+
+        assert_eq!(
+            output["components"]["securitySchemes"]["Session"]["type"],
+            "http"
+        );
+        assert_eq!(
+            output["components"]["securitySchemes"]["Oauth"]["type"],
+            "oauth2"
+        );
+        let security = output["paths"]["/events/{cursor}"]["get"]["security"]
+            .as_array()
+            .unwrap();
+        let scopes = |scheme: &str| {
+            security
+                .iter()
+                .find(|requirement| requirement.get(scheme).is_some())
+                .unwrap_or_else(|| panic!("{scheme} is not a required scheme"))[scheme]
+                .clone()
+        };
+        assert_eq!(scopes("Session"), json!([]));
+        assert_eq!(scopes("Tenant"), json!([]));
+        assert_eq!(scopes("Oauth"), json!(["events:read"]));
     }
 }

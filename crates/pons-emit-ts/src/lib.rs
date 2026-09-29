@@ -119,6 +119,17 @@ pub fn emit_with_strategy(
             "the TypeScript emitter supports SSE and NDJSON streams only".into(),
         ));
     }
+    for (index, operation) in document.operations.iter().enumerate() {
+        for header in &operation.headers {
+            let name = header.wire.to_ascii_lowercase();
+            if name == "content-type" || name == "authorization" {
+                return Err(EmitError(format!(
+                    "the TypeScript emitter rejects the request header at operations[{index}].headers that the runtime overwrites: {}",
+                    header.wire
+                )));
+            }
+        }
+    }
     let coverage = pons_plugin::coverage_for_document(&document, mode == EmitMode::Lossy)
         .map_err(EmitError)?;
     validate_query_types(&document)?;

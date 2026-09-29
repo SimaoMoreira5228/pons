@@ -413,7 +413,11 @@ async function request<T, E>(
     return ok(withSuccessStatus(value, response, declaredSuccess, preserveWideIntegers, client.opaque) as T);
   } catch (cause) {
     if (timedOut) return err({ kind: "timeout", afterMs: timeoutMs! });
-     if (cause instanceof CredentialRedirectError) return err({ kind: "auth", schemes: cause.schemes });
+     if (cause instanceof CredentialRedirectError) {
+      return err(cause.schemes.length > 0
+        ? { kind: "auth", schemes: cause.schemes }
+        : { kind: "protocol", message: cause.message });
+     }
      if (cause instanceof ResponseHeaderDecodeError || cause instanceof WirePolicyError) return err({ kind: "protocol", message: cause.message });
     if (cause instanceof CredentialSourceError) return err({ kind: "auth_source", scheme: cause.scheme, cause: cause.sourceCause });
     if (cause instanceof OpaqueCodecError) return err({ kind: "opaque_codec", codec: cause.codec, phase: cause.phase, cause: cause.sourceCause });
@@ -492,6 +496,33 @@ async function fetchWithRedirect(
     const location = response.headers.get("location");
     if (location === null) return { response, url: currentUrl, init: currentInit };
     try {
+      let nextUrl: URL;
+      try {
+        nextUrl = new URL(location, currentUrl);
+      } catch {
+        throw new WirePolicyError("invalid redirect location");
+      }
+      if ((nextUrl.protocol !== "http:" && nextUrl.protocol !== "https:") || nextUrl.username !== "" || nextUrl.password !== "") {
+        throw new WirePolicyError("redirect target is not an HTTP origin");
+      }
+      if (visited.has(nextUrl.href)) throw new WirePolicyError("redirect loop");
+      if (redirectCount >= MAX_REDIRECTS) throw new WirePolicyError("too many redirects");
+      const nextInit: RequestInit = { ...currentInit };
+      const method = currentInit.method?.toUpperCase();
+      if ((response.status === 303 && method !== "HEAD") || ((response.status === 301 || response.status === 302) && method === "POST")) {
+        nextInit.method = "GET";
+        delete nextInit.body;
+        const nextHeaders = new Headers(nextInit.headers);
+        nextHeaders.delete("content-type");
+        nextHeaders.delete("content-length");
+        nextInit.headers = nextHeaders;
+      }
+      const effectiveMethod = nextInit.method?.toUpperCase() ?? requestMethod;
+      const sameOrigin = nextUrl.origin === currentUrl.origin;
+      if (sameOrigin) {
+        reattachQueryCredentials(nextUrl, attachedQueryCredentials, client.authInvalidated);
+      }
+      validateRedirectCredentials(nextUrl, currentUrl, nextInit, credentials, attachedCredentialOrigins, attachedCookies, attachedCustomCredentials);
       if (provides !== undefined) {
       const needsRedirectBody = provides.value.from === "body" || provides.expiresAt?.from === "body";
       if (needsRedirectBody) {
@@ -516,37 +547,11 @@ async function fetchWithRedirect(
         await captureCredential(client, response, provides, undefined, false, currentUrl);
       }
     }
-    let nextUrl: URL;
-    try {
-      nextUrl = new URL(location, currentUrl);
-    } catch {
-      throw new WirePolicyError("invalid redirect location");
-    }
-    if ((nextUrl.protocol !== "http:" && nextUrl.protocol !== "https:") || nextUrl.username !== "" || nextUrl.password !== "") {
-      throw new WirePolicyError("redirect target is not an HTTP origin");
-    }
-    if (visited.has(nextUrl.href)) throw new WirePolicyError("redirect loop");
-    if (redirectCount >= MAX_REDIRECTS) throw new WirePolicyError("too many redirects");
-    try {
-      await response.body?.cancel();
-    } catch {
-    }
-    const nextInit: RequestInit = { ...currentInit };
-    const method = currentInit.method?.toUpperCase();
-    if ((response.status === 303 && method !== "HEAD") || ((response.status === 301 || response.status === 302) && method === "POST")) {
-      nextInit.method = "GET";
-      delete nextInit.body;
-      const nextHeaders = new Headers(nextInit.headers);
-      nextHeaders.delete("content-type");
-      nextHeaders.delete("content-length");
-      nextInit.headers = nextHeaders;
-    }
-    const effectiveMethod = nextInit.method?.toUpperCase() ?? requestMethod;
-    if (nextUrl.origin === currentUrl.origin) {
-      reattachQueryCredentials(nextUrl, attachedQueryCredentials, client.authInvalidated);
-    }
-    const redirectedInit = await applyCapturedCredential(client, provides, nextUrl, nextInit, effectiveMethod, authScopes, attachedCookies, attachedCustomCredentials, attachedQueryCredentials);
-    validateRedirectCredentials(nextUrl, currentUrl, redirectedInit, credentials, attachedCredentialOrigins, attachedCookies);
+      try {
+        await response.body?.cancel();
+      } catch {
+      }
+      const redirectedInit = await applyCapturedCredential(client, sameOrigin ? provides : undefined, nextUrl, nextInit, effectiveMethod, authScopes, attachedCookies, attachedCustomCredentials, attachedQueryCredentials);
       currentUrl = nextUrl;
       currentInit = redirectedInit;
       visited.add(nextUrl.href);
@@ -567,6 +572,7 @@ function validateRedirectCredentials(
   credentials: RequestCredentials | undefined,
   attachedCredentialOrigins: Array<{ scheme: string; origin: string }>,
   attachedCookies: Array<{ scheme: string; path?: string; secure?: boolean; host?: string }>,
+  attachedCustomCredentials: AttachedCustomCredential[],
 ): void {
   const originChanged = nextUrl.origin !== currentUrl.origin;
   const wrongOriginSchemes = attachedCredentialOrigins
@@ -585,10 +591,12 @@ function validateRedirectCredentials(
   if (!originChanged) return;
   if (init.body !== undefined && init.body !== null) throw new CredentialRedirectError([]);
   if (nextUrl.search !== "") throw new CredentialRedirectError([]);
-  if ([...new Headers(init.headers).keys()].length > 0) throw new CredentialRedirectError([]);
   if (credentials === "include") throw new CredentialRedirectError([]);
   const headers = new Headers(init.headers);
   if (headers.has("authorization") || headers.has("cookie")) throw new CredentialRedirectError([]);
+  for (const credential of attachedCustomCredentials) {
+    if (credential.headers.some((name) => headers.has(name))) throw new CredentialRedirectError([credential.scheme]);
+  }
 }
 
 async function applyCapturedCredential(
@@ -1393,7 +1401,10 @@ function transformStruct(value: any, definition: any, mode: "encode" | "decode",
     const unknown = Object.keys(current).find((key) => !known.has(key));
     if (unknown !== undefined) throw new WirePolicyError(`unknown property ${unknown}`);
   }
-  const output: Record<string, unknown> = policy === "reject" ? Object.create(null) : copyRecord(current);
+  const output: Record<string, unknown> = Object.create(null);
+  for (const key of Object.keys(current)) {
+    if (!known.has(key)) output[key] = current[key];
+  }
   for (const field of fields) {
     if (Object.hasOwn(current, field.wire) && current[field.wire] !== undefined) {
       output[field.wire] = !flattenedOpaque || hasOpaque(field.ty)

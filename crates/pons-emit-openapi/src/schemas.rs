@@ -39,6 +39,9 @@ fn add_extensions(schema: &mut Value, key: &str, metadata: Value) {
 
 fn integer_bounds(bits: u16, signed: bool) -> Option<(Value, Value)> {
     if signed {
+        if bits == 128 {
+            return Some((json!(i128::MIN), json!(i128::MAX)));
+        }
         if bits == 64 {
             return Some((json!(i64::MIN), json!(i64::MAX)));
         }
@@ -46,6 +49,8 @@ fn integer_bounds(bits: u16, signed: bool) -> Option<(Value, Value)> {
             let edge = 1_i64 << (bits - 1);
             return Some((json!(-edge), json!(edge - 1)));
         }
+    } else if bits == 128 {
+        return Some((json!(0), json!(u128::MAX)));
     } else if bits == 64 {
         return Some((json!(0), json!(u64::MAX)));
     } else if bits < 64 {
@@ -122,13 +127,51 @@ impl<'a> Builder<'a> {
                     object["unevaluatedProperties"] = additional;
                     let mut all_of = vec![object];
                     for ty in flattened {
-                        all_of.push(self.type_schema(ty)?);
+                        self.flattened_schema(ty, &mut Vec::new(), &mut all_of)?;
                     }
                     Ok(json!({"allOf":all_of}))
                 }
             }
             TypeKind::Enum { repr, variants } => self.enum_schema(repr, variants),
             TypeKind::Newtype { inner } => self.type_schema(inner),
+        }
+    }
+
+    fn flattened_schema(
+        &self,
+        ty: &TypeRef,
+        visiting: &mut Vec<String>,
+        all_of: &mut Vec<Value>,
+    ) -> Result<(), EmitError> {
+        let TypeRef::Named(named) = ty else {
+            all_of.push(self.type_schema(ty)?);
+            return Ok(());
+        };
+        if named.variant.is_some() || visiting.contains(&named.id) {
+            all_of.push(self.type_schema(ty)?);
+            return Ok(());
+        }
+        let Some(definition) = self.document.types.get(&named.id) else {
+            all_of.push(self.type_schema(ty)?);
+            return Ok(());
+        };
+        match &definition.definition {
+            TypeKind::Newtype { inner } => self.flattened_schema(inner, visiting, all_of),
+            TypeKind::Enum { .. } => {
+                all_of.push(self.type_schema(ty)?);
+                Ok(())
+            }
+            TypeKind::Struct {
+                fields, flattened, ..
+            } => {
+                visiting.push(named.id.clone());
+                all_of.push(fields_schema_with(self, fields)?);
+                for member in flattened {
+                    self.flattened_schema(member, visiting, all_of)?;
+                }
+                visiting.pop();
+                Ok(())
+            }
         }
     }
 
@@ -453,4 +496,174 @@ fn fields_schema_with(
         object["required"] = json!(required);
     }
     Ok(object)
+}
+
+#[cfg(test)]
+mod tests {
+    use pons_ir::{
+        Direction, Field, InlineType, IntegerWire, NamedRef, ObjectOpenness, Presence, TypeDef,
+        TypeKind, TypeRef,
+    };
+    use serde_json::{Value, json};
+
+    fn fixture() -> pons_ir::Document {
+        serde_json::from_str(include_str!("../../../fixtures/login.json")).unwrap()
+    }
+
+    fn named(id: &str) -> TypeRef {
+        TypeRef::Named(NamedRef {
+            id: id.into(),
+            variant: None,
+        })
+    }
+
+    fn string() -> TypeRef {
+        TypeRef::Inline(InlineType::String {
+            format: None,
+            min_length: None,
+            max_length: None,
+            pattern: None,
+        })
+    }
+
+    fn integer(bits: u16, signed: bool) -> TypeRef {
+        TypeRef::Inline(InlineType::Int {
+            bits,
+            signed,
+            wire: IntegerWire::Number,
+            minimum: None,
+            maximum: None,
+            multiple_of: None,
+        })
+    }
+
+    fn field(wire: &str, ty: TypeRef) -> Field {
+        Field {
+            wire: wire.into(),
+            ident: vec![wire.into()],
+            ty,
+            presence: Presence::Required,
+            default: Default::default(),
+            access: None,
+            doc: None,
+            diagnostics: Vec::new(),
+            ext: Default::default(),
+        }
+    }
+
+    fn struct_type(name: &str, fields: Vec<Field>, flattened: Vec<TypeRef>) -> TypeDef {
+        TypeDef {
+            name: vec![name.into()],
+            direction: Direction::Both,
+            definition: TypeKind::Struct {
+                fields,
+                flattened,
+                openness: ObjectOpenness::Reject,
+            },
+            origin: None,
+            doc: None,
+            diagnostics: Vec::new(),
+            ext: Default::default(),
+        }
+    }
+
+    #[test]
+    fn flattened_members_inline_their_properties() {
+        let mut document = fixture();
+        document.types.insert(
+            "Inner".into(),
+            struct_type("inner", vec![field("b", integer(16, false))], Vec::new()),
+        );
+        document.types.insert(
+            "Outer".into(),
+            struct_type("outer", vec![field("a", string())], vec![named("Inner")]),
+        );
+        let output: Value = serde_json::from_str(&crate::emit(&document).unwrap()).unwrap();
+
+        assert_eq!(
+            output["components"]["schemas"]["Inner"]["additionalProperties"],
+            json!(false)
+        );
+        let all_of = output["components"]["schemas"]["Outer"]["allOf"]
+            .as_array()
+            .unwrap();
+        assert_eq!(all_of[0]["unevaluatedProperties"], json!(false));
+        assert_eq!(all_of[0]["properties"]["a"]["type"], "string");
+        assert_eq!(all_of[1]["properties"]["b"]["type"], "integer");
+        assert_eq!(all_of[1]["required"], json!(["b"]));
+        assert!(all_of[1].get("$ref").is_none(), "{:#}", all_of[1]);
+        assert!(
+            all_of[1].get("additionalProperties").is_none(),
+            "{:#}",
+            all_of[1]
+        );
+        assert!(
+            all_of[1].get("unevaluatedProperties").is_none(),
+            "{:#}",
+            all_of[1]
+        );
+    }
+
+    #[test]
+    fn flattened_transitive_members_stay_inline() {
+        let mut document = fixture();
+        document.types.insert(
+            "Leaf".into(),
+            struct_type("leaf", vec![field("c", integer(16, false))], Vec::new()),
+        );
+        document.types.insert(
+            "Inner".into(),
+            struct_type(
+                "inner",
+                vec![field("b", integer(16, false))],
+                vec![named("Leaf")],
+            ),
+        );
+        document.types.insert(
+            "Outer".into(),
+            struct_type("outer", Vec::new(), vec![named("Inner")]),
+        );
+        let output: Value = serde_json::from_str(&crate::emit(&document).unwrap()).unwrap();
+        let all_of = output["components"]["schemas"]["Outer"]["allOf"]
+            .as_array()
+            .unwrap();
+        assert_eq!(all_of[0]["unevaluatedProperties"], json!(false));
+        assert_eq!(all_of[1]["properties"]["b"]["type"], "integer");
+        assert_eq!(all_of[2]["properties"]["c"]["type"], "integer");
+        for entry in all_of.iter().skip(1) {
+            assert!(entry.get("additionalProperties").is_none(), "{entry:#}");
+        }
+    }
+
+    #[test]
+    fn emits_exact_bounds_for_128_bit_integers() {
+        let mut document = fixture();
+        document.types.insert(
+            "Wide".into(),
+            struct_type(
+                "wide",
+                vec![
+                    field("unsigned", integer(128, false)),
+                    field("signed", integer(128, true)),
+                ],
+                Vec::new(),
+            ),
+        );
+        let output: Value = serde_json::from_str(&crate::emit(&document).unwrap()).unwrap();
+        let properties = &output["components"]["schemas"]["Wide"]["properties"];
+        assert_eq!(properties["unsigned"]["type"], "integer");
+        assert_eq!(properties["unsigned"]["minimum"].to_string(), "0");
+        assert_eq!(
+            properties["unsigned"]["maximum"].to_string(),
+            "340282366920938463463374607431768211455"
+        );
+        assert_eq!(
+            properties["signed"]["minimum"].to_string(),
+            "-170141183460469231731687303715884105728"
+        );
+        assert_eq!(
+            properties["signed"]["maximum"].to_string(),
+            "170141183460469231731687303715884105727"
+        );
+    }
 }

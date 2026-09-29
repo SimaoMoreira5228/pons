@@ -1,8 +1,8 @@
 use std::collections::BTreeMap;
 
 use pons_ir::{
-    ContentKind, ErrorContent, ErrorStatus, InlineType, Method, Operation, PathSegment, Presence,
-    ResponseHeader, ResponseStatus, TypeKind, TypeRef, is_valid_media_type,
+    ContentKind, ErrorContent, ErrorStatus, Method, Operation, PathSegment, Presence,
+    ResponseHeader, ResponseStatus, TypeRef, is_valid_media_type,
 };
 use serde_json::{Map, Value, json};
 
@@ -154,38 +154,6 @@ impl Builder<'_> {
         Ok(())
     }
 
-    fn validate_byte_body(&self, ty: &TypeRef, visited: &mut Vec<String>) -> Result<(), EmitError> {
-        let valid = match ty {
-            TypeRef::Inline(InlineType::Bytes { .. }) => true,
-            TypeRef::Named(named) if visited.contains(&named.id) => false,
-            TypeRef::Named(named) => {
-                let definition = self
-                    .document
-                    .types
-                    .get(&named.id)
-                    .ok_or_else(|| EmitError(format!("unknown type {}", named.id)))?;
-                let TypeKind::Newtype { inner } = &definition.definition else {
-                    return Err(EmitError(format!(
-                        "raw byte body type {} is not a byte type",
-                        named.id
-                    )));
-                };
-                visited.push(named.id.clone());
-                let result = self.validate_byte_body(inner, visited);
-                visited.pop();
-                result.is_ok()
-            }
-            TypeRef::Inline(_) => false,
-        };
-        if valid {
-            Ok(())
-        } else {
-            Err(EmitError(
-                "raw byte bodies must use a byte type or transparent byte newtype".into(),
-            ))
-        }
-    }
-
     fn request_body(&self, body: &pons_ir::Body) -> Result<Value, EmitError> {
         if body.content == ContentKind::Stream {
             return Err(EmitError(
@@ -195,7 +163,6 @@ impl Builder<'_> {
         let media = media_type(body.content, None, body.media_type.as_deref())?
             .ok_or_else(|| EmitError("request body cannot use empty or stream content".into()))?;
         let schema = if body.content == ContentKind::Bytes {
-            self.validate_byte_body(&body.ty, &mut Vec::new())?;
             json!({})
         } else {
             self.type_schema(&body.ty)?
@@ -227,10 +194,9 @@ impl Builder<'_> {
                     let media = media.ok_or_else(|| {
                         EmitError("byte response is missing its media type".into())
                     })?;
-                    let body = response.body.as_ref().ok_or_else(|| {
-                        EmitError("byte response is missing its body type".into())
-                    })?;
-                    self.validate_byte_body(body, &mut Vec::new())?;
+                    if response.body.is_none() {
+                        return Err(EmitError("byte response is missing its body type".into()));
+                    }
                     value["content"] = media_content(media, json!({}));
                 }
                 _ => {
@@ -334,6 +300,11 @@ fn openapi_path(operation: &Operation) -> Result<String, EmitError> {
                     "path literal {lit:?} contains OpenAPI template syntax"
                 )));
             }
+            PathSegment::Literal { lit } if is_dot_segment(lit) => {
+                return Err(EmitError(format!(
+                    "path literal {lit:?} is a dot segment the TypeScript client refuses to encode"
+                )));
+            }
             PathSegment::Literal { lit } => segments.push(escape_path_literal(lit)),
             PathSegment::Param { param, .. } if !valid_path_parameter_name(param) => {
                 return Err(EmitError(format!(
@@ -386,6 +357,10 @@ fn escape_path_literal(literal: &str) -> String {
         }
     }
     escaped
+}
+
+fn is_dot_segment(literal: &str) -> bool {
+    matches!(literal, "." | "..")
 }
 
 fn valid_path_parameter_name(name: &str) -> bool {
@@ -557,4 +532,36 @@ fn insert_response(
         )));
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use pons_ir::PathSegment;
+    use serde_json::Value;
+
+    fn fixture() -> pons_ir::Document {
+        serde_json::from_str(include_str!("../../../fixtures/login.json")).unwrap()
+    }
+
+    #[test]
+    fn rejects_dot_segment_path_literals() {
+        for lit in [".", ".."] {
+            let mut document = fixture();
+            document.operations[0].path = vec![PathSegment::Literal { lit: lit.into() }];
+            let error = crate::emit(&document).unwrap_err().0;
+            assert!(error.contains("dot segment"), "{error}");
+        }
+    }
+
+    #[test]
+    fn keeps_literals_that_only_look_like_dot_segments() {
+        let mut document = fixture();
+        document.operations[0].path = vec![PathSegment::Literal { lit: "..a".into() }];
+        let output: Value = serde_json::from_str(&crate::emit(&document).unwrap()).unwrap();
+        assert!(
+            output["paths"].as_object().unwrap().contains_key("/..a"),
+            "{:#}",
+            output["paths"]
+        );
+    }
 }

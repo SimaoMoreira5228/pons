@@ -394,6 +394,7 @@ mod tests {
     };
     use pons_plugin::Coverage;
     use serde_json::{Value, json};
+    use std::collections::BTreeMap;
 
     fn fixture() -> pons_ir::Document {
         serde_json::from_str(include_str!("../../../fixtures/login.json")).unwrap()
@@ -856,17 +857,34 @@ mod tests {
     }
 
     #[test]
-    fn emits_auth_scopes_in_security_requirements() {
+    fn emits_auth_scopes_only_for_oauth2_schemes() {
         let mut document = fixture();
-        document.operations[1]
-            .auth
-            .scopes
-            .insert("tenant".into(), vec!["events:read".into()]);
-        let output: Value = serde_json::from_str(&super::emit(&document).unwrap()).unwrap();
-        assert_eq!(
-            output["paths"]["/events/{cursor}"]["get"]["security"][0]["Tenant"][0],
-            "events:read"
+        document.auth_schemes.insert(
+            "oauth".into(),
+            AuthScheme::OAuth2 {
+                flows: vec![OAuthFlow {
+                    kind: OAuthFlowKind::AuthorizationCode,
+                    authorization_url: Some("https://auth.test/authorize".into()),
+                    token_url: Some("https://auth.test/token".into()),
+                    scopes: BTreeMap::new(),
+                    ext: Default::default(),
+                }],
+            },
         );
+        let operation = document
+            .operations
+            .iter_mut()
+            .find(|operation| operation.id == vec![vec!["events"], vec!["watch"]])
+            .unwrap();
+        operation.auth.alternatives = vec![vec!["oauth".into()], vec!["tenant".into()]];
+        operation.auth.scopes = BTreeMap::from([
+            ("oauth".into(), vec!["events:read".into()]),
+            ("tenant".into(), vec!["ignored".into()]),
+        ]);
+        let output: Value = serde_json::from_str(&super::emit(&document).unwrap()).unwrap();
+        let security = &output["paths"]["/events/{cursor}"]["get"]["security"];
+        assert_eq!(security[0]["Oauth"][0], "events:read");
+        assert_eq!(security[1]["Tenant"], json!([]));
     }
 
     #[test]

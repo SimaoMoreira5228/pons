@@ -397,6 +397,15 @@ impl Document {
                 if let Some(media_type) = &body.media_type {
                     self.validate_media_type(&owner, "request body", media_type, &mut errors);
                 }
+                if body.content == ContentKind::Bytes
+                    && !self.is_byte_type(&body.ty, &mut BTreeSet::new())
+                {
+                    errors.push(ValidationError::InvalidValue {
+                        path: owner.clone(),
+                        message: "raw byte bodies must use a byte type or transparent byte newtype"
+                            .into(),
+                    });
+                }
             }
             self.visit_operation_refs(&owner, operation, &mut errors);
             if let Some(stream) = &operation.stream
@@ -580,6 +589,18 @@ impl Document {
                 }
                 if response.content == ContentKind::Stream {
                     stream_responses += 1;
+                }
+                if response.content == ContentKind::Bytes
+                    && let Some(body) = &response.body
+                    && !self.is_byte_type(body, &mut BTreeSet::new())
+                {
+                    errors.push(ValidationError::InvalidValue {
+                        path: owner.clone(),
+                        message: format!(
+                            "raw byte response bodies must use a byte type or transparent byte newtype (response {})",
+                            response.status
+                        ),
+                    });
                 }
                 let mut response_header_names = BTreeSet::new();
                 for header in &response.headers {
@@ -773,6 +794,26 @@ impl Document {
                     matches!(
                         &definition.definition,
                         TypeKind::Newtype { inner } if self.is_nullable_type(inner, visited)
+                    )
+                });
+                visited.remove(&named.id);
+                result
+            }
+            TypeRef::Inline(_) => false,
+        }
+    }
+
+    fn is_byte_type(&self, ty: &TypeRef, visited: &mut BTreeSet<String>) -> bool {
+        match ty {
+            TypeRef::Inline(InlineType::Bytes { .. }) => true,
+            TypeRef::Named(named) => {
+                if !visited.insert(named.id.clone()) {
+                    return false;
+                }
+                let result = self.types.get(&named.id).is_some_and(|definition| {
+                    matches!(
+                        &definition.definition,
+                        TypeKind::Newtype { inner } if self.is_byte_type(inner, visited)
                     )
                 });
                 visited.remove(&named.id);
@@ -1259,7 +1300,7 @@ impl std::error::Error for ValidationError {}
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{Direction, ObjectOpenness, OpaqueWire};
+    use crate::{ByteEncoding, Direction, ObjectOpenness, OpaqueWire};
 
     #[test]
     fn rich_document_round_trips_and_validates() {
@@ -1768,6 +1809,91 @@ mod tests {
         assert!(messages.contains("response 201 content Empty"));
         assert!(messages.contains("0 stream descriptions and 1 stream responses"));
         assert!(messages.contains("error content Empty"));
+    }
+
+    #[test]
+    fn byte_bodies_must_resolve_to_a_byte_value() {
+        const REQUEST: &str = "raw byte bodies must use a byte type or transparent byte newtype";
+        const RESPONSE: &str =
+            "raw byte response bodies must use a byte type or transparent byte newtype";
+
+        fn bytes() -> TypeRef {
+            TypeRef::Inline(InlineType::Bytes {
+                encoding: ByteEncoding::Base64,
+            })
+        }
+        fn string() -> TypeRef {
+            TypeRef::Inline(InlineType::String {
+                format: None,
+                min_length: None,
+                max_length: None,
+                pattern: None,
+            })
+        }
+        fn named(id: &str) -> TypeRef {
+            TypeRef::Named(crate::NamedRef {
+                id: id.into(),
+                variant: None,
+            })
+        }
+        fn newtype(document: &mut Document, id: &str, inner: TypeRef) -> TypeRef {
+            document.types.insert(
+                id.into(),
+                TypeDef {
+                    name: vec![id.to_ascii_lowercase()],
+                    direction: Direction::Both,
+                    definition: TypeKind::Newtype { inner },
+                    origin: None,
+                    doc: None,
+                    diagnostics: Vec::new(),
+                    ext: BTreeMap::new(),
+                },
+            );
+            named(id)
+        }
+        fn rejects(document: &Document, message: &str) {
+            let errors = document
+                .validate()
+                .unwrap_err()
+                .iter()
+                .map(ToString::to_string)
+                .collect::<Vec<_>>();
+            assert!(
+                errors.iter().any(|error| error.contains(message)),
+                "{message:?} missing from {errors:?}"
+            );
+        }
+
+        let mut document: Document =
+            serde_json::from_str(include_str!("../../../fixtures/login.json")).unwrap();
+        let login = &mut document.operations[0];
+        login.body.as_mut().unwrap().content = ContentKind::Bytes;
+        login.body.as_mut().unwrap().ty = bytes();
+        login.responses[0].content = ContentKind::Bytes;
+        login.responses[0].body = Some(bytes());
+        document.validate().unwrap();
+
+        let mut document = document.clone();
+        document.operations[0].body.as_mut().unwrap().ty = string();
+        rejects(&document, REQUEST);
+        document.operations[0].body.as_mut().unwrap().ty = named("User");
+        rejects(&document, REQUEST);
+        document.operations[0].body.as_mut().unwrap().ty = newtype(&mut document, "Text", string());
+        rejects(&document, REQUEST);
+
+        let mut document = document.clone();
+        document.operations[0].responses[0].body = Some(named("User"));
+        rejects(&document, RESPONSE);
+
+        let raw = newtype(&mut document, "RawBytes", bytes());
+        let nested = newtype(&mut document, "NestedBytes", raw);
+        document.operations[0].body.as_mut().unwrap().ty = nested.clone();
+        document.operations[0].responses[0].body = Some(nested);
+        document.validate().unwrap();
+
+        document.operations[0].body.as_mut().unwrap().ty =
+            newtype(&mut document, "Loop", named("Loop"));
+        rejects(&document, REQUEST);
     }
 
     #[test]

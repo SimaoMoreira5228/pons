@@ -199,18 +199,18 @@ fn run_command_with_limits(
 
     let deadline = Instant::now() + timeout;
     let command_name = args.first().copied().unwrap_or("plugin");
-    let status = loop {
+    loop {
         if let Some(error) = output_error.lock().ok().and_then(|error| error.clone()) {
             terminate(&mut child);
             return Err(PluginError(error));
         }
-        match child.try_wait() {
-            Ok(Some(status)) => break status,
-            Ok(None) if Instant::now() >= deadline => {
+        match exited_unreaped(&child) {
+            Ok(true) => break,
+            Ok(false) if Instant::now() >= deadline => {
                 terminate(&mut child);
                 return Err(timeout_error(executable, command_name));
             }
-            Ok(None) => thread::sleep(PLUGIN_POLL_INTERVAL),
+            Ok(false) => thread::sleep(PLUGIN_POLL_INTERVAL),
             Err(error) => {
                 terminate(&mut child);
                 return Err(PluginError(format!(
@@ -219,8 +219,14 @@ fn run_command_with_limits(
                 )));
             }
         }
-    };
-    terminate(&mut child);
+    }
+    signal_process_group(&child);
+    let status = child.wait().map_err(|error| {
+        PluginError(format!(
+            "cannot wait for {}: {error}",
+            executable.to_string_lossy()
+        ))
+    })?;
     if let Some(writer) = writer {
         join_before(writer, deadline, executable, command_name, "stdin writer")?
             .map_err(|error| PluginError(format!("cannot send request to emitter: {error}")))?;
@@ -288,12 +294,44 @@ fn timeout_error(executable: &OsStr, command: &str) -> PluginError {
 }
 
 fn terminate(child: &mut std::process::Child) {
+    signal_process_group(child);
+    let _ = child.kill();
+    let _ = child.wait();
+}
+
+fn exited_unreaped(child: &std::process::Child) -> std::io::Result<bool> {
+    #[cfg(unix)]
+    {
+        let mut info = unsafe { std::mem::zeroed::<libc::siginfo_t>() };
+        loop {
+            let result = unsafe {
+                libc::waitid(
+                    libc::P_PID,
+                    child.id(),
+                    &mut info,
+                    libc::WEXITED | libc::WNOWAIT | libc::WNOHANG,
+                )
+            };
+            if result == 0 {
+                return Ok(unsafe { info.si_pid() } != 0);
+            }
+            let error = std::io::Error::last_os_error();
+            if error.raw_os_error() != Some(libc::EINTR) {
+                return Err(error);
+            }
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        child.try_wait().map(|status| status.is_some())
+    }
+}
+
+fn signal_process_group(child: &std::process::Child) {
     #[cfg(unix)]
     unsafe {
         let _ = libc::kill(-(child.id() as i32), libc::SIGKILL);
     }
-    let _ = child.kill();
-    let _ = child.wait();
 }
 
 fn ensure_success(
@@ -323,6 +361,8 @@ fn ensure_success(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(target_os = "linux")]
+    use std::path::Path;
 
     #[test]
     fn rejects_invalid_ir_before_starting_plugin() {
@@ -381,6 +421,29 @@ mod tests {
         std::thread::sleep(Duration::from_millis(300));
         assert!(!marker.exists());
         let _ = std::fs::remove_file(marker);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn exited_children_stay_unreaped_until_the_group_is_signalled() {
+        let mut command = Command::new("sh");
+        command
+            .args(["-c", "exit 0"])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
+        command.process_group(0);
+        let mut child = command.spawn().unwrap();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !exited_unreaped(&child).unwrap() {
+            assert!(Instant::now() < deadline, "plugin never exited");
+            thread::sleep(PLUGIN_POLL_INTERVAL);
+        }
+
+        assert!(Path::new(&format!("/proc/{}", child.id())).exists());
+        signal_process_group(&child);
+        assert_eq!(child.wait().unwrap().code(), Some(0));
+        assert!(!Path::new(&format!("/proc/{}", child.id())).exists());
     }
 
     #[cfg(target_os = "linux")]

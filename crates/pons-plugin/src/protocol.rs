@@ -1,7 +1,7 @@
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::path::{Component, Path};
 
-use pons_ir::{AuthScheme, Document, EnumRepr, ObjectOpenness, StreamKind, TypeKind};
+use pons_ir::{AuthScheme, ContentKind, Document, EnumRepr, ObjectOpenness, StreamKind, TypeKind};
 use serde::de::{self, Deserializer};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
@@ -178,7 +178,14 @@ impl EmitterManifest {
 
     pub fn unsupported_features(&self, document: &Document) -> Vec<CapabilityWarning> {
         let mut warnings = Vec::new();
-        if document.has_wide_integer() && !self.capabilities.wide_integers {
+        if !self.capabilities.wide_integers
+            && coverage_for_document(document, true).map_or(true, |coverage| {
+                coverage
+                    .lossy
+                    .iter()
+                    .any(|subject| subject.starts_with("operations."))
+            })
+        {
             warnings.push(CapabilityWarning(format!(
                 "{} does not declare lossless wide integer support",
                 self.name
@@ -205,13 +212,7 @@ impl EmitterManifest {
             )));
         }
         for operation in &document.operations {
-            if let Some(stream) = &operation.stream {
-                let kind = match stream.kind {
-                    StreamKind::Sse { .. } => "sse",
-                    StreamKind::Ndjson { .. } => "ndjson",
-                    StreamKind::Bytes { .. } => "bytes",
-                    StreamKind::Websocket { .. } => "websocket",
-                };
+            for kind in stream_kinds(operation) {
                 if !self
                     .capabilities
                     .streaming
@@ -299,6 +300,33 @@ impl EmitterManifest {
         }
         warnings
     }
+}
+
+fn stream_kinds(operation: &pons_ir::Operation) -> Vec<&'static str> {
+    if operation
+        .body
+        .as_ref()
+        .is_some_and(|body| body.content == ContentKind::Stream)
+    {
+        return vec!["bytes"];
+    }
+    let Some(stream) = &operation.stream else {
+        return if operation
+            .responses
+            .iter()
+            .any(|response| matches!(response.content, ContentKind::Stream | ContentKind::Bytes))
+        {
+            vec!["bytes"]
+        } else {
+            Vec::new()
+        };
+    };
+    vec![match stream.kind {
+        StreamKind::Sse { .. } => "sse",
+        StreamKind::Ndjson { .. } => "ndjson",
+        StreamKind::Bytes { .. } => "bytes",
+        StreamKind::Websocket { .. } => "websocket",
+    }]
 }
 
 pub fn validate_response(response: &EmitResponse) -> Result<(), String> {
@@ -715,6 +743,109 @@ mod tests {
                 .iter()
                 .any(|warning| warning.0.contains("wide integer"))
         );
+    }
+
+    #[test]
+    fn wide_integer_capability_counts_only_reachable_types_and_errors() {
+        let manifest = manifest();
+        let mut value: serde_json::Value =
+            serde_json::from_str(include_str!("../../../fixtures/login.json")).unwrap();
+        value["types"]["Orphan"] = serde_json::json!({
+            "kind": "struct",
+            "openness": "reject",
+            "name": ["orphan"],
+            "direction": "both",
+            "fields": [{
+                "wire": "id",
+                "ident": ["id"],
+                "ty": {"kind": "int", "bits": 64, "signed": false, "wire": "number"},
+                "presence": "required"
+            }]
+        });
+        value["common_errors"] = serde_json::json!([{
+            "status": "5xx",
+            "name": ["common", "error"],
+            "content": "json",
+            "body": {"ref": "Orphan"}
+        }]);
+        let mut document: Document = serde_json::from_value(value.clone()).unwrap();
+        document
+            .operations
+            .iter_mut()
+            .for_each(|operation| operation.errors_inherit = false);
+        document.validate().unwrap();
+        assert!(document.has_wide_integer());
+        assert!(
+            !manifest
+                .unsupported_features(&document)
+                .iter()
+                .any(|warning| warning.0.contains("wide integer"))
+        );
+
+        document.operations[0].errors_inherit = true;
+        assert!(
+            manifest
+                .unsupported_features(&document)
+                .iter()
+                .any(|warning| warning.0.contains("wide integer"))
+        );
+
+        value["types"]["User"]["fields"][0]["ty"]["wire"] = serde_json::json!("number");
+        let reachable: Document = serde_json::from_value(value).unwrap();
+        reachable.validate().unwrap();
+        assert!(
+            manifest
+                .unsupported_features(&reachable)
+                .iter()
+                .any(|warning| warning.0.contains("wide integer"))
+        );
+    }
+
+    #[test]
+    fn streaming_contracts_require_a_declared_streaming_capability() {
+        let mut sse = manifest();
+        sse.capabilities.streaming = vec!["sse".into()];
+        let document: Document =
+            serde_json::from_str(include_str!("../../../fixtures/login.json")).unwrap();
+        assert!(stream_warnings(&sse, &document).is_empty());
+
+        let mut streaming_body: serde_json::Value =
+            serde_json::from_str(include_str!("../../../fixtures/login.json")).unwrap();
+        streaming_body["operations"][0]["body"]["content"] = serde_json::json!("stream");
+        let streaming_body: Document = serde_json::from_value(streaming_body).unwrap();
+        streaming_body.validate().unwrap();
+        assert_eq!(
+            stream_warnings(&sse, &streaming_body),
+            vec!["fixture does not declare support for bytes streams in auth.login"]
+        );
+
+        let mut unframed: serde_json::Value =
+            serde_json::from_str(include_str!("../../../fixtures/login.json")).unwrap();
+        unframed["operations"][1]
+            .as_object_mut()
+            .unwrap()
+            .remove("stream");
+        unframed["operations"][1]["responses"][0]["content"] = serde_json::json!("stream");
+        let unframed: Document = serde_json::from_value(unframed).unwrap();
+        assert_eq!(
+            stream_warnings(&sse, &unframed),
+            vec!["fixture does not declare support for bytes streams in events.watch"]
+        );
+
+        let mut framed = sse.clone();
+        framed.capabilities.streaming = vec!["sse".into(), "bytes".into()];
+        assert!(stream_warnings(&framed, &streaming_body).is_empty());
+        assert!(stream_warnings(&framed, &unframed).is_empty());
+        assert!(stream_warnings(&framed, &document).is_empty());
+    }
+
+    fn stream_warnings(manifest: &EmitterManifest, document: &Document) -> Vec<String> {
+        manifest
+            .unsupported_features(document)
+            .into_iter()
+            .map(|warning| warning.0)
+            .filter(|message| message.contains(" streams in "))
+            .collect()
     }
 
     #[test]

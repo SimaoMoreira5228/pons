@@ -114,9 +114,10 @@ function readCredential(
   locator: CredentialLocator,
   value: unknown,
   includeBody: boolean,
+  scheme: string,
 ): CredentialRead {
   if (locator.from === "body") {
-    if (!includeBody) throw new Error("body credential locator cannot be used for a stream");
+    if (!includeBody) throw new CredentialSourceError(scheme, new Error("body credential locator cannot be used for a stream"));
     return { value: pointerValue(value, locator.pointer), deleted: false };
   }
   if (locator.from === "header") return { value: response.headers.get(locator.name), deleted: false };
@@ -171,7 +172,7 @@ async function captureCredential(
 ): Promise<void> {
   if (!provides) return;
   const credentialUrl = responseRequestUrl(response, requestUrl);
-  const credentialRead = readCredential(response, provides.value, value, includeBody);
+  const credentialRead = readCredential(response, provides.value, value, includeBody, provides.scheme);
   if (credentialRead.value === undefined || credentialRead.value === null) return;
   const credentialPath = provides.value.from === "set_cookie"
     ? normalizeCookiePath(credentialRead.path, credentialUrl.pathname) ?? defaultCookiePath(credentialUrl.pathname)
@@ -240,7 +241,7 @@ async function captureCredential(
   }
   let expiresAt = credentialRead.expiresAt;
   if (provides.expiresAt) {
-    const expirationRead = readCredential(response, provides.expiresAt, value, includeBody);
+    const expirationRead = readCredential(response, provides.expiresAt, value, includeBody, provides.scheme);
     if (expirationRead.value === undefined || expirationRead.value === null) {
       throw new CredentialSourceError(provides.scheme, new Error("credential expiry is missing"));
     }
