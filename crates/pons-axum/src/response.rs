@@ -4,7 +4,7 @@ use axum::response::{IntoResponse, Response};
 use pons_core::Schema;
 use pons_ir::{ContentKind, ResponseStatus};
 
-use crate::describe::{DescribeResponse, OperationCx, StatusResponse};
+use crate::describe::{DescribeResponse, OperationCx, StatusResponse, is_invalid_response_header};
 
 pub trait ResponseSpec {
     fn status() -> u16;
@@ -82,13 +82,12 @@ where
 {
     fn into_response(self) -> Response {
         let mut response = self.response;
+        if is_invalid_response_header(&response) {
+            return response;
+        }
         *response.status_mut() = axum::http::StatusCode::from_u16(valid_status::<S>())
             .expect("WithResponse requires a valid HTTP status");
-        if !response
-            .headers()
-            .contains_key(axum::http::header::CONTENT_TYPE)
-            && let Some(content_type) = media_type(S::content(), S::media_type())
-        {
+        if let Some(content_type) = media_type(S::content(), S::media_type()) {
             response.headers_mut().insert(
                 axum::http::header::CONTENT_TYPE,
                 axum::http::HeaderValue::from_static(content_type),

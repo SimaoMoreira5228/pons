@@ -58,7 +58,7 @@ impl<S: HeaderSpec, R> WithHeader<S, R> {
 pub struct WithOptionalHeader<S: HeaderSpec, R>(pub R, pub Option<S::Value>);
 
 #[derive(Clone)]
-struct InvalidResponseHeader;
+pub(crate) struct InvalidResponseHeader;
 
 impl<S: HeaderSpec, R> WithOptionalHeader<S, R> {
     pub fn new(body: R, value: Option<S::Value>) -> Self {
@@ -90,6 +90,13 @@ pub(crate) fn invalid_response_header() -> axum::response::Response {
         .into_response();
     response.extensions_mut().insert(InvalidResponseHeader);
     response
+}
+
+pub(crate) fn is_invalid_response_header(response: &axum::response::Response) -> bool {
+    response
+        .extensions()
+        .get::<InvalidResponseHeader>()
+        .is_some()
 }
 
 fn describe_response_header<S: HeaderSpec>(cx: &mut OperationCx, start: usize, presence: Presence) {
@@ -293,11 +300,7 @@ where
             "WithStatus requires an HTTP status representable by Pons IR"
         );
         let mut response = self.0.into_response();
-        if response
-            .extensions()
-            .get::<InvalidResponseHeader>()
-            .is_none()
-        {
+        if !is_invalid_response_header(&response) {
             *response.status_mut() = axum::http::StatusCode::from_u16(STATUS)
                 .expect("WithStatus requires a valid HTTP status");
         }
@@ -349,7 +352,7 @@ impl<T: Schema> DescribeRequest for axum::extract::Form<T> {
 impl DescribeRequest for axum::extract::Multipart {
     fn describe(cx: &mut OperationCx) {
         cx.request_body::<OpaqueMultipart>(ContentKind::Multipart);
-        cx.error(
+        cx.diagnostic(
             "PONS-W101",
             "multipart fields are opaque; wrap them with a typed request description",
         );
@@ -359,7 +362,7 @@ impl DescribeRequest for axum::extract::Multipart {
 impl DescribeRequest for axum::extract::RawForm {
     fn describe(cx: &mut OperationCx) {
         cx.request_body::<OpaqueForm>(ContentKind::Form);
-        cx.error(
+        cx.diagnostic(
             "PONS-W101",
             "raw form fields are opaque; use Form<T> for a typed form",
         );
@@ -368,16 +371,16 @@ impl DescribeRequest for axum::extract::RawForm {
 
 impl DescribeRequest for axum::extract::RawQuery {
     fn describe(cx: &mut OperationCx) {
-        cx.error(
-            "PONS-W101",
-            "raw query strings are opaque; use Query<T> for typed fields",
+        cx.diagnostic(
+            "PONS-E102",
+            "raw query strings expose no query contract; use Query<T> for typed fields",
         );
     }
 }
 
 impl DescribeRequest for axum::extract::RawPathParams {
     fn describe(cx: &mut OperationCx) {
-        cx.error(
+        cx.diagnostic(
             "PONS-W101",
             "raw path parameters are opaque; use Path<T> for typed fields",
         );
@@ -386,9 +389,9 @@ impl DescribeRequest for axum::extract::RawPathParams {
 
 impl DescribeRequest for axum::extract::Request {
     fn describe(cx: &mut OperationCx) {
-        cx.error(
-            "PONS-W101",
-            "raw request extractors do not expose a stable contract; use typed extractors",
+        cx.diagnostic(
+            "PONS-E102",
+            "raw request extractors expose no request contract; use typed extractors",
         );
     }
 }
@@ -415,9 +418,9 @@ impl<T> DescribeRequest for axum::extract::Extension<T> {
 
 impl DescribeRequest for axum::http::HeaderMap {
     fn describe(cx: &mut OperationCx) {
-        cx.error(
-            "PONS-W101",
-            "raw HeaderMap extractors do not declare named headers; use typed header wrappers",
+        cx.diagnostic(
+            "PONS-E102",
+            "raw HeaderMap extractors declare no headers the contract can carry; use typed header wrappers",
         );
     }
 }
@@ -436,9 +439,9 @@ impl DescribeRequest for axum::body::Bytes {
 
 impl DescribeResponse for axum::response::Response {
     fn describe(cx: &mut OperationCx) {
-        cx.error(
-            "PONS-W101",
-            "raw Axum responses do not expose status or body; use a typed response wrapper",
+        cx.diagnostic(
+            "PONS-E102",
+            "raw Axum responses expose neither status nor body; use a typed response wrapper",
         );
     }
 }

@@ -29,7 +29,9 @@ pub use metadata::OperationMeta;
 pub use ndjson::Ndjson;
 use operation::build;
 pub use pons_ir::Info;
-use pons_ir::{AuthScheme, Diagnostic, Document, ErrorResponse, TypeDef, ValidationError};
+use pons_ir::{
+    AuthRequirement, AuthScheme, Diagnostic, Document, ErrorResponse, TypeDef, ValidationError,
+};
 pub use raw_bytes::RawBytes;
 pub use response::{
     BytesResponse, JsonResponse, ProblemJsonResponse, ResponseSpec, TextResponse, WithResponse,
@@ -46,6 +48,8 @@ pub struct Router<S = ()> {
     common_errors: Vec<ErrorResponse>,
     operations: Vec<pons_ir::Operation>,
     diagnostics: Vec<Diagnostic>,
+    auth_requirement: AuthRequirement,
+    pending_layers: Vec<layer::BoxedLayer>,
 }
 
 impl<S> Router<S>
@@ -61,6 +65,8 @@ where
             common_errors: Vec::new(),
             operations: Vec::new(),
             diagnostics: Vec::new(),
+            auth_requirement: AuthRequirement::default(),
+            pending_layers: Vec::new(),
         }
     }
 
@@ -97,21 +103,30 @@ where
             common_errors: self.common_errors,
             operations: self.operations,
             diagnostics: self.diagnostics,
+            auth_requirement: self.auth_requirement,
+            pending_layers: self.pending_layers,
         }
     }
 
-    pub fn into_axum(self) -> axum::Router<S> {
+    pub fn into_axum(mut self) -> axum::Router<S> {
+        for layer in std::mem::take(&mut self.pending_layers) {
+            self.inner = self.inner.layer(layer);
+        }
         self.inner
     }
 
     pub fn document(&self) -> Document {
+        let mut operations = self.operations.clone();
+        for operation in &mut operations {
+            auth::merge_auth_requirements(&mut operation.auth, &self.auth_requirement);
+        }
         Document {
             ir_version: pons_ir::IR_VERSION.to_owned(),
             info: self.info.clone(),
             types: self.types.clone(),
             auth_schemes: self.auth_schemes.clone(),
             common_errors: self.common_errors.clone(),
-            operations: self.operations.clone(),
+            operations,
             ext: BTreeMap::new(),
             diagnostics: self.diagnostics.clone(),
         }
@@ -134,7 +149,10 @@ where
         Ok(document)
     }
 
-    fn into_document_value(self) -> Document {
+    fn into_document_value(mut self) -> Document {
+        for operation in &mut self.operations {
+            auth::merge_auth_requirements(&mut operation.auth, &self.auth_requirement);
+        }
         Document {
             ir_version: pons_ir::IR_VERSION.to_owned(),
             info: self.info,

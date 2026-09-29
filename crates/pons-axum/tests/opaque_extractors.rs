@@ -62,7 +62,9 @@ fn raw_extractors_report_opaque_contract_shapes() {
     let query = operation(&document, "query");
     assert!(query.query.is_none());
     assert!(query.diagnostics.iter().any(|diagnostic| {
-        diagnostic.code == "PONS-W101" && diagnostic.message.contains("raw query strings")
+        diagnostic.code == "PONS-E102"
+            && diagnostic.severity == pons_ir::DiagnosticSeverity::Error
+            && diagnostic.message.contains("raw query strings")
     }));
 
     let form = operation(&document, "form");
@@ -94,7 +96,9 @@ fn raw_extractors_report_opaque_contract_shapes() {
 
     let request = operation(&document, "request");
     assert!(request.diagnostics.iter().any(|diagnostic| {
-        diagnostic.code == "PONS-W101" && diagnostic.message.contains("raw request extractors")
+        diagnostic.code == "PONS-E102"
+            && diagnostic.severity == pons_ir::DiagnosticSeverity::Error
+            && diagnostic.message.contains("raw request extractors")
     }));
     assert!(router.into_document().is_err());
 }

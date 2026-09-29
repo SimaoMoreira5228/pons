@@ -2,7 +2,7 @@ use axum::response::IntoResponse;
 use pons_axum::body::Bytes;
 use pons_axum::extract::{Form, Multipart, Path, Query, State};
 use pons_axum::http::StatusCode;
-use pons_axum::routing::{delete, get, post, post_with};
+use pons_axum::routing::{delete, get, get_with, post, post_with};
 use pons_axum::{
     Auth, DescribeRequest, DocumentedLayer, Header, HeaderSpec, Ndjson, NoContent, OperationCx,
     OperationMeta, OptionalHeader, RawBytes, Router, SessionAuth, WithHeader, WithOptionalHeader,
@@ -15,10 +15,17 @@ use pons_ir::{
 };
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
+use std::future::Future;
+use tower_service::Service;
 
 #[derive(Deserialize, Schema)]
 struct UserPath {
     id: u64,
+}
+
+#[derive(Deserialize, Schema)]
+struct FilePath {
+    rest: String,
 }
 
 #[derive(Deserialize, Schema)]
@@ -113,6 +120,14 @@ async fn list_users(State(_state): State<AppState>) -> pons_axum::extract::Json<
         id: 1,
         name: "Ada".into(),
     }])
+}
+
+async fn get_file(Path(path): Path<FilePath>) -> pons_axum::extract::Json<User> {
+    let _ = path.rest;
+    pons_axum::extract::Json(User {
+        id: 1,
+        name: "Ada".into(),
+    })
 }
 
 async fn headers(
@@ -261,6 +276,64 @@ async fn noop_layer(
     next.run(request).await
 }
 
+async fn require_authorization(
+    request: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> axum::response::Response {
+    if request.headers().contains_key("authorization") {
+        next.run(request).await
+    } else {
+        StatusCode::UNAUTHORIZED.into_response()
+    }
+}
+
+static LAYER_TRACE: std::sync::Mutex<Vec<&'static str>> = std::sync::Mutex::new(Vec::new());
+
+async fn trace_layer_a(
+    request: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> axum::response::Response {
+    LAYER_TRACE.lock().unwrap().push("a");
+    next.run(request).await
+}
+
+async fn trace_layer_b(
+    request: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> axum::response::Response {
+    LAYER_TRACE.lock().unwrap().push("b");
+    next.run(request).await
+}
+
+fn block_on<F: Future>(future: F) -> F::Output {
+    struct ThreadWaker(std::thread::Thread);
+
+    impl std::task::Wake for ThreadWaker {
+        fn wake(self: std::sync::Arc<Self>) {
+            self.0.unpark();
+        }
+    }
+
+    let waker = std::task::Waker::from(std::sync::Arc::new(ThreadWaker(std::thread::current())));
+    let mut context = std::task::Context::from_waker(&waker);
+    let mut future = std::pin::pin!(future);
+    loop {
+        match future.as_mut().poll(&mut context) {
+            std::task::Poll::Ready(value) => return value,
+            std::task::Poll::Pending => std::thread::park(),
+        }
+    }
+}
+
+fn get_status(app: &mut axum::Router<()>, path: &str, authorized: bool) -> StatusCode {
+    let mut builder = pons_axum::http::Request::builder().uri(path);
+    if authorized {
+        builder = builder.header("authorization", "Bearer token");
+    }
+    let request: pons_axum::extract::Request = builder.body(axum::body::Body::empty()).unwrap();
+    block_on(app.call(request)).unwrap().status()
+}
+
 async fn raw_headers(_headers: pons_axum::http::HeaderMap) -> pons_axum::extract::Json<User> {
     pons_axum::extract::Json(User {
         id: 1,
@@ -336,9 +409,11 @@ fn router_describes_multipart_request_as_opaque() {
         })
     );
     assert!(operation.diagnostics.iter().any(|diagnostic| {
-        diagnostic.code == "PONS-W101" && diagnostic.message.contains("multipart fields are opaque")
+        diagnostic.code == "PONS-W101"
+            && diagnostic.severity == pons_ir::DiagnosticSeverity::Warning
+            && diagnostic.message.contains("multipart fields are opaque")
     }));
-    assert!(router.into_document().is_err());
+    assert!(router.into_document().is_ok());
 }
 
 #[test]
@@ -370,7 +445,9 @@ fn raw_axum_boundaries_are_diagnosed_without_inventing_contracts() {
         })
         .unwrap();
     assert!(headers.diagnostics.iter().any(|diagnostic| {
-        diagnostic.code == "PONS-W101" && diagnostic.message.contains("raw HeaderMap")
+        diagnostic.code == "PONS-E102"
+            && diagnostic.severity == pons_ir::DiagnosticSeverity::Error
+            && diagnostic.message.contains("raw HeaderMap")
     }));
     assert!(headers.headers.is_empty());
     let response = document
@@ -384,7 +461,9 @@ fn raw_axum_boundaries_are_diagnosed_without_inventing_contracts() {
         .unwrap();
     assert!(response.responses.is_empty());
     assert!(response.diagnostics.iter().any(|diagnostic| {
-        diagnostic.code == "PONS-W101" && diagnostic.message.contains("raw Axum responses")
+        diagnostic.code == "PONS-E102"
+            && diagnostic.severity == pons_ir::DiagnosticSeverity::Error
+            && diagnostic.message.contains("raw Axum responses")
     }));
     assert!(router.into_document().is_err());
 }
@@ -520,6 +599,142 @@ fn documented_layer_applies_auth_to_the_group() {
         document.operations[0].auth.alternatives,
         vec![vec!["session".to_owned()]]
     );
+}
+
+#[test]
+fn documented_layer_applies_auth_to_routes_added_after_it() {
+    fn router() -> Router<AppState> {
+        DocumentedLayer::new(axum::middleware::from_fn(noop_layer), SessionAuth)
+            .layer(Router::<AppState>::new(info()).route(
+                "/before",
+                get_with(list_users, OperationMeta::new("session.before")),
+            ))
+            .route(
+                "/after",
+                get_with(list_users, OperationMeta::new("session.after")),
+            )
+    }
+    let document = router()
+        .auth_scheme("session", AuthScheme::Bearer { format: None })
+        .into_document()
+        .unwrap();
+    assert_eq!(document.operations.len(), 2);
+    for operation in &document.operations {
+        assert_eq!(
+            operation.auth.alternatives,
+            vec![vec!["session".to_owned()]]
+        );
+        assert!(!operation.auth.optional);
+    }
+    let snapshot = router().document();
+    assert_eq!(snapshot.operations.len(), 2);
+    for operation in &snapshot.operations {
+        assert_eq!(
+            operation.auth.alternatives,
+            vec![vec!["session".to_owned()]]
+        );
+    }
+}
+
+#[test]
+fn documented_layer_enforces_auth_on_routes_added_after_it() {
+    fn router() -> Router<()> {
+        DocumentedLayer::new(
+            axum::middleware::from_fn(require_authorization),
+            SessionAuth,
+        )
+        .layer(Router::<AppState>::new(info()).route(
+            "/before",
+            get_with(list_users, OperationMeta::new("session.before")),
+        ))
+        .route(
+            "/after",
+            get_with(list_users, OperationMeta::new("session.after")),
+        )
+        .auth_scheme("session", AuthScheme::Bearer { format: None })
+        .with_state::<()>(AppState)
+    }
+
+    let document = router().into_document().unwrap();
+    assert_eq!(document.operations.len(), 2);
+    for id in ["before", "after"] {
+        let operation = document
+            .operations
+            .iter()
+            .find(|operation| operation.id.last().unwrap().join("_") == id)
+            .unwrap();
+        assert_eq!(
+            operation.auth.alternatives,
+            vec![vec!["session".to_owned()]],
+            "/{id} must be documented as authenticated"
+        );
+    }
+
+    let mut app = router().into_axum();
+    for path in ["/before", "/after"] {
+        assert_eq!(get_status(&mut app, path, false), StatusCode::UNAUTHORIZED);
+        assert_eq!(get_status(&mut app, path, true), StatusCode::OK);
+    }
+}
+
+#[test]
+fn pending_layers_are_applied_once_each_in_registration_order() {
+    fn router() -> Router<AppState> {
+        DocumentedLayer::new(axum::middleware::from_fn(trace_layer_b), SessionAuth)
+            .layer(
+                DocumentedLayer::new(axum::middleware::from_fn(trace_layer_a), SessionAuth).layer(
+                    Router::<AppState>::new(info()).route(
+                        "/traced",
+                        get_with(list_users, OperationMeta::new("session.traced")),
+                    ),
+                ),
+            )
+            .route(
+                "/traced-after",
+                get_with(list_users, OperationMeta::new("session.traced_after")),
+            )
+    }
+    fn doubled() -> Router<AppState> {
+        DocumentedLayer::new(axum::middleware::from_fn(trace_layer_a), SessionAuth)
+            .layer(
+                DocumentedLayer::new(axum::middleware::from_fn(trace_layer_a), SessionAuth).layer(
+                    Router::<AppState>::new(info()).route(
+                        "/doubled",
+                        get_with(list_users, OperationMeta::new("session.doubled")),
+                    ),
+                ),
+            )
+            .route(
+                "/doubled-after",
+                get_with(list_users, OperationMeta::new("session.doubled_after")),
+            )
+    }
+
+    LAYER_TRACE.lock().unwrap().clear();
+    let mut app = router().with_state::<()>(AppState).into_axum();
+    assert_eq!(get_status(&mut app, "/traced-after", true), StatusCode::OK);
+    assert_eq!(LAYER_TRACE.lock().unwrap().as_slice(), ["b", "a"]);
+
+    LAYER_TRACE.lock().unwrap().clear();
+    let mut app = doubled().with_state::<()>(AppState).into_axum();
+    assert_eq!(get_status(&mut app, "/doubled-after", true), StatusCode::OK);
+    assert_eq!(LAYER_TRACE.lock().unwrap().as_slice(), ["a", "a"]);
+}
+
+#[test]
+fn wildcard_path_segments_are_diagnosed_instead_of_claiming_a_plain_param() {
+    let router = Router::<()>::new(info()).route("/files/{*rest}", get(get_file));
+    let document = router.document();
+    let operation = &document.operations[0];
+    let PathSegment::Param { param, ty } = &operation.path[1] else {
+        panic!();
+    };
+    assert_eq!(param, "rest");
+    assert!(matches!(ty, TypeRef::Inline(InlineType::String { .. })));
+    assert!(operation.diagnostics.iter().any(|diagnostic| {
+        diagnostic.code == "PONS-W102" && diagnostic.message.contains("wildcard")
+    }));
+    assert!(router.into_document().is_ok());
 }
 
 #[test]

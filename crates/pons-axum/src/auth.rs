@@ -1,3 +1,4 @@
+use std::collections::BTreeSet;
 use std::marker::PhantomData;
 
 use axum::extract::FromRequestParts;
@@ -93,30 +94,46 @@ pub(crate) fn merge_auth_requirements(target: &mut AuthRequirement, source: &Aut
             }
         }
     }
-    if source.alternatives.is_empty() {
-        return;
-    }
-    if target.alternatives.is_empty() {
-        target.alternatives = source.alternatives.clone();
-        target.optional = source.optional;
-        return;
-    }
-    let existing = target.alternatives.clone();
-    target.alternatives = existing
-        .into_iter()
-        .flat_map(|left| {
-            source.alternatives.iter().map(move |right| {
-                let mut combined = left.clone();
-                right.iter().for_each(|scheme| {
-                    if !combined.contains(scheme) {
-                        combined.push(scheme.clone());
-                    }
-                });
-                combined
-            })
-        })
-        .collect();
     target.optional &= source.optional;
+    let combined: Vec<BTreeSet<String>> = match (
+        target.alternatives.is_empty(),
+        source.alternatives.is_empty(),
+    ) {
+        (_, true) => target.alternatives.iter().map(|s| as_set(s)).collect(),
+        (true, false) => source.alternatives.iter().map(|s| as_set(s)).collect(),
+        (false, false) => target
+            .alternatives
+            .iter()
+            .flat_map(|left| {
+                source
+                    .alternatives
+                    .iter()
+                    .map(move |right| as_set(left).union(&as_set(right)).cloned().collect())
+            })
+            .collect(),
+    };
+    target.alternatives = canonical_alternatives(combined);
+}
+
+fn as_set(schemes: &[String]) -> BTreeSet<String> {
+    schemes.iter().cloned().collect()
+}
+
+fn canonical_alternatives(alternatives: Vec<BTreeSet<String>>) -> Vec<Vec<String>> {
+    let mut sets = alternatives;
+    sets.sort();
+    sets.dedup();
+
+    sets.iter()
+        .enumerate()
+        .filter(|(index, set)| {
+            !sets
+                .iter()
+                .enumerate()
+                .any(|(other, candidate)| other != *index && candidate.is_subset(set))
+        })
+        .map(|(_, set)| set.iter().cloned().collect())
+        .collect()
 }
 
 pub struct SessionAuth;
@@ -206,5 +223,113 @@ mod tests {
         };
         merge_auth_requirements(&mut target, &source);
         assert_eq!(target.scopes["session"], ["read", "write"]);
+    }
+
+    fn requirement(alternatives: &[&[&str]], optional: bool) -> AuthRequirement {
+        AuthRequirement {
+            alternatives: alternatives
+                .iter()
+                .map(|schemes| schemes.iter().map(|scheme| (*scheme).to_owned()).collect())
+                .collect(),
+            scopes: BTreeMap::new(),
+            optional,
+            ext: BTreeMap::new(),
+        }
+    }
+
+    #[test]
+    fn merging_is_idempotent() {
+        let any = requirement(&[&["session", "api_key"]], false);
+        let mut stacked = any.clone();
+        merge_auth_requirements(&mut stacked, &any);
+        assert_eq!(
+            stacked.alternatives,
+            vec![vec!["api_key".to_owned(), "session".to_owned()]]
+        );
+
+        let mut once = any.clone();
+        merge_auth_requirements(&mut once, &any);
+        let mut twice = once.clone();
+        merge_auth_requirements(&mut twice, &once);
+        assert_eq!(once, twice);
+
+        let alternative_groups = requirement(&[&["session"], &["api_key", "basic"]], false);
+        let mut merged = alternative_groups.clone();
+        merge_auth_requirements(&mut merged, &alternative_groups);
+        let mut again = merged.clone();
+        merge_auth_requirements(&mut again, &alternative_groups);
+        assert_eq!(merged, again);
+    }
+
+    #[test]
+    fn drops_redundant_superset_alternatives() {
+        let mut target = requirement(&[&["session"], &["session", "tenant"]], false);
+        merge_auth_requirements(&mut target, &requirement(&[&["session"]], false));
+        assert_eq!(target.alternatives, vec![vec!["session".to_owned()]]);
+
+        let mut independent = requirement(&[&["api_key", "session"], &["basic", "session"]], false);
+        merge_auth_requirements(&mut independent, &requirement(&[&["session"]], false));
+        assert_eq!(
+            independent.alternatives,
+            vec![
+                vec!["api_key".to_owned(), "session".to_owned()],
+                vec!["basic".to_owned(), "session".to_owned()],
+            ]
+        );
+    }
+
+    #[test]
+    fn sorting_and_dedup_canonicalizes_alternatives() {
+        let mut target = requirement(&[&["session", "session", "api_key"]], false);
+        merge_auth_requirements(&mut target, &requirement(&[&["api_key", "session"]], false));
+        assert_eq!(
+            target.alternatives,
+            vec![vec!["api_key".to_owned(), "session".to_owned()]]
+        );
+    }
+
+    #[test]
+    fn a_required_layer_overrides_an_optional_operation() {
+        let mut optional_target = requirement(&[&["session"]], true);
+        merge_auth_requirements(&mut optional_target, &requirement(&[&["api_key"]], false));
+        assert!(!optional_target.optional);
+        assert_eq!(
+            optional_target.alternatives,
+            vec![vec!["api_key".to_owned(), "session".to_owned()]]
+        );
+
+        let mut optional_source = requirement(&[&["session"]], false);
+        merge_auth_requirements(
+            &mut optional_source,
+            &requirement(&[&["api_key", "basic"]], true),
+        );
+        assert!(!optional_source.optional);
+        assert_eq!(
+            optional_source.alternatives,
+            vec![vec![
+                "api_key".to_owned(),
+                "basic".to_owned(),
+                "session".to_owned()
+            ]]
+        );
+
+        let mut both = requirement(&[&["session"]], true);
+        merge_auth_requirements(&mut both, &requirement(&[&["api_key"]], true));
+        assert!(both.optional);
+        assert_eq!(
+            both.alternatives,
+            vec![vec!["api_key".to_owned(), "session".to_owned()]]
+        );
+    }
+
+    #[test]
+    fn an_empty_requirement_leaves_the_other_side_untouched() {
+        let mut target = requirement(&[&["session", "api_key"]], false);
+        merge_auth_requirements(&mut target, &AuthRequirement::default());
+        assert_eq!(target, requirement(&[&["api_key", "session"]], false));
+
+        let mut empty = AuthRequirement::default();
+        merge_auth_requirements(&mut empty, &requirement(&[&["session"]], false));
+        assert_eq!(empty.alternatives, vec![vec!["session".to_owned()]]);
     }
 }

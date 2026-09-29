@@ -6,6 +6,7 @@ use pons_ir::{
 
 use crate::describe::OperationCx;
 use crate::metadata::OperationMeta;
+use crate::operation_cx::push_diagnostic;
 
 pub(crate) struct RouteDescription {
     pub method: Method,
@@ -28,10 +29,11 @@ pub(crate) fn build(path: &str, description: RouteDescription) -> BuiltOperation
     } = description;
     let mut diagnostics = cx.diagnostics.clone();
     if cx.path_types.len() > 1 {
-        diagnostics.push(diagnostic(
+        push_diagnostic(
+            &mut diagnostics,
             "PONS-W101",
             "multiple Path extractors are not represented separately",
-        ));
+        );
     }
     let path_types = path_types(&cx);
     let segments = parse_path(path, &path_types, &mut diagnostics);
@@ -128,7 +130,15 @@ fn parse_path(
         .filter(|segment| !segment.is_empty() || path.ends_with('/'))
         .map(|segment| {
             if segment.starts_with('{') && segment.ends_with('}') {
-                let param = segment[1..segment.len() - 1].trim_start_matches('*');
+                let inner = &segment[1..segment.len() - 1];
+                if inner.starts_with('*') {
+                    push_diagnostic(
+                        diagnostics,
+                        "PONS-W102",
+                        "wildcard path parameters match multiple segments and are not representable; the segment is described as a single path parameter",
+                    );
+                }
+                let param = inner.trim_start_matches('*');
                 let tuple_key = parameter_index.to_string();
                 parameter_index += 1;
                 let ty = path_types.get(param).or_else(|| {
@@ -153,10 +163,11 @@ fn parse_path(
         })
         .collect::<Vec<_>>();
     if used_fallback {
-        diagnostics.push(diagnostic(
+        push_diagnostic(
+            diagnostics,
             "PONS-W102",
             "path parameters without a matching Path extractor are typed as strings",
-        ));
+        );
     }
     segments
 }
@@ -168,14 +179,4 @@ fn string_type() -> TypeRef {
         max_length: None,
         pattern: None,
     })
-}
-
-fn diagnostic(code: &str, message: &str) -> Diagnostic {
-    Diagnostic {
-        severity: pons_ir::DiagnosticSeverity::Warning,
-        code: code.to_owned(),
-        message: message.to_owned(),
-        origin: None,
-        ext: BTreeMap::new(),
-    }
 }

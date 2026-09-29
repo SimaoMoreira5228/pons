@@ -2,7 +2,8 @@ use axum::response::IntoResponse;
 use pons_axum::http::StatusCode;
 use pons_axum::routing::post;
 use pons_axum::{
-    Info, JsonResponse, ProblemJsonResponse, ResponseSpec, Router, WithResponse, WithUnknownStatus,
+    HeaderSpec, Info, JsonResponse, ProblemJsonResponse, ResponseSpec, Router, WithHeader,
+    WithResponse, WithUnknownStatus,
 };
 use pons_core::Schema;
 use pons_ir::{ContentKind, ResponseStatus, TypeRef};
@@ -28,6 +29,13 @@ impl ResponseSpec for VendorJson {
     fn media_type() -> Option<&'static str> {
         Some("application/vnd.acme+json")
     }
+}
+
+struct TraceId;
+
+impl HeaderSpec for TraceId {
+    type Value = String;
+    const NAME: &'static str = "X-Trace-ID";
 }
 
 async fn created_response() -> WithResponse<User, JsonResponse<201>> {
@@ -101,4 +109,31 @@ fn explicit_response_metadata_preserves_runtime_status() {
     );
     let response = WithUnknownStatus::new(StatusCode::CREATED.into_response()).into_response();
     assert_eq!(response.status(), StatusCode::CREATED);
+}
+
+#[test]
+fn declared_media_type_replaces_the_inner_content_type() {
+    let problem = WithResponse::<User, ProblemJsonResponse<422>>::new(
+        axum::Json(User { id: 3 }).into_response(),
+    )
+    .into_response();
+    assert_eq!(problem.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    assert_eq!(
+        problem.headers()["content-type"],
+        "application/problem+json"
+    );
+}
+
+#[test]
+fn invalid_header_responses_keep_their_status() {
+    let response = WithResponse::<User, JsonResponse<201>>::new(
+        WithHeader::<TraceId, _>::new(axum::Json(User { id: 4 }), "bad\nvalue".into())
+            .into_response(),
+    )
+    .into_response();
+    assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+    assert_eq!(
+        response.headers()["content-type"],
+        "text/plain; charset=utf-8"
+    );
 }

@@ -198,31 +198,54 @@ impl OperationCx {
     }
 
     pub fn diagnostic(&mut self, code: &str, message: impl Into<String>) {
-        self.push_diagnostic(DiagnosticSeverity::Warning, code, message.into());
-    }
-
-    pub fn error(&mut self, code: &str, message: impl Into<String>) {
-        self.push_diagnostic(DiagnosticSeverity::Error, code, message.into());
-    }
-
-    fn push_diagnostic(&mut self, severity: DiagnosticSeverity, code: &str, message: String) {
-        if self
-            .diagnostics
-            .iter()
-            .any(|diagnostic| diagnostic.code == code && diagnostic.message == message)
-        {
-            return;
-        }
-        self.diagnostics.push(Diagnostic {
-            severity,
-            code: code.to_owned(),
-            message,
-            origin: None,
-            ext: Default::default(),
-        });
+        push_diagnostic(&mut self.diagnostics, code, message);
     }
 
     pub(crate) fn type_definitions(&self) -> &std::collections::BTreeMap<String, pons_ir::TypeDef> {
         self.types.definitions()
+    }
+}
+
+pub(crate) fn push_diagnostic(
+    diagnostics: &mut Vec<Diagnostic>,
+    code: &str,
+    message: impl Into<String>,
+) {
+    let message = message.into();
+    if diagnostics
+        .iter()
+        .any(|diagnostic| diagnostic.code == code && diagnostic.message == message)
+    {
+        return;
+    }
+    diagnostics.push(Diagnostic {
+        severity: severity_for(code),
+        code: code.to_owned(),
+        message,
+        origin: None,
+        ext: Default::default(),
+    });
+}
+
+fn severity_for(code: &str) -> DiagnosticSeverity {
+    match code.split('-').nth(1) {
+        Some(segment) if segment.starts_with('W') => DiagnosticSeverity::Warning,
+        _ => DiagnosticSeverity::Error,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn severity_follows_the_code_and_duplicates_are_dropped() {
+        let mut diagnostics = Vec::new();
+        push_diagnostic(&mut diagnostics, "PONS-W102", "wildcard segment");
+        push_diagnostic(&mut diagnostics, "PONS-W102", "wildcard segment");
+        push_diagnostic(&mut diagnostics, "PONS-E101", "flatten conflict");
+        assert_eq!(diagnostics.len(), 2);
+        assert_eq!(diagnostics[0].severity, DiagnosticSeverity::Warning);
+        assert_eq!(diagnostics[1].severity, DiagnosticSeverity::Error);
     }
 }

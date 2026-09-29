@@ -162,6 +162,15 @@ struct ContainerDefaults {
 
 #[derive(pons_core::Schema)]
 #[allow(dead_code)]
+enum RequiredPayloads {
+    Struct {
+        value: String,
+        notes: Option<String>,
+    },
+}
+
+#[derive(pons_core::Schema)]
+#[allow(dead_code)]
 struct OneSidedCodecs {
     #[serde(serialize_with = "encode_value")]
     encoded: Vec<u8>,
@@ -1001,6 +1010,62 @@ fn container_level_serde_default_makes_every_field_optional_on_input() {
 
     let (types, diagnostics) = cx.into_parts();
     assert!(document(types, diagnostics).validate().is_ok());
+}
+
+#[test]
+fn enum_payload_presence_stays_direction_specific_without_a_container_default() {
+    let mut cx = TypeCx::new();
+    let input = RequiredPayloads::schema(&mut cx, Direction::Input);
+    let output = RequiredPayloads::schema(&mut cx, Direction::Output);
+    let both = RequiredPayloads::schema(&mut cx, Direction::Both);
+
+    for (reference, expected) in [
+        (
+            input,
+            [pons_ir::Presence::Required, pons_ir::Presence::Optional],
+        ),
+        (
+            output,
+            [pons_ir::Presence::Required, pons_ir::Presence::Required],
+        ),
+        (
+            both,
+            [pons_ir::Presence::Required, pons_ir::Presence::Optional],
+        ),
+    ] {
+        let fields = struct_payload_fields(&cx, &reference);
+        assert_eq!(
+            fields
+                .iter()
+                .map(|field| field.wire.as_str())
+                .collect::<Vec<_>>(),
+            ["value", "notes"]
+        );
+        assert_eq!(
+            fields
+                .iter()
+                .map(|field| field.presence)
+                .collect::<Vec<_>>(),
+            expected
+        );
+    }
+    assert!(cx.diagnostics().is_empty());
+
+    let (types, diagnostics) = cx.into_parts();
+    assert!(document(types, diagnostics).validate().is_ok());
+}
+
+fn struct_payload_fields<'cx>(cx: &'cx TypeCx, reference: &TypeRef) -> &'cx [pons_ir::Field] {
+    let TypeRef::Named(named) = reference else {
+        panic!()
+    };
+    let TypeKind::Enum { variants, .. } = &cx.definitions()[&named.id].definition else {
+        panic!()
+    };
+    let VariantPayload::Struct { fields } = &variants[0].payload else {
+        panic!()
+    };
+    fields
 }
 
 #[test]
