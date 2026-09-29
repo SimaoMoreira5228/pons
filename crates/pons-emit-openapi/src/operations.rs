@@ -1,9 +1,8 @@
 use std::collections::BTreeMap;
 
 use pons_ir::{
-    ByteEncoding, ContentKind, EnumRepr, ErrorContent, ErrorStatus, InlineType, Method,
-    ObjectOpenness, Operation, PathSegment, Presence, ResponseHeader, ResponseStatus, TypeKind,
-    TypeRef, is_valid_media_type,
+    ContentKind, ErrorContent, ErrorStatus, InlineType, Method, Operation, PathSegment, Presence,
+    ResponseHeader, ResponseStatus, TypeKind, TypeRef, is_valid_media_type,
 };
 use serde_json::{Map, Value, json};
 
@@ -102,7 +101,7 @@ impl Builder<'_> {
             }
         }
         if let Some(query) = &operation.query {
-            self.query_parameters(query, &mut parameters, &mut Vec::new())?;
+            self.query_parameters(query, &mut parameters)?;
         }
         for header in &operation.headers {
             if is_ignored_request_header(&header.wire) {
@@ -139,116 +138,20 @@ impl Builder<'_> {
         &self,
         query: &TypeRef,
         parameters: &mut Vec<Value>,
-        visited: &mut Vec<String>,
     ) -> Result<(), EmitError> {
-        let TypeRef::Named(named) = query else {
-            return Err(EmitError(
-                "OpenAPI query parameters must be structs or transparent newtypes over structs"
-                    .into(),
-            ));
-        };
-        if named.variant.is_some() {
-            return Err(EmitError(format!(
-                "query type {} cannot narrow an enum variant",
-                named.id
-            )));
+        for field in pons_ir::query_fields(self.document, query)
+            .map_err(|rejection| EmitError(format!("OpenAPI {}", rejection.message())))?
+        {
+            let mut parameter = json!({
+                "name": field.wire,
+                "in": "query",
+                "required": field.presence == Presence::Required,
+                "schema": self.field_schema(field)?,
+            });
+            add_parameter_doc(&mut parameter, field.doc.as_ref());
+            parameters.push(parameter);
         }
-        if visited.contains(&named.id) {
-            return Err(EmitError(format!(
-                "recursive transparent query type {}",
-                named.id
-            )));
-        }
-        let definition = self
-            .document
-            .types
-            .get(&named.id)
-            .ok_or_else(|| EmitError(format!("unknown query type {}", named.id)))?;
-        visited.push(named.id.clone());
-        match &definition.definition {
-            TypeKind::Newtype { inner } => {
-                self.query_parameters(inner, parameters, visited)?;
-            }
-            TypeKind::Struct {
-                fields,
-                flattened,
-                openness,
-            } => {
-                if !matches!(openness, ObjectOpenness::Reject) {
-                    return Err(EmitError(format!(
-                        "query type {} accepts additional keys",
-                        named.id
-                    )));
-                }
-                for field in fields {
-                    self.validate_query_field(&field.ty, &mut Vec::new())?;
-                    let mut parameter = json!({
-                        "name": field.wire,
-                        "in": "query",
-                        "required": field.presence == Presence::Required,
-                        "schema": self.field_schema(field)?,
-                    });
-                    add_parameter_doc(&mut parameter, field.doc.as_ref());
-                    parameters.push(parameter);
-                }
-                for flattened in flattened {
-                    self.query_parameters(flattened, parameters, visited)?;
-                }
-            }
-            TypeKind::Enum { .. } => {
-                return Err(EmitError(format!(
-                    "query type {} is not a struct",
-                    named.id
-                )));
-            }
-        }
-        visited.pop();
         Ok(())
-    }
-
-    fn validate_query_field(
-        &self,
-        ty: &TypeRef,
-        visited: &mut Vec<String>,
-    ) -> Result<(), EmitError> {
-        let supported = match ty {
-            TypeRef::Inline(
-                InlineType::Bool
-                | InlineType::Int { .. }
-                | InlineType::Float { .. }
-                | InlineType::Decimal { .. }
-                | InlineType::String { .. },
-            ) => true,
-            TypeRef::Inline(InlineType::Bytes {
-                encoding: ByteEncoding::Base64 | ByteEncoding::Base64url | ByteEncoding::Hex,
-            }) => true,
-            TypeRef::Named(named) if visited.contains(&named.id) => false,
-            TypeRef::Named(named) => {
-                let definition = self
-                    .document
-                    .types
-                    .get(&named.id)
-                    .ok_or_else(|| EmitError(format!("unknown query type {}", named.id)))?;
-                match &definition.definition {
-                    TypeKind::Enum { repr, .. } => matches!(repr, EnumRepr::String),
-                    TypeKind::Newtype { inner } => {
-                        visited.push(named.id.clone());
-                        let result = self.validate_query_field(inner, visited);
-                        visited.pop();
-                        result.is_ok()
-                    }
-                    TypeKind::Struct { .. } => false,
-                }
-            }
-            TypeRef::Inline(_) => false,
-        };
-        if supported {
-            Ok(())
-        } else {
-            Err(EmitError(
-                "OpenAPI query fields must use scalar types with an unambiguous encoding".into(),
-            ))
-        }
     }
 
     fn validate_byte_body(&self, ty: &TypeRef, visited: &mut Vec<String>) -> Result<(), EmitError> {
@@ -431,7 +334,7 @@ fn openapi_path(operation: &Operation) -> Result<String, EmitError> {
                     "path literal {lit:?} contains OpenAPI template syntax"
                 )));
             }
-            PathSegment::Literal { lit } => segments.push(lit.clone()),
+            PathSegment::Literal { lit } => segments.push(escape_path_literal(lit)),
             PathSegment::Param { param, .. } if !valid_path_parameter_name(param) => {
                 return Err(EmitError(format!(
                     "path parameter {param:?} is not a valid OpenAPI path parameter name"
@@ -457,12 +360,32 @@ fn route_pattern(operation: &Operation) -> String {
             .path
             .iter()
             .map(|segment| match segment {
-                PathSegment::Literal { lit } => lit.clone(),
+                PathSegment::Literal { lit } => escape_path_literal(lit),
                 PathSegment::Param { .. } => "{}".into(),
             })
             .collect::<Vec<_>>()
             .join("/")
     )
+}
+
+fn escape_path_literal(literal: &str) -> String {
+    const HEX: &[u8; 16] = b"0123456789ABCDEF";
+    let mut escaped = String::with_capacity(literal.len());
+    for byte in literal.bytes() {
+        if byte.is_ascii_alphanumeric()
+            || matches!(
+                byte,
+                b'-' | b'_' | b'.' | b'!' | b'~' | b'*' | b'\'' | b'(' | b')'
+            )
+        {
+            escaped.push(char::from(byte));
+        } else {
+            escaped.push('%');
+            escaped.push(char::from(HEX[usize::from(byte >> 4)]));
+            escaped.push(char::from(HEX[usize::from(byte & 0x0F)]));
+        }
+    }
+    escaped
 }
 
 fn valid_path_parameter_name(name: &str) -> bool {
@@ -506,6 +429,22 @@ fn media_type(
     stream: Option<&pons_ir::StreamDescription>,
     override_type: Option<&str>,
 ) -> Result<Option<String>, EmitError> {
+    if let Some(pons_ir::StreamKind::Bytes { content_type }) = stream.map(|stream| &stream.kind)
+        && !is_valid_media_type(content_type)
+    {
+        return Err(EmitError(format!(
+            "invalid byte stream content type {content_type:?}"
+        )));
+    }
+    if content == ContentKind::Stream
+        && let Some(value) = override_type
+        && let Some(expected) = stream.and_then(|stream| stream.kind.media_type())
+        && !pons_ir::media_type_matches(value, expected)
+    {
+        return Err(EmitError(format!(
+            "response media type {value:?} does not match stream kind media type {expected:?}"
+        )));
+    }
     if let Some(value) = override_type {
         if !is_valid_media_type(value) {
             return Err(EmitError(format!("invalid media type {value:?}")));
@@ -519,28 +458,19 @@ fn media_type(
         ContentKind::Multipart => "multipart/form-data".into(),
         ContentKind::Text => "text/plain".into(),
         ContentKind::Bytes => "application/octet-stream".into(),
-        ContentKind::Stream => match stream.map(|stream| &stream.kind) {
-            Some(pons_ir::StreamKind::Sse { .. }) => "text/event-stream".into(),
-            Some(pons_ir::StreamKind::Ndjson { .. }) => "application/x-ndjson".into(),
-            Some(pons_ir::StreamKind::Bytes { content_type })
-                if !is_valid_media_type(content_type) =>
-            {
-                return Err(EmitError(format!(
-                    "invalid byte stream content type {content_type:?}"
-                )));
-            }
-            Some(pons_ir::StreamKind::Bytes { content_type }) => content_type.clone(),
-            Some(pons_ir::StreamKind::Websocket { .. }) => {
-                return Err(EmitError(
-                    "OpenAPI paths cannot describe WebSocket operations".into(),
-                ));
-            }
-            None => {
+        ContentKind::Stream => {
+            let Some(kind) = stream.map(|stream| &stream.kind) else {
                 return Err(EmitError(
                     "stream response is missing its stream description".into(),
                 ));
-            }
-        },
+            };
+            let Some(content_type) = kind.media_type() else {
+                return Err(EmitError(
+                    "OpenAPI paths cannot describe WebSocket operations".into(),
+                ));
+            };
+            content_type.into()
+        }
         ContentKind::Empty => return Ok(None),
     }))
 }

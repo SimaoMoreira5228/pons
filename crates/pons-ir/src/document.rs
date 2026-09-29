@@ -9,8 +9,8 @@ use crate::operation::{
     ErrorStatus, Method, OAuthFlowKind, Operation, ResponseStatus,
 };
 use crate::types::{
-    Diagnostic, DiagnosticSeverity, EnumRepr, Field, InlineType, IntegerWire, TypeDef, TypeKind,
-    TypeRef, VariantPayload,
+    Diagnostic, DiagnosticSeverity, EnumRepr, Field, InlineType, IntegerWire, Presence, TypeDef,
+    TypeKind, TypeRef, VariantPayload,
 };
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
@@ -53,9 +53,27 @@ fn response_status_conflicts(response: ResponseStatus, error: &ErrorStatus) -> b
         (ResponseStatus::Default | ResponseStatus::Unknown, ErrorStatus::Class(class)) => {
             *class == 2
         }
-        (ResponseStatus::Default | ResponseStatus::Unknown, ErrorStatus::Default) => false,
+        (ResponseStatus::Default, ErrorStatus::Default) => true,
         _ => false,
     }
+}
+
+fn scan_opaque_references(
+    references: &[TypeRef],
+    pending: &mut Vec<(String, Option<String>)>,
+) -> bool {
+    let mut found = false;
+    for reference in references {
+        reference.visit_refs(&mut |reference| {
+            if matches!(reference, TypeRef::Inline(InlineType::Opaque { .. })) {
+                found = true;
+            }
+            if let TypeRef::Named(named) = reference {
+                pending.push((named.id.clone(), named.variant.clone()));
+            }
+        });
+    }
+    found
 }
 
 impl Document {
@@ -114,6 +132,91 @@ impl Document {
             .iter()
             .for_each(|operation| operation.visit_refs(&mut visit));
         found
+    }
+
+    pub fn has_opaque(&self) -> bool {
+        let mut found = false;
+        let mut visit = |reference: &TypeRef| {
+            if matches!(reference, TypeRef::Inline(InlineType::Opaque { .. })) {
+                found = true;
+            }
+        };
+        self.types
+            .values()
+            .for_each(|definition| definition.definition.visit_refs(&mut visit));
+        self.common_errors.iter().for_each(|error| {
+            if let Some(body) = &error.body {
+                body.visit_refs(&mut visit);
+            }
+            error
+                .headers
+                .iter()
+                .for_each(|header| header.ty.visit_refs(&mut visit));
+        });
+        self.operations
+            .iter()
+            .for_each(|operation| operation.visit_refs(&mut visit));
+        found
+    }
+
+    pub fn has_reachable_opaque(&self) -> bool {
+        let mut roots = Vec::new();
+        {
+            let mut visit = |reference: &TypeRef| roots.push(reference.clone());
+
+            if self
+                .operations
+                .iter()
+                .any(|operation| operation.errors_inherit)
+            {
+                self.common_errors.iter().for_each(|error| {
+                    if let Some(body) = &error.body {
+                        body.visit_refs(&mut visit);
+                    }
+                    error
+                        .headers
+                        .iter()
+                        .for_each(|header| header.ty.visit_refs(&mut visit));
+                });
+            }
+            self.operations
+                .iter()
+                .for_each(|operation| operation.visit_refs(&mut visit));
+        }
+
+        let mut pending = Vec::new();
+        if scan_opaque_references(&roots, &mut pending) {
+            return true;
+        }
+        let mut seen = BTreeSet::new();
+        while let Some((id, selected)) = pending.pop() {
+            if !seen.insert((id.clone(), selected.clone())) {
+                continue;
+            }
+            let Some(definition) = self.types.get(&id) else {
+                continue;
+            };
+            let mut references = Vec::new();
+            match selected {
+                Some(variant) => {
+                    if let TypeKind::Enum { variants, .. } = &definition.definition
+                        && let Some(variant) =
+                            variants.iter().find(|candidate| candidate.wire == variant)
+                    {
+                        variant
+                            .payload
+                            .visit_refs(&mut |reference| references.push(reference.clone()));
+                    }
+                }
+                None => definition
+                    .definition
+                    .visit_refs(&mut |reference| references.push(reference.clone())),
+            }
+            if scan_opaque_references(&references, &mut pending) {
+                return true;
+            }
+        }
+        false
     }
 
     pub fn to_canonical_json(&self) -> Result<String, serde_json::Error> {
@@ -239,13 +342,19 @@ impl Document {
 
             let mut path_parameters = BTreeSet::new();
             for segment in &operation.path {
-                if let crate::operation::PathSegment::Param { param, .. } = segment
-                    && !path_parameters.insert(param)
-                {
-                    errors.push(ValidationError::InvalidValue {
-                        path: owner.clone(),
-                        message: format!("duplicate path parameter {param}"),
-                    });
+                if let crate::operation::PathSegment::Param { param, ty } = segment {
+                    if !path_parameters.insert(param) {
+                        errors.push(ValidationError::InvalidValue {
+                            path: owner.clone(),
+                            message: format!("duplicate path parameter {param}"),
+                        });
+                    }
+                    if self.is_nullable_type(ty, &mut BTreeSet::new()) {
+                        errors.push(ValidationError::InvalidValue {
+                            path: owner.clone(),
+                            message: format!("required path parameter {param} cannot be nullable"),
+                        });
+                    }
                 }
             }
             let mut header_names = BTreeSet::new();
@@ -257,6 +366,17 @@ impl Document {
                     &mut header_names,
                     &mut errors,
                 );
+                if header.presence == Presence::Required
+                    && self.is_nullable_type(&header.ty, &mut BTreeSet::new())
+                {
+                    errors.push(ValidationError::InvalidValue {
+                        path: owner.clone(),
+                        message: format!(
+                            "required request header {} cannot be nullable",
+                            header.wire
+                        ),
+                    });
+                }
             }
             if let Some(body) = &operation.body {
                 if body.content == ContentKind::Empty {
@@ -289,6 +409,13 @@ impl Document {
             }
 
             for alternative in &operation.auth.alternatives {
+                if alternative.is_empty() {
+                    errors.push(ValidationError::InvalidValue {
+                        path: owner.clone(),
+                        message: "auth alternative cannot be empty".into(),
+                    });
+                    continue;
+                }
                 for scheme in alternative {
                     if !self.auth_schemes.contains_key(scheme) {
                         errors.push(ValidationError::UnknownAuthScheme {
@@ -413,6 +540,21 @@ impl Document {
                         &mut errors,
                     );
                 }
+                if response.content == ContentKind::Stream
+                    && let Some(media_type) = &response.media_type
+                    && let Some(content_type) = operation
+                        .stream
+                        .as_ref()
+                        .and_then(|stream| stream.kind.media_type())
+                    && !crate::media::media_type_matches(media_type, content_type)
+                {
+                    errors.push(ValidationError::InvalidValue {
+                        path: owner.clone(),
+                        message: format!(
+                            "response media type {media_type:?} does not match stream kind media type {content_type:?}"
+                        ),
+                    });
+                }
                 let content_matches_body = match response.content {
                     ContentKind::Empty | ContentKind::Stream => response.body.is_none(),
                     _ => response.body.is_some(),
@@ -427,6 +569,7 @@ impl Document {
                     });
                 }
                 if (operation.method == Method::Head
+                    || matches!(response.status, ResponseStatus::Class(1))
                     || matches!(response.status, ResponseStatus::Exact(status) if status_forbids_body(status)))
                     && (response.content != ContentKind::Empty || response.body.is_some())
                 {
@@ -546,6 +689,16 @@ impl Document {
             self.validate_ref(&owner, reference, errors);
             self.validate_inline(&owner, reference, errors);
         });
+        if let TypeKind::Struct { flattened, .. } = &definition.definition {
+            for (index, ty) in flattened.iter().enumerate() {
+                if self.is_nullable_type(ty, &mut BTreeSet::new()) {
+                    errors.push(ValidationError::InvalidValue {
+                        path: format!("{owner}.flattened[{index}]"),
+                        message: "nullable flattened types are not representable".into(),
+                    });
+                }
+            }
+        }
 
         match &definition.definition {
             TypeKind::Struct { fields, .. } => self.validate_fields(&owner, fields, errors),
@@ -566,6 +719,11 @@ impl Document {
                 }
                 let mut names = BTreeSet::new();
                 for variant in variants {
+                    self.validate_diagnostics(
+                        &format!("{owner}.variants.{}", variant.wire),
+                        &variant.diagnostics,
+                        errors,
+                    );
                     if !names.insert(&variant.wire) {
                         errors.push(ValidationError::InvalidValue {
                             path: owner.clone(),
@@ -604,9 +762,34 @@ impl Document {
         }
     }
 
+    fn is_nullable_type(&self, ty: &TypeRef, visited: &mut BTreeSet<String>) -> bool {
+        match ty {
+            TypeRef::Inline(InlineType::Nullable { .. }) => true,
+            TypeRef::Named(named) => {
+                if !visited.insert(named.id.clone()) {
+                    return false;
+                }
+                let result = self.types.get(&named.id).is_some_and(|definition| {
+                    matches!(
+                        &definition.definition,
+                        TypeKind::Newtype { inner } if self.is_nullable_type(inner, visited)
+                    )
+                });
+                visited.remove(&named.id);
+                result
+            }
+            TypeRef::Inline(_) => false,
+        }
+    }
+
     fn validate_fields(&self, owner: &str, fields: &[Field], errors: &mut Vec<ValidationError>) {
         let mut names = BTreeSet::new();
         for field in fields {
+            self.validate_diagnostics(
+                &format!("{owner}.fields.{}", field.wire),
+                &field.diagnostics,
+                errors,
+            );
             if !names.insert(&field.wire) {
                 errors.push(ValidationError::InvalidValue {
                     path: owner.into(),
@@ -726,6 +909,12 @@ impl Document {
                 path: owner.into(),
                 message: "string min_length exceeds max_length".into(),
             }),
+            InlineType::Opaque { codec, .. } if codec.trim().is_empty() => {
+                errors.push(ValidationError::InvalidValue {
+                    path: owner.into(),
+                    message: "opaque codec cannot be empty".into(),
+                });
+            }
             InlineType::Map { key, .. }
                 if !matches!(key.as_ref(), TypeRef::Inline(InlineType::String { .. })) =>
             {
@@ -1070,7 +1259,7 @@ impl std::error::Error for ValidationError {}
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ObjectOpenness;
+    use crate::{Direction, ObjectOpenness, OpaqueWire};
 
     #[test]
     fn rich_document_round_trips_and_validates() {
@@ -1087,6 +1276,153 @@ mod tests {
             document.operations[0].errors[0].status,
             ErrorStatus::Class(4)
         );
+    }
+
+    #[test]
+    fn opaque_values_require_a_codec_and_can_be_scanned() {
+        let mut document: Document =
+            serde_json::from_str(include_str!("../../../fixtures/login.json")).unwrap();
+        let user = document.types.get_mut("User").unwrap();
+        let TypeKind::Struct { fields, .. } = &mut user.definition else {
+            panic!()
+        };
+        fields[0].ty = TypeRef::Inline(InlineType::Opaque {
+            codec: String::new(),
+            wire: OpaqueWire::Unknown,
+        });
+        let errors = document.validate().unwrap_err();
+        assert!(
+            errors
+                .iter()
+                .any(|error| error.to_string().contains("opaque codec cannot be empty"))
+        );
+        assert!(document.has_opaque());
+        let TypeKind::Struct { fields, .. } =
+            &mut document.types.get_mut("User").unwrap().definition
+        else {
+            panic!()
+        };
+        fields[0].ty = TypeRef::Inline(InlineType::Opaque {
+            codec: "example".into(),
+            wire: OpaqueWire::Json,
+        });
+        document.validate().unwrap();
+    }
+
+    #[test]
+    fn common_errors_only_root_opaque_when_an_operation_inherits_them() {
+        let mut document: Document =
+            serde_json::from_str(include_str!("../../../fixtures/login.json")).unwrap();
+        let mut common = document.operations[0].errors[0].clone();
+        common.name = vec!["common".into(), "error".into()];
+        common.body = Some(TypeRef::Inline(InlineType::Opaque {
+            codec: "example".into(),
+            wire: OpaqueWire::Json,
+        }));
+        document.common_errors.push(common);
+        document.operations[0].errors.clear();
+        document
+            .operations
+            .iter_mut()
+            .for_each(|operation| operation.errors_inherit = false);
+        document.validate().unwrap();
+        assert!(document.has_opaque());
+        assert!(!document.has_reachable_opaque());
+
+        document.operations[0].errors_inherit = true;
+        assert!(document.has_reachable_opaque());
+    }
+
+    #[test]
+    fn rejects_nullable_flattened_types() {
+        let mut document: Document =
+            serde_json::from_str(include_str!("../../../fixtures/login.json")).unwrap();
+        let TypeKind::Struct { flattened, .. } =
+            &mut document.types.get_mut("User").unwrap().definition
+        else {
+            panic!()
+        };
+        flattened.push(TypeRef::Inline(InlineType::Nullable {
+            inner: Box::new(TypeRef::Inline(InlineType::Bool)),
+        }));
+        assert!(
+            document
+                .validate()
+                .unwrap_err()
+                .iter()
+                .any(|error| error.to_string().contains("nullable flattened"))
+        );
+    }
+
+    #[test]
+    fn rejects_required_nullable_headers_and_path_parameters() {
+        fn fixture() -> Document {
+            serde_json::from_str(include_str!("../../../fixtures/login.json")).unwrap()
+        }
+        fn nullable() -> TypeRef {
+            TypeRef::Inline(InlineType::Nullable {
+                inner: Box::new(TypeRef::Inline(InlineType::Bool)),
+            })
+        }
+        fn rejects(document: &Document, message: &str) {
+            let errors = document
+                .validate()
+                .unwrap_err()
+                .iter()
+                .map(ToString::to_string)
+                .collect::<Vec<_>>();
+            assert!(
+                errors.iter().any(|error| error.contains(message)),
+                "{message:?} missing from {errors:?}"
+            );
+        }
+
+        let mut document = fixture();
+        let watch = &mut document.operations[1];
+        watch.headers[0].presence = Presence::Required;
+        watch.headers[0].ty = nullable();
+        rejects(
+            &document,
+            "required request header X-Request-ID cannot be nullable",
+        );
+
+        let mut document = fixture();
+        document.types.insert(
+            "MaybeHeader".into(),
+            TypeDef {
+                name: vec!["maybe".into(), "header".into()],
+                direction: Direction::Input,
+                definition: TypeKind::Newtype { inner: nullable() },
+                origin: None,
+                doc: None,
+                diagnostics: Vec::new(),
+                ext: BTreeMap::new(),
+            },
+        );
+        let watch = &mut document.operations[1];
+        watch.headers[0].presence = Presence::Required;
+        watch.headers[0].ty = TypeRef::Named(crate::NamedRef {
+            id: "MaybeHeader".into(),
+            variant: None,
+        });
+        rejects(
+            &document,
+            "required request header X-Request-ID cannot be nullable",
+        );
+
+        let mut document = fixture();
+        document.operations[1].path[1] = crate::operation::PathSegment::Param {
+            param: "cursor".into(),
+            ty: nullable(),
+        };
+        rejects(
+            &document,
+            "required path parameter cursor cannot be nullable",
+        );
+
+        let mut document = fixture();
+        document.operations[1].headers[0].ty = nullable();
+        document.validate().unwrap();
     }
 
     #[test]
@@ -1136,6 +1472,95 @@ mod tests {
                 .iter()
                 .any(|error| error.to_string().contains("empty response"))
         );
+    }
+
+    #[test]
+    fn byte_stream_media_types_are_consistent_and_validated() {
+        let mut document: Document =
+            serde_json::from_str(include_str!("../../../fixtures/login.json")).unwrap();
+        let operation_index = document
+            .operations
+            .iter()
+            .position(|operation| operation.stream.is_some())
+            .unwrap();
+        document.operations[operation_index]
+            .stream
+            .as_mut()
+            .unwrap()
+            .kind = crate::StreamKind::Bytes {
+            content_type: "Application/PDF ; Version=1".into(),
+        };
+        document.validate().unwrap();
+        document.operations[operation_index].responses[0].media_type =
+            Some("application/pdf; version=2".into());
+        assert!(document.validate().unwrap_err().iter().any(|error| {
+            error
+                .to_string()
+                .contains("does not match stream kind media type")
+        }));
+        document.operations[operation_index].responses[0].media_type =
+            Some("application/pdf; version=1; extra=value".into());
+        document.validate().unwrap();
+        document.operations[operation_index]
+            .stream
+            .as_mut()
+            .unwrap()
+            .kind = crate::StreamKind::Bytes {
+            content_type: "not-a-media-type".into(),
+        };
+        assert!(document.validate().unwrap_err().iter().any(|error| {
+            error
+                .to_string()
+                .contains("invalid byte stream content type")
+        }));
+    }
+
+    #[test]
+    fn sse_and_ndjson_media_types_are_checked_against_their_kind() {
+        let mut document: Document =
+            serde_json::from_str(include_str!("../../../fixtures/login.json")).unwrap();
+        let operation_index = document
+            .operations
+            .iter()
+            .position(|operation| operation.stream.is_some())
+            .unwrap();
+        for (kind, expected) in [
+            (
+                crate::StreamKind::Sse { events: vec![] },
+                "text/event-stream",
+            ),
+            (
+                crate::StreamKind::Ndjson {
+                    item: TypeRef::Inline(InlineType::Bool),
+                },
+                "application/x-ndjson",
+            ),
+        ] {
+            document.operations[operation_index]
+                .stream
+                .as_mut()
+                .unwrap()
+                .kind = kind;
+
+            for accepted in [
+                expected.to_owned(),
+                format!("{expected}; charset=utf-8"),
+                format!("{expected} ; CharSet=UTF-8"),
+            ] {
+                document.operations[operation_index].responses[0].media_type = Some(accepted);
+                document.validate().unwrap();
+            }
+            for rejected in ["application/json", "application/octet-stream", "text/plain"] {
+                document.operations[operation_index].responses[0].media_type =
+                    Some(rejected.into());
+                assert!(
+                    document.validate().unwrap_err().iter().any(|error| error
+                        .to_string()
+                        .contains("does not match stream kind media type")),
+                    "{rejected:?} must not serve an {expected} stream"
+                );
+            }
+        }
     }
 
     #[test]

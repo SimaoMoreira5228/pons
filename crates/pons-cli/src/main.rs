@@ -10,7 +10,7 @@ use std::process::ExitCode;
 use pons_emit_ts::ErrorStrategy;
 use pons_ir::{ChangeLevel, Document};
 
-const HELP: &str = "Usage: pons <command> <ir.json> [arguments]\n\nCommands:\n  check <ir.json>                              Validate an IR document\n  fmt <ir.json>                                Rewrite an IR document in canonical form\n  diff <old.json> <new.json>                   Classify changes between two IR documents\n  emit --target <name> <ir.json> <output-dir> [--strict|--lossy] [--errors <neverthrow|throw>]\n                                                Generate files (built-in: ts, openapi)\n      --strict                                 Reject unsupported capabilities (default)\n      --lossy                                  Allow explicitly lossy output with warnings\n      --errors <neverthrow|throw>              Select the TypeScript error strategy\n";
+const HELP: &str = "Usage: pons <command> <ir.json> [arguments]\n\nCommands:\n  check <ir.json>                              Validate an IR document\n  fmt <ir.json>                                Rewrite an IR document in canonical form\n  diff <old.json> <new.json>                   Classify changes between two IR documents\n  emit --target <name> <ir.json> <output-dir> [--strict|--lossy] [--errors <neverthrow|throw>] [--coverage <relative-file>]\n                                                Generate files (built-in: ts, openapi)\n      --strict                                 Reject unsupported/lossy coverage; opaque is allowed (default)\n      --lossy                                  Emit non-exact coverage with warnings\n      --errors <neverthrow|throw>              TypeScript target only: neverthrow (default), throw\n      --coverage <relative-file>               Write emitter coverage as JSON\n";
 
 fn main() -> ExitCode {
     match run(env::args_os().skip(1).collect()) {
@@ -73,6 +73,7 @@ fn run(args: Vec<OsString>) -> Result<(), CliError> {
         let mut lossy_flag = false;
         let mut errors_flag = false;
         let mut error_strategy = ErrorStrategy::Neverthrow;
+        let mut coverage_path: Option<OsString> = None;
         let mut index = 5;
         while index < args.len() {
             match args[index].to_str() {
@@ -83,6 +84,11 @@ fn run(args: Vec<OsString>) -> Result<(), CliError> {
                     strict = false;
                 }
                 Some("--errors") if !errors_flag => {
+                    if target != "ts" {
+                        return Err(CliError::Failure(format!(
+                            "--errors is only supported by the TypeScript target, not {target}"
+                        )));
+                    }
                     errors_flag = true;
                     index += 1;
                     error_strategy = match args.get(index).and_then(|value| value.to_str()) {
@@ -90,6 +96,14 @@ fn run(args: Vec<OsString>) -> Result<(), CliError> {
                         Some("throw") => ErrorStrategy::Throw,
                         _ => return Err(CliError::Usage(HELP.into())),
                     };
+                }
+                Some("--coverage") if coverage_path.is_none() => {
+                    index += 1;
+                    coverage_path = Some(
+                        args.get(index)
+                            .cloned()
+                            .ok_or_else(|| CliError::Usage(HELP.into()))?,
+                    );
                 }
                 _ => return Err(CliError::Usage(HELP.into())),
             }
@@ -101,6 +115,7 @@ fn run(args: Vec<OsString>) -> Result<(), CliError> {
             target,
             &document,
             Path::new(&args[4]),
+            coverage_path.as_deref().map(Path::new),
             strict,
             error_strategy,
         );

@@ -1,5 +1,5 @@
 use pons_ir::{
-    Access, ByteEncoding, DecimalWire, EnumRepr, FieldDefault, InlineType, IntegerWire,
+    Access, ByteEncoding, DecimalWire, Document, EnumRepr, FieldDefault, InlineType, IntegerWire,
     ObjectOpenness, Presence, TypeDef, TypeKind, TypeRef, Variant, VariantPayload,
 };
 use serde_json::{Map, Value, json};
@@ -8,6 +8,11 @@ use crate::{Builder, EmitError};
 
 fn reference(name: &str) -> Value {
     json!({"$ref": format!("#/components/schemas/{}", name.replace('~', "~0").replace('/', "~1"))})
+}
+
+fn variant_reference(name: &str, keyword: &str, index: usize) -> Value {
+    let name = name.replace('~', "~0").replace('/', "~1");
+    json!({"$ref": format!("#/components/schemas/{name}/{keyword}/{index}")})
 }
 
 fn add_doc(schema: &mut Value, doc: Option<&pons_ir::Doc>) {
@@ -105,7 +110,9 @@ impl<'a> Builder<'a> {
                 let mut object = fields_schema_with(self, fields)?;
                 let additional = match openness {
                     ObjectOpenness::Reject => json!(false),
-                    ObjectOpenness::PreserveTyped { value } => self.type_schema(value)?,
+                    ObjectOpenness::PreserveTyped { value } => {
+                        self.type_schema(openness_value(value, self.document))?
+                    }
                     ObjectOpenness::PreserveOpaque => json!(true),
                 };
                 if flattened.is_empty() {
@@ -137,11 +144,26 @@ impl<'a> Builder<'a> {
                     let TypeKind::Enum { repr, variants } = &definition.definition else {
                         return Err(EmitError(format!("type {} is not an enum", named.id)));
                     };
-                    let variant = variants
+                    let index = variants
                         .iter()
-                        .find(|candidate| candidate.wire == *variant_name)
+                        .position(|candidate| candidate.wire == *variant_name)
                         .ok_or_else(|| EmitError(format!("unknown variant {variant_name}")))?;
-                    return self.enum_variant_schema(repr, variant);
+                    let active = (named.id.clone(), variant_name.clone());
+                    if !self.selected_variants.borrow_mut().insert(active.clone()) {
+                        let keyword = if matches!(repr, EnumRepr::Untagged) {
+                            "anyOf"
+                        } else {
+                            "oneOf"
+                        };
+                        return Ok(variant_reference(
+                            &self.schema_names[&named.id],
+                            keyword,
+                            index,
+                        ));
+                    }
+                    let result = self.enum_variant_schema(repr, &variants[index]);
+                    self.selected_variants.borrow_mut().remove(&active);
+                    return result;
                 }
                 Ok(reference(&self.schema_names[&named.id]))
             }
@@ -240,6 +262,11 @@ impl<'a> Builder<'a> {
             },
             InlineType::Null => json!({"type":"null"}),
             InlineType::Any => json!({}),
+            InlineType::Opaque { codec, wire } => {
+                let mut schema = json!({});
+                schema["x-pons-opaque"] = json!({"codec":codec,"wire":wire});
+                schema
+            }
             InlineType::Nullable { inner } => {
                 json!({"anyOf":[self.type_schema(inner)?,{"type":"null"}]})
             }
@@ -376,6 +403,28 @@ impl<'a> Builder<'a> {
                 items: items.clone(),
             }),
             VariantPayload::Struct { fields } => fields_schema_with(self, fields),
+        }
+    }
+}
+
+fn openness_value<'a>(ty: &'a TypeRef, document: &'a Document) -> &'a TypeRef {
+    let mut current = ty;
+    let mut visited = Vec::new();
+    loop {
+        match current {
+            TypeRef::Inline(InlineType::Map { value, .. }) => return value,
+            TypeRef::Named(named) if !visited.contains(&named.id) => {
+                let Some(TypeKind::Newtype { inner }) = document
+                    .types
+                    .get(&named.id)
+                    .map(|definition| &definition.definition)
+                else {
+                    return current;
+                };
+                visited.push(named.id.clone());
+                current = inner;
+            }
+            _ => return current,
         }
     }
 }

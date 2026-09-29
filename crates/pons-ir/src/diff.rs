@@ -1,8 +1,8 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use crate::{
-    Body, Direction, Document, ErrorResponse, Field, InlineType, Operation, Presence, TypeDef,
-    TypeKind, TypeRef,
+    AuthScheme, Body, Direction, Doc, Document, ErrorResponse, Field, Info, InlineType, OAuthFlow,
+    Operation, Presence, Response, TypeDef, TypeKind, TypeRef,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -41,6 +41,15 @@ impl Document {
         new.canonicalize();
 
         let mut diff = Diff::default();
+        if old.ext != new.ext {
+            add(
+                &mut diff,
+                ChangeLevel::Warning,
+                "ext",
+                "document metadata changed",
+            );
+        }
+        diff_info(&mut diff, &old.info, &new.info);
         diff_types(&mut diff, &old, &new);
         diff_auth_schemes(&mut diff, &old, &new);
         diff_errors(
@@ -60,6 +69,44 @@ fn add(diff: &mut Diff, level: ChangeLevel, path: impl Into<String>, detail: imp
         path: path.into(),
         detail: detail.into(),
     });
+}
+
+fn diff_info(diff: &mut Diff, old: &Info, new: &Info) {
+    if old.title != new.title {
+        add(diff, ChangeLevel::Info, "info.title", "API title changed");
+    }
+    if old.version != new.version {
+        add(
+            diff,
+            ChangeLevel::NonBreaking,
+            "info.version",
+            "API version changed",
+        );
+    }
+    if old.description != new.description {
+        add(
+            diff,
+            ChangeLevel::Info,
+            "info.description",
+            "API description changed",
+        );
+    }
+    if old.servers != new.servers {
+        add(
+            diff,
+            ChangeLevel::NonBreaking,
+            "info.servers",
+            "API servers changed",
+        );
+    }
+    if old.ext != new.ext {
+        add(
+            diff,
+            ChangeLevel::Warning,
+            "info.ext",
+            "document metadata changed",
+        );
+    }
 }
 
 fn diff_types(diff: &mut Diff, old: &Document, new: &Document) {
@@ -99,22 +146,164 @@ fn diff_auth_schemes(diff: &mut Diff, old: &Document, new: &Document) {
         }
     }
     for (id, scheme) in &new.auth_schemes {
-        match old.auth_schemes.get(id) {
-            Some(previous) if previous != scheme => add(
-                diff,
-                ChangeLevel::Breaking,
-                format!("auth_schemes.{id}"),
-                "authentication scheme changed",
-            ),
-            None => add(
+        let path = format!("auth_schemes.{id}");
+        let Some(previous) = old.auth_schemes.get(id) else {
+            add(
                 diff,
                 ChangeLevel::NonBreaking,
-                format!("auth_schemes.{id}"),
+                &path,
                 "authentication scheme added",
+            );
+            continue;
+        };
+        match (previous, scheme) {
+            (AuthScheme::Bearer { format: old }, AuthScheme::Bearer { format: new }) => {
+                if old != new {
+                    add(
+                        diff,
+                        ChangeLevel::Info,
+                        &path,
+                        "bearer token format documentation changed",
+                    );
+                }
+            }
+            (
+                AuthScheme::ApiKey {
+                    location: old_location,
+                    name: old_name,
+                },
+                AuthScheme::ApiKey { location, name },
+            ) => {
+                if old_location != location {
+                    add(
+                        diff,
+                        ChangeLevel::Breaking,
+                        &path,
+                        "API key location changed",
+                    );
+                }
+                if old_name != name {
+                    add(diff, ChangeLevel::Breaking, &path, "API key name changed");
+                }
+            }
+            (AuthScheme::CookieSession { cookie: old }, AuthScheme::CookieSession { cookie }) => {
+                if old != cookie {
+                    add(
+                        diff,
+                        ChangeLevel::Breaking,
+                        &path,
+                        "session cookie name changed",
+                    );
+                }
+            }
+            (AuthScheme::OAuth2 { flows: old }, AuthScheme::OAuth2 { flows }) => {
+                diff_oauth_flows(diff, &path, old, flows);
+            }
+            (
+                AuthScheme::Custom {
+                    description: old,
+                    ext: old_ext,
+                },
+                AuthScheme::Custom { description, ext },
+            ) => {
+                if old != description {
+                    add(
+                        diff,
+                        ChangeLevel::Info,
+                        &path,
+                        "custom scheme description changed",
+                    );
+                }
+                if old_ext != ext {
+                    add(
+                        diff,
+                        ChangeLevel::Warning,
+                        &path,
+                        "custom scheme metadata changed",
+                    );
+                }
+            }
+            _ => add(
+                diff,
+                ChangeLevel::Breaking,
+                &path,
+                "authentication scheme kind changed",
             ),
-            _ => {}
         }
     }
+}
+
+fn diff_oauth_flows(diff: &mut Diff, path: &str, old: &[OAuthFlow], new: &[OAuthFlow]) {
+    let old: BTreeMap<_, _> = old.iter().map(|flow| (flow.kind, flow)).collect();
+    let new: BTreeMap<_, _> = new.iter().map(|flow| (flow.kind, flow)).collect();
+    for kind in old.keys() {
+        if !new.contains_key(kind) {
+            add(
+                diff,
+                ChangeLevel::Breaking,
+                format!("{path}.flows.{kind:?}"),
+                "OAuth2 flow removed",
+            );
+        }
+    }
+    for (kind, flow) in &new {
+        let flow_path = format!("{path}.flows.{kind:?}");
+        let Some(previous) = old.get(kind) else {
+            add(
+                diff,
+                ChangeLevel::NonBreaking,
+                &flow_path,
+                "OAuth2 flow added",
+            );
+            continue;
+        };
+        if previous.authorization_url != flow.authorization_url {
+            add(
+                diff,
+                ChangeLevel::Breaking,
+                &flow_path,
+                "OAuth2 authorization URL changed",
+            );
+        }
+        if previous.token_url != flow.token_url {
+            add(
+                diff,
+                ChangeLevel::Breaking,
+                &flow_path,
+                "OAuth2 token URL changed",
+            );
+        }
+        if previous.scopes != flow.scopes {
+            add(
+                diff,
+                ChangeLevel::Info,
+                &flow_path,
+                "OAuth2 scope documentation changed",
+            );
+        }
+        if previous.ext != flow.ext {
+            add(
+                diff,
+                ChangeLevel::Warning,
+                &flow_path,
+                "OAuth2 flow metadata changed",
+            );
+        }
+    }
+}
+
+/// a deprecation flip earns a `Warning`.
+fn add_doc_change(diff: &mut Diff, path: &str, old: Option<&Doc>, new: Option<&Doc>, label: &str) {
+    if old == new {
+        return;
+    }
+    let (level, change) =
+        if old.and_then(|doc| doc.deprecated) != new.and_then(|doc| doc.deprecated) {
+            (ChangeLevel::Warning, "deprecation changed")
+        } else {
+            (ChangeLevel::Info, "documentation changed")
+        };
+    add(diff, level, path, format!("{label} {change}"));
 }
 
 fn diff_type(diff: &mut Diff, id: &str, old: &TypeDef, new: &TypeDef) {
@@ -124,6 +313,9 @@ fn diff_type(diff: &mut Diff, id: &str, old: &TypeDef, new: &TypeDef) {
     }
     if old.direction != new.direction {
         add(diff, ChangeLevel::Breaking, &path, "type direction changed");
+    }
+    if old.ext != new.ext {
+        add(diff, ChangeLevel::Warning, &path, "type metadata changed");
     }
     match (&old.definition, &new.definition) {
         (
@@ -202,6 +394,22 @@ fn diff_type(diff: &mut Diff, id: &str, old: &TypeDef, new: &TypeDef) {
                             "enum variant payload changed",
                         );
                     }
+                    if previous.ident != variant.ident {
+                        add(
+                            diff,
+                            ChangeLevel::Breaking,
+                            format!("{path}.variants.{wire}"),
+                            "enum variant identifier changed",
+                        );
+                    }
+                    if previous.ext != variant.ext {
+                        add(
+                            diff,
+                            ChangeLevel::Warning,
+                            format!("{path}.variants.{wire}"),
+                            "enum variant metadata changed",
+                        );
+                    }
                 } else {
                     let level = if new.direction == Direction::Input {
                         ChangeLevel::NonBreaking
@@ -270,13 +478,12 @@ fn diff_fields(diff: &mut Diff, owner: &str, direction: Direction, old: &[Field]
         let output = matches!(direction, Direction::Output | Direction::Both)
             && field.access != Some(crate::Access::WriteOnly);
         if previous.presence != field.presence {
-            let breaking = if input {
-                previous.presence == Presence::Optional && field.presence == Presence::Required
-            } else {
-                output
+            let breaking = (input
+                && previous.presence == Presence::Optional
+                && field.presence == Presence::Required)
+                || (output
                     && previous.presence == Presence::Required
-                    && field.presence == Presence::Optional
-            };
+                    && field.presence == Presence::Optional);
             add(
                 diff,
                 if breaking {
@@ -290,6 +497,7 @@ fn diff_fields(diff: &mut Diff, owner: &str, direction: Direction, old: &[Field]
         }
         if previous.ty != field.ty {
             let widens_input_nullability = input
+                && !output
                 && !is_nullable(&previous.ty)
                 && is_nullable(&field.ty)
                 && inner_type(&previous.ty) == inner_type(&field.ty);
@@ -307,6 +515,21 @@ fn diff_fields(diff: &mut Diff, owner: &str, direction: Direction, old: &[Field]
         if previous.access != field.access {
             add(diff, ChangeLevel::Breaking, &path, "field access changed");
         }
+        if previous.default != field.default {
+            add(
+                diff,
+                if input {
+                    ChangeLevel::Breaking
+                } else {
+                    ChangeLevel::NonBreaking
+                },
+                &path,
+                "field default changed",
+            );
+        }
+        if previous.ext != field.ext {
+            add(diff, ChangeLevel::Warning, &path, "field metadata changed");
+        }
     }
 }
 
@@ -321,591 +544,9 @@ fn inner_type(ty: &TypeRef) -> &TypeRef {
     }
 }
 
-fn diff_operations(diff: &mut Diff, old: &Document, new: &Document) {
-    let old: BTreeMap<_, _> = old
-        .operations
-        .iter()
-        .map(|operation| (&operation.id, operation))
-        .collect();
-    let new: BTreeMap<_, _> = new
-        .operations
-        .iter()
-        .map(|operation| (&operation.id, operation))
-        .collect();
-    for id in old.keys() {
-        if !new.contains_key(id) {
-            add(
-                diff,
-                ChangeLevel::Breaking,
-                operation_path(id),
-                "operation removed",
-            );
-        }
-    }
-    for (id, operation) in new {
-        let path = operation_path(id);
-        let Some(previous) = old.get(id) else {
-            add(diff, ChangeLevel::NonBreaking, path, "operation added");
-            continue;
-        };
-        diff_operation(diff, &path, previous, operation);
-    }
-}
+mod operations;
 
-fn operation_path(id: &[Vec<String>]) -> String {
-    format!(
-        "operations.{}",
-        id.iter()
-            .map(|part| part.join("_"))
-            .collect::<Vec<_>>()
-            .join(".")
-    )
-}
-
-fn diff_operation(diff: &mut Diff, path: &str, old: &Operation, new: &Operation) {
-    if old.method != new.method {
-        add(diff, ChangeLevel::Breaking, path, "HTTP method changed");
-    }
-    if old.semantics.idempotent != new.semantics.idempotent {
-        add(
-            diff,
-            ChangeLevel::Breaking,
-            format!("{path}.semantics"),
-            "operation idempotency changed",
-        );
-    }
-    if route_shape(&old.path) != route_shape(&new.path) {
-        add(diff, ChangeLevel::NonBreaking, path, "route URL changed");
-    }
-    if old.path != new.path {
-        let old_params: Vec<_> = old
-            .path
-            .iter()
-            .filter_map(|segment| match segment {
-                crate::PathSegment::Param { param, ty } => Some((param, ty)),
-                crate::PathSegment::Literal { .. } => None,
-            })
-            .collect();
-        let new_params: Vec<_> = new
-            .path
-            .iter()
-            .filter_map(|segment| match segment {
-                crate::PathSegment::Param { param, ty } => Some((param, ty)),
-                crate::PathSegment::Literal { .. } => None,
-            })
-            .collect();
-        if old_params.len() != new_params.len() {
-            add(
-                diff,
-                ChangeLevel::Breaking,
-                format!("{path}.path"),
-                "path parameter count changed",
-            );
-        }
-        for (index, ((old_name, before), (new_name, after))) in
-            old_params.iter().zip(&new_params).enumerate()
-        {
-            if before != after {
-                add(
-                    diff,
-                    ChangeLevel::Breaking,
-                    format!("{path}.path[{index}]"),
-                    "path parameter type changed",
-                );
-            }
-            if old_name != new_name {
-                add(
-                    diff,
-                    ChangeLevel::Breaking,
-                    format!("{path}.path[{index}]"),
-                    "path parameter name changed",
-                );
-            }
-        }
-    }
-    if old.query != new.query {
-        add(
-            diff,
-            ChangeLevel::Breaking,
-            format!("{path}.query"),
-            "query type changed",
-        );
-    }
-    diff_headers(diff, path, &old.headers, &new.headers);
-    diff_body(diff, path, old.body.as_ref(), new.body.as_ref());
-    if old.responses != new.responses {
-        diff_responses(diff, path, old, new);
-    }
-    diff_errors(diff, path, &old.errors, &new.errors);
-    if old.errors_inherit != new.errors_inherit {
-        add(
-            diff,
-            ChangeLevel::Breaking,
-            format!("{path}.errors"),
-            "inherited errors changed",
-        );
-    }
-    if old.auth != new.auth {
-        add(
-            diff,
-            ChangeLevel::Breaking,
-            format!("{path}.auth"),
-            "authentication requirement changed",
-        );
-    }
-    if old.provides != new.provides {
-        add(
-            diff,
-            ChangeLevel::Breaking,
-            format!("{path}.provides"),
-            "credential provision changed",
-        );
-    }
-    if old.stream != new.stream {
-        add(
-            diff,
-            ChangeLevel::Breaking,
-            format!("{path}.stream"),
-            "stream definition changed",
-        );
-    }
-}
-
-fn route_shape(path: &[crate::PathSegment]) -> Vec<String> {
-    path.iter()
-        .map(|segment| match segment {
-            crate::PathSegment::Literal { lit } => lit.clone(),
-            crate::PathSegment::Param { param, .. } => format!("{{{param}}}"),
-        })
-        .collect()
-}
-
-fn diff_body(diff: &mut Diff, path: &str, old: Option<&Body>, new: Option<&Body>) {
-    let (Some(old), Some(new)) = (old, new) else {
-        if old.is_some() || new.is_some() {
-            add(
-                diff,
-                ChangeLevel::Breaking,
-                format!("{path}.body"),
-                "request body changed",
-            );
-        }
-        return;
-    };
-    if old.ty != new.ty
-        || old.content != new.content
-        || old.media_type != new.media_type
-        || old.ext != new.ext
-    {
-        add(
-            diff,
-            ChangeLevel::Breaking,
-            format!("{path}.body"),
-            "request body changed",
-        );
-    } else if old.required != new.required {
-        add(
-            diff,
-            if old.required {
-                ChangeLevel::NonBreaking
-            } else {
-                ChangeLevel::Breaking
-            },
-            format!("{path}.body"),
-            if old.required {
-                "request body became optional"
-            } else {
-                "request body became required"
-            },
-        );
-    }
-}
-
-fn diff_headers(
-    diff: &mut Diff,
-    path: &str,
-    old: &[crate::HeaderParameter],
-    new: &[crate::HeaderParameter],
-) {
-    let old: BTreeMap<String, _> = old
-        .iter()
-        .map(|header| (header.wire.to_ascii_lowercase(), header))
-        .collect();
-    let new: BTreeMap<String, _> = new
-        .iter()
-        .map(|header| (header.wire.to_ascii_lowercase(), header))
-        .collect();
-    for (key, header) in &old {
-        if !new.contains_key(key) {
-            add(
-                diff,
-                ChangeLevel::Breaking,
-                format!("{path}.headers.{}", header.wire),
-                "request header removed",
-            );
-        }
-    }
-    for (key, header) in &new {
-        let header_path = format!("{path}.headers.{}", header.wire);
-        match old.get(key) {
-            Some(previous) if previous.ty != header.ty => add(
-                diff,
-                ChangeLevel::Breaking,
-                header_path,
-                "request header type changed",
-            ),
-            Some(previous)
-                if previous.presence != header.presence
-                    && previous.presence == Presence::Optional =>
-            {
-                add(
-                    diff,
-                    ChangeLevel::Breaking,
-                    header_path,
-                    "optional request header became required",
-                )
-            }
-            Some(previous) if previous.presence != header.presence => add(
-                diff,
-                ChangeLevel::NonBreaking,
-                header_path,
-                "request header presence changed",
-            ),
-            Some(previous) if previous.ident != header.ident => add(
-                diff,
-                ChangeLevel::Breaking,
-                header_path,
-                "request header identifier changed",
-            ),
-            None if header.presence == Presence::Required => add(
-                diff,
-                ChangeLevel::Breaking,
-                header_path,
-                "required request header added",
-            ),
-            None => add(
-                diff,
-                ChangeLevel::NonBreaking,
-                header_path,
-                "optional request header added",
-            ),
-            _ => {}
-        }
-    }
-}
-
-fn diff_responses(diff: &mut Diff, path: &str, old: &Operation, new: &Operation) {
-    let old: BTreeMap<_, _> = old
-        .responses
-        .iter()
-        .map(|response| (response.status, response))
-        .collect();
-    let new: BTreeMap<_, _> = new
-        .responses
-        .iter()
-        .map(|response| (response.status, response))
-        .collect();
-    for status in old.keys() {
-        if !new.contains_key(status) {
-            add(
-                diff,
-                ChangeLevel::Breaking,
-                format!("{path}.responses.{status}"),
-                "response removed",
-            );
-        }
-    }
-    for (status, response) in new {
-        match old.get(&status) {
-            Some(previous) if !previous.equivalent_ignoring_header_case(response) => add(
-                diff,
-                ChangeLevel::Breaking,
-                format!("{path}.responses.{status}"),
-                "response changed",
-            ),
-            None => add(
-                diff,
-                ChangeLevel::Warning,
-                format!("{path}.responses.{status}"),
-                "response status added",
-            ),
-            _ => {}
-        }
-    }
-}
-
-fn diff_errors(diff: &mut Diff, path: &str, old: &[ErrorResponse], new: &[ErrorResponse]) {
-    let old: BTreeMap<_, _> = old
-        .iter()
-        .map(|error| ((&error.status, &error.name), error))
-        .collect();
-    let new: BTreeMap<_, _> = new
-        .iter()
-        .map(|error| ((&error.status, &error.name), error))
-        .collect();
-    for key in old.keys() {
-        if !new.contains_key(key) {
-            add(
-                diff,
-                ChangeLevel::Breaking,
-                format!("{path}.errors.{}", key.1.join("_")),
-                "error removed",
-            );
-        }
-    }
-    for (key, error) in new {
-        match old.get(&key) {
-            Some(previous) if !previous.equivalent_ignoring_header_case(error) => add(
-                diff,
-                ChangeLevel::Breaking,
-                format!("{path}.errors.{}", key.1.join("_")),
-                "error definition changed",
-            ),
-            None => add(
-                diff,
-                ChangeLevel::Breaking,
-                format!("{path}.errors.{}", key.1.join("_")),
-                "error status added",
-            ),
-            _ => {}
-        }
-    }
-}
+use operations::{diff_errors, diff_operations};
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn fixture() -> serde_json::Value {
-        serde_json::from_str(include_str!("../../../fixtures/login.json")).unwrap()
-    }
-
-    fn level(old: &Document, changed: serde_json::Value, path: &str) -> ChangeLevel {
-        let new: Document = serde_json::from_value(changed).unwrap();
-        old.diff(&new)
-            .changes
-            .into_iter()
-            .find(|change| change.path == path)
-            .unwrap()
-            .level
-    }
-
-    #[test]
-    fn equivalent_orderings_have_no_diff() {
-        let mut old: Document = serde_json::from_value(fixture()).unwrap();
-        let event = old
-            .operations
-            .iter_mut()
-            .find(|operation| operation.stream.is_some())
-            .unwrap();
-        event.auth.alternatives = vec![vec!["session".into()], vec!["tenant".into()]];
-        let mut second_header = event.responses[0].headers[0].clone();
-        second_header.wire = "X-Second".into();
-        event.responses[0].headers.push(second_header);
-        let flow = |kind| crate::OAuthFlow {
-            kind,
-            authorization_url: None,
-            token_url: Some("https://identity.example.test/token".into()),
-            scopes: Default::default(),
-            ext: Default::default(),
-        };
-        old.auth_schemes.insert(
-            "oauth".into(),
-            crate::AuthScheme::OAuth2 {
-                flows: vec![
-                    flow(crate::OAuthFlowKind::Password),
-                    flow(crate::OAuthFlowKind::ClientCredentials),
-                ],
-            },
-        );
-
-        let mut new = old.clone();
-        new.operations.reverse();
-        let event = &mut new.operations[0];
-        event.auth.alternatives.reverse();
-        event.responses[0].headers.reverse();
-        let crate::AuthScheme::OAuth2 { flows } = new.auth_schemes.get_mut("oauth").unwrap() else {
-            unreachable!()
-        };
-        flows.reverse();
-        old.validate().unwrap();
-        new.validate().unwrap();
-
-        assert_eq!(old.diff(&new), Diff::default());
-    }
-
-    #[test]
-    fn classifies_added_fields_and_output_enum_variants() {
-        let old: Document = serde_json::from_value(fixture()).unwrap();
-        let mut changed = fixture();
-        changed["types"]["LoginRequest"]["fields"]
-            .as_array_mut()
-            .unwrap()
-            .push(serde_json::json!({
-                "wire": "remember",
-                "ident": ["remember"],
-                "ty": {"kind": "bool"},
-                "presence": "optional"
-            }));
-        assert_eq!(
-            level(&old, changed, "types.LoginRequest.fields.remember"),
-            ChangeLevel::NonBreaking
-        );
-
-        let mut changed = fixture();
-        changed["types"]["LoginError"]["variants"]
-            .as_array_mut()
-            .unwrap()
-            .push(serde_json::json!({
-                "wire": "expired",
-                "ident": ["expired"],
-                "payload": {"kind": "unit"}
-            }));
-        let new: Document = serde_json::from_value(changed).unwrap();
-        let diff = old.diff(&new);
-        assert!(diff.has_breaking_changes());
-        assert_eq!(
-            diff.changes
-                .iter()
-                .find(|change| change.path == "types.LoginError.variants.expired")
-                .unwrap()
-                .level,
-            ChangeLevel::Breaking
-        );
-    }
-
-    #[test]
-    fn object_openness_changes_are_breaking() {
-        let old: Document = serde_json::from_value(fixture()).unwrap();
-        let mut changed = fixture();
-        changed["types"]["User"]["openness"] = serde_json::json!("reject");
-        assert_eq!(level(&old, changed, "types.User"), ChangeLevel::Breaking);
-    }
-
-    #[test]
-    fn type_name_changes_are_breaking() {
-        let old: Document = serde_json::from_value(fixture()).unwrap();
-        let mut new = old.clone();
-        new.types.get_mut("User").unwrap().name = vec!["account".into()];
-        let change = old
-            .diff(&new)
-            .changes
-            .into_iter()
-            .find(|change| change.path == "types.User")
-            .unwrap();
-        assert_eq!(change.level, ChangeLevel::Breaking);
-        assert_eq!(change.detail, "type name changed");
-    }
-
-    #[test]
-    fn idempotency_changes_are_breaking() {
-        let old: Document = serde_json::from_value(fixture()).unwrap();
-        let mut new = old.clone();
-        new.operations[0].semantics.idempotent = true;
-        let change = old
-            .diff(&new)
-            .changes
-            .into_iter()
-            .find(|change| change.path == "operations.auth.login.semantics")
-            .unwrap();
-        assert_eq!(change.level, ChangeLevel::Breaking);
-        assert_eq!(change.detail, "operation idempotency changed");
-    }
-
-    #[test]
-    fn route_changes_with_stable_operation_identity_are_nonbreaking() {
-        let old: Document = serde_json::from_value(fixture()).unwrap();
-        let mut changed = fixture();
-        changed["operations"][0]["path"][1]["lit"] = "sign-in".into();
-        assert_eq!(
-            level(&old, changed, "operations.auth.login"),
-            ChangeLevel::NonBreaking
-        );
-    }
-
-    #[test]
-    fn path_parameter_type_changes_are_breaking() {
-        let old: Document = serde_json::from_value(fixture()).unwrap();
-        let mut changed = fixture();
-        changed["operations"][1]["path"][1]["ty"] =
-            serde_json::json!({"kind": "int", "bits": 32, "signed": true, "wire": "number"});
-        let new: Document = serde_json::from_value(changed).unwrap();
-        let diff = old.diff(&new);
-        assert!(diff.changes.iter().any(|change| {
-            change.path == "operations.events.watch.path[0]"
-                && change.level == ChangeLevel::Breaking
-        }));
-        assert!(!diff.changes.iter().any(|change| {
-            change.path == "operations.events.watch" && change.detail == "route URL changed"
-        }));
-    }
-
-    #[test]
-    fn new_errors_are_breaking() {
-        let old: Document = serde_json::from_value(fixture()).unwrap();
-        let mut operation = old.clone();
-        let mut operation_error = operation.operations[0].errors[0].clone();
-        operation_error.status = crate::ErrorStatus::Exact(418);
-        operation_error.name = vec!["teapot".into()];
-        operation.operations[0].errors.push(operation_error);
-        let diff = old.diff(&operation);
-        assert!(diff.has_breaking_changes());
-        assert!(diff.changes.iter().any(|change| {
-            change.path == "operations.auth.login.errors.teapot"
-                && change.level == ChangeLevel::Breaking
-        }));
-
-        let mut common = old.clone();
-        let mut common_error = common.operations[0].errors[0].clone();
-        common_error.status = crate::ErrorStatus::Exact(503);
-        common_error.name = vec!["unavailable".into()];
-        common.common_errors.push(common_error);
-        let diff = old.diff(&common);
-        assert!(diff.has_breaking_changes());
-        assert!(diff.changes.iter().any(|change| {
-            change.path == "common_errors.errors.unavailable"
-                && change.level == ChangeLevel::Breaking
-        }));
-    }
-
-    #[test]
-    fn request_body_requiredness_is_classified() {
-        let old: Document = serde_json::from_value(fixture()).unwrap();
-        let mut optional = old.clone();
-        optional.operations[0].body.as_mut().unwrap().required = false;
-        let change = old
-            .diff(&optional)
-            .changes
-            .into_iter()
-            .find(|change| change.path == "operations.auth.login.body")
-            .unwrap();
-        assert_eq!(change.level, ChangeLevel::NonBreaking);
-        assert_eq!(change.detail, "request body became optional");
-
-        let mut required = optional.clone();
-        required.operations[0].body.as_mut().unwrap().required = true;
-        assert_eq!(
-            optional
-                .diff(&required)
-                .changes
-                .into_iter()
-                .find(|change| change.path == "operations.auth.login.body")
-                .unwrap()
-                .level,
-            ChangeLevel::Breaking
-        );
-
-        let mut media = old.clone();
-        media.operations[0].body.as_mut().unwrap().media_type =
-            Some("application/vnd.acme+json".into());
-        assert_eq!(
-            old.diff(&media)
-                .changes
-                .into_iter()
-                .find(|change| change.path == "operations.auth.login.body")
-                .unwrap()
-                .level,
-            ChangeLevel::Breaking
-        );
-    }
-}
+mod tests;

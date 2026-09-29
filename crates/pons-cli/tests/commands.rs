@@ -18,6 +18,26 @@ fn wide_number_input(directory: &Path) -> std::path::PathBuf {
     path
 }
 
+fn lossy_openapi_input(directory: &Path) -> std::path::PathBuf {
+    let path = directory.join("api.json");
+    let mut contract: Value = serde_json::from_str(FIXTURE).unwrap();
+    contract["types"]["LoginError"]["variants"][1]["payload"]["fields"][0]["ty"]["wire"] =
+        serde_json::json!("number");
+    contract["types"]["LoginError"]["variants"][1]["payload"]["fields"][0]["ty"]["bits"] =
+        serde_json::json!(64);
+    fs::write(&path, serde_json::to_vec(&contract).unwrap()).unwrap();
+    path
+}
+
+fn custom_auth_input(directory: &Path) -> std::path::PathBuf {
+    let path = directory.join("custom-api.json");
+    let mut contract: Value = serde_json::from_str(FIXTURE).unwrap();
+    contract["auth_schemes"]["tenant"] =
+        serde_json::json!({ "kind": "custom", "description": "tenant handshake" });
+    fs::write(&path, serde_json::to_vec(&contract).unwrap()).unwrap();
+    path
+}
+
 #[test]
 fn check_accepts_a_valid_contract() {
     let output = pons()
@@ -166,6 +186,57 @@ fn emit_writes_a_typed_typescript_client() {
 }
 
 #[test]
+fn emit_writes_requested_coverage() {
+    let directory = tempfile::tempdir().unwrap();
+    let output_dir = directory.path().join("generated");
+    let input_path = directory.path().join("api.json");
+    fs::write(&input_path, FIXTURE).unwrap();
+    let output = pons()
+        .args(["emit", "--target", "ts"])
+        .arg(&input_path)
+        .arg(&output_dir)
+        .args(["--coverage", "coverage.json"])
+        .output()
+        .unwrap();
+
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let coverage: Value =
+        serde_json::from_str(&fs::read_to_string(output_dir.join("coverage.json")).unwrap())
+            .unwrap();
+    assert!(
+        coverage["exact"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|subject| subject == "operations.auth.login")
+    );
+    assert!(coverage["opaque"].as_array().unwrap().is_empty());
+}
+
+#[test]
+fn emit_rejects_coverage_paths_that_alias_output_files() {
+    let directory = tempfile::tempdir().unwrap();
+    let output_dir = directory.path().join("generated");
+    let input_path = directory.path().join("api.json");
+    fs::write(&input_path, FIXTURE).unwrap();
+    let output = pons()
+        .args(["emit", "--target", "openapi"])
+        .arg(&input_path)
+        .arg(&output_dir)
+        .args(["--coverage", "openapi.json/coverage.json"])
+        .output()
+        .unwrap();
+
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("emitter output path conflict"));
+    assert!(!output_dir.exists());
+}
+
+#[test]
 fn emit_selects_the_throwing_typescript_strategy() {
     let directory = tempfile::tempdir().unwrap();
     let output_dir = directory.path().join("generated");
@@ -187,6 +258,37 @@ fn emit_selects_the_throwing_typescript_strategy() {
     let client = fs::read_to_string(output_dir.join("client.ts")).unwrap();
     assert!(client.contains("requestOrThrow(request<"));
     assert!(!client.contains("from \"neverthrow\""));
+}
+
+#[test]
+fn emit_rejects_the_error_strategy_for_non_typescript_targets() {
+    let directory = tempfile::tempdir().unwrap();
+    let input_path = directory.path().join("api.json");
+    fs::write(&input_path, FIXTURE).unwrap();
+
+    for target in ["openapi", "fixture"] {
+        for strategy in ["neverthrow", "throw"] {
+            let output_dir = directory
+                .path()
+                .join(format!("generated-{target}-{strategy}"));
+            let output = pons()
+                .args(["emit", "--target", target])
+                .arg(&input_path)
+                .arg(&output_dir)
+                .args(["--errors", strategy])
+                .output()
+                .unwrap();
+
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            assert!(!output.status.success(), "{target} --errors {strategy}");
+            assert_eq!(
+                stderr.trim(),
+                format!("pons: --errors is only supported by the TypeScript target, not {target}"),
+                "{target} --errors {strategy}"
+            );
+            assert!(!output_dir.exists(), "{target} --errors {strategy}");
+        }
+    }
 }
 
 #[test]
@@ -234,6 +336,28 @@ fn emit_lossy_writes_wide_typescript_numbers_with_a_warning() {
     assert!(output_dir.join("client.ts").exists());
 }
 
+#[test]
+fn emit_lossy_openapi_reports_non_exact_coverage() {
+    let directory = tempfile::tempdir().unwrap();
+    let input = lossy_openapi_input(directory.path());
+    let output_dir = directory.path().join("generated");
+    let output = pons()
+        .args(["emit", "--target", "openapi"])
+        .arg(&input)
+        .arg(&output_dir)
+        .arg("--lossy")
+        .output()
+        .unwrap();
+
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(String::from_utf8_lossy(&output.stderr).contains("lossy coverage"));
+    assert!(output_dir.join("openapi.json").exists());
+}
+
 #[cfg(target_os = "linux")]
 #[test]
 fn emit_runs_an_external_target_and_writes_its_files() {
@@ -247,7 +371,7 @@ fn emit_runs_an_external_target_and_writes_its_files() {
         &plugin,
         r##"#!/bin/sh
 if [ "$1" = describe ]; then
-  printf '%s' '{"name":"fixture","version":"1.0.0","protocol":{"min":"1.0","max":"1.0"},"ir_version":{"min":"0.2","max":"0.2"},"capabilities":{"streaming":["sse"],"enum_reprs":["string","external","internal","adjacent","untagged"],"direction_split":true,"provides":true,"flattened":true,"object_openness":["reject","preserve_typed","preserve_opaque"]}}'
+  printf '%s' '{"name":"fixture","version":"1.0.0","protocol":{"min":"2.0","max":"2.0"},"ir_version":{"min":"0.2","max":"0.2"},"capabilities":{"streaming":["sse"],"enum_reprs":["string","external","internal","adjacent","untagged"],"direction_split":true,"provides":true,"flattened":true,"object_openness":["reject","preserve_typed","preserve_opaque"]}}'
 elif [ "$1" = emit ]; then
   i=0
   while [ "$i" -lt 2000 ]; do
@@ -258,7 +382,7 @@ elif [ "$1" = emit ]; then
   printf '%s' "$request" > "$PONS_REQUEST"
   printf '%s\n' 'plugin log' >&2
   case "$request" in
-    *'"target":"fixture"'*) printf '%s' '{"protocol":1,"files":[{"path":"nested/client.ts","content":"generated"}]}' ;;
+    *'"target":"fixture"'*) printf '%s' '{"protocol":2,"files":[{"path":"nested/client.ts","content":"generated"}],"coverage":{"exact":["types.EventQuery","types.LoginError","types.LoginRequest","types.User","operations.auth.login","operations.events.watch"],"opaque":[],"lossy":[],"unsupported":[]}}' ;;
     *) exit 3 ;;
   esac
 else
@@ -353,6 +477,50 @@ fi
     );
     assert!(
         String::from_utf8_lossy(&lossy_output.stderr).contains("lossless wide integer support")
+    );
+    assert!(lossy_request.exists());
+    assert!(lossy_output_dir.join("nested/client.ts").exists());
+
+    let custom_input = custom_auth_input(directory.path());
+    let strict_output_dir = directory.path().join("custom-strict-generated");
+    let strict_request = directory.path().join("custom-strict-request.json");
+    let strict_output = Command::new("timeout")
+        .args(["10s", env!("CARGO_BIN_EXE_pons")])
+        .args(["emit", "--target", "fixture"])
+        .arg(&custom_input)
+        .arg(&strict_output_dir)
+        .env("PATH", &path)
+        .env("PONS_REQUEST", &strict_request)
+        .output()
+        .unwrap();
+    assert!(!strict_output.status.success());
+    assert!(
+        String::from_utf8_lossy(&strict_output.stderr)
+            .contains("custom authentication scheme support")
+    );
+    assert!(!strict_request.exists());
+    assert!(!strict_output_dir.exists());
+
+    let lossy_output_dir = directory.path().join("custom-lossy-generated");
+    let lossy_request = directory.path().join("custom-lossy-request.json");
+    let lossy_output = Command::new("timeout")
+        .args(["10s", env!("CARGO_BIN_EXE_pons")])
+        .args(["emit", "--target", "fixture"])
+        .arg(&custom_input)
+        .arg(&lossy_output_dir)
+        .arg("--lossy")
+        .env("PATH", &path)
+        .env("PONS_REQUEST", &lossy_request)
+        .output()
+        .unwrap();
+    assert!(
+        lossy_output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&lossy_output.stderr)
+    );
+    assert!(
+        String::from_utf8_lossy(&lossy_output.stderr)
+            .contains("custom authentication scheme support")
     );
     assert!(lossy_request.exists());
     assert!(lossy_output_dir.join("nested/client.ts").exists());

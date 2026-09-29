@@ -8,6 +8,23 @@ use schemars::{JsonSchema, Schema, SchemaGenerator};
 
 use crate::types::{Diagnostic, Doc, Name, Presence, TypeRef};
 
+pub fn operation_path(id: &[Name]) -> String {
+    id.iter()
+        .map(|segment| {
+            segment
+                .iter()
+                .map(|name| {
+                    name.replace('%', "%25")
+                        .replace('.', "%2E")
+                        .replace('_', "%5F")
+                })
+                .collect::<Vec<_>>()
+                .join("_")
+        })
+        .collect::<Vec<_>>()
+        .join(".")
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct Operation {
@@ -602,20 +619,40 @@ pub enum StreamKind {
 }
 
 impl StreamKind {
-    pub(crate) fn validate(&self) -> Result<(), String> {
-        let Self::Sse { events } = self else {
-            return Ok(());
-        };
-        let mut names = BTreeSet::new();
-        for event in events {
-            if event.event.is_empty() {
-                return Err("SSE event name cannot be empty".into());
-            }
-            if !names.insert(event.event.as_str()) {
-                return Err(format!("duplicate SSE event {}", event.event));
-            }
+    pub fn media_type(&self) -> Option<&str> {
+        match self {
+            Self::Sse { .. } => Some("text/event-stream"),
+            Self::Ndjson { .. } => Some("application/x-ndjson"),
+            Self::Bytes { content_type } => Some(content_type),
+            Self::Websocket { .. } => None,
         }
-        Ok(())
+    }
+
+    pub(crate) fn validate(&self) -> Result<(), String> {
+        match self {
+            Self::Sse { events } => {
+                let mut names = BTreeSet::new();
+                for event in events {
+                    if event.event.is_empty() {
+                        return Err("SSE event name cannot be empty".into());
+                    }
+                    if let Some(character) = find_line_separator(&event.event) {
+                        return Err(format!(
+                            "SSE event name {:?} contains the line separator {character:?}",
+                            event.event
+                        ));
+                    }
+                    if !names.insert(event.event.as_str()) {
+                        return Err(format!("duplicate SSE event {}", event.event));
+                    }
+                }
+                Ok(())
+            }
+            Self::Bytes { content_type } if !crate::is_valid_media_type(content_type) => {
+                Err(format!("invalid byte stream content type {content_type:?}"))
+            }
+            _ => Ok(()),
+        }
     }
 
     pub(crate) fn visit_refs(&self, visit: &mut impl FnMut(&TypeRef)) {
@@ -642,6 +679,11 @@ impl StreamKind {
 pub struct StreamMessage {
     pub event: String,
     pub data: TypeRef,
+}
+
+fn find_line_separator(name: &str) -> Option<char> {
+    name.chars()
+        .find(|character| matches!(character, '\n' | '\r'))
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]

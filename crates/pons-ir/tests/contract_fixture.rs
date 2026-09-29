@@ -1,7 +1,7 @@
 use pons_ir::{
-    AuthScheme, CredentialLocator, Document, EnumRepr, ErrorStatus, InlineType, Method, OAuthFlow,
-    OAuthFlowKind, Presence, ResponseHeader, ResponseStatus, StreamKind, TypeKind, TypeRef,
-    VariantPayload,
+    AuthScheme, ContentKind, CredentialLocator, Diagnostic, DiagnosticSeverity, Document, EnumRepr,
+    ErrorStatus, InlineType, Method, OAuthFlow, OAuthFlowKind, Presence, ResponseHeader,
+    ResponseStatus, StreamKind, TypeKind, TypeRef, VariantPayload,
 };
 use std::collections::BTreeMap;
 
@@ -15,6 +15,85 @@ fn consumer_can_load_validate_and_canonicalize_the_contract_fixture() {
     let decoded: Document = serde_json::from_str(&canonical).unwrap();
     decoded.validate().unwrap();
     assert_eq!(document, decoded);
+}
+
+#[test]
+fn validation_rejects_empty_auth_alternatives() {
+    let mut document: Document =
+        serde_json::from_str(include_str!("../../../fixtures/login.json")).unwrap();
+    document.operations[0].auth.alternatives = vec![vec![]];
+    let errors = document.validate().unwrap_err();
+    assert!(errors.iter().any(|error| {
+        error
+            .to_string()
+            .contains("auth alternative cannot be empty")
+    }));
+}
+
+#[test]
+fn field_error_diagnostics_block_validation() {
+    let mut document: Document =
+        serde_json::from_str(include_str!("../../../fixtures/login.json")).unwrap();
+    let user = document.types.get_mut("User").unwrap();
+    let TypeKind::Struct { fields, .. } = &mut user.definition else {
+        unreachable!()
+    };
+    fields[0].diagnostics.push(Diagnostic {
+        severity: DiagnosticSeverity::Error,
+        code: "FIELD_ERROR".into(),
+        message: "field is blocked".into(),
+        origin: None,
+        ext: BTreeMap::new(),
+    });
+
+    assert!(
+        document
+            .validate()
+            .unwrap_err()
+            .iter()
+            .any(|error| error.to_string().contains("FIELD_ERROR"))
+    );
+}
+
+#[test]
+fn variant_error_diagnostics_block_validation() {
+    let mut document: Document =
+        serde_json::from_str(include_str!("../../../fixtures/login.json")).unwrap();
+    let definition = document.types.get_mut("LoginError").unwrap();
+    let TypeKind::Enum { variants, .. } = &mut definition.definition else {
+        unreachable!()
+    };
+    variants[0].diagnostics.push(Diagnostic {
+        severity: DiagnosticSeverity::Error,
+        code: "VARIANT_ERROR".into(),
+        message: "variant is blocked".into(),
+        origin: None,
+        ext: BTreeMap::new(),
+    });
+
+    let errors = document
+        .validate()
+        .unwrap_err()
+        .iter()
+        .map(ToString::to_string)
+        .collect::<Vec<_>>();
+    assert!(
+        errors.iter().any(|error| error.contains("VARIANT_ERROR")),
+        "{errors:?}"
+    );
+    assert!(
+        errors
+            .iter()
+            .any(|error| error.contains("type LoginError.variants.invalid diagnostics"))
+    );
+
+    let TypeKind::Enum { variants, .. } =
+        &mut document.types.get_mut("LoginError").unwrap().definition
+    else {
+        unreachable!()
+    };
+    variants[0].diagnostics[0].severity = DiagnosticSeverity::Warning;
+    document.validate().unwrap();
 }
 
 #[test]
@@ -153,6 +232,57 @@ fn validation_rejects_ambiguous_sse_events() {
 }
 
 #[test]
+fn validation_rejects_sse_event_names_containing_crlf() {
+    let base: Document =
+        serde_json::from_str(include_str!("../../../fixtures/login.json")).unwrap();
+    for separator in ['\n', '\r'] {
+        for name in [
+            format!("user{separator}admin"),
+            format!("{separator}user"),
+            format!("user{separator}"),
+        ] {
+            let mut document = base.clone();
+            let operation = document
+                .operations
+                .iter_mut()
+                .find(|operation| operation.stream.is_some())
+                .unwrap();
+            let Some(StreamKind::Sse { events }) =
+                operation.stream.as_mut().map(|stream| &mut stream.kind)
+            else {
+                panic!()
+            };
+            events[0].event = name.clone();
+            let reported = document.validate().unwrap_err();
+            assert!(
+                reported
+                    .iter()
+                    .any(|error| error.to_string().contains("line separator")),
+                "expected {name:?} to be rejected, got {reported:?}"
+            );
+        }
+    }
+    for separator in ['\u{85}', '\u{2028}', '\u{2029}'] {
+        let mut document = base.clone();
+        let operation = document
+            .operations
+            .iter_mut()
+            .find(|operation| operation.stream.is_some())
+            .unwrap();
+        let Some(StreamKind::Sse { events }) =
+            operation.stream.as_mut().map(|stream| &mut stream.kind)
+        else {
+            panic!()
+        };
+        events[0].event = format!("user{separator}admin");
+        assert!(
+            document.validate().is_ok(),
+            "expected {separator:?} to be accepted"
+        );
+    }
+}
+
+#[test]
 fn validation_rejects_bodies_on_bodyless_http_responses() {
     let base: Document =
         serde_json::from_str(include_str!("../../../fixtures/login.json")).unwrap();
@@ -167,6 +297,22 @@ fn validation_rejects_bodies_on_bodyless_http_responses() {
                 .any(|error| error.to_string().contains("cannot carry a body"))
         );
     }
+
+    let mut document = base.clone();
+    document.operations[0].responses[0].status = ResponseStatus::Class(1);
+    assert!(
+        document
+            .validate()
+            .unwrap_err()
+            .iter()
+            .any(|error| error.to_string().contains("cannot carry a body"))
+    );
+
+    let mut document = base.clone();
+    document.operations[0].responses[0].status = ResponseStatus::Class(1);
+    document.operations[0].responses[0].content = ContentKind::Empty;
+    document.operations[0].responses[0].body = None;
+    document.validate().unwrap();
 
     let mut document = base.clone();
     document.operations[1].responses[0].status = ResponseStatus::Exact(204);
@@ -568,6 +714,16 @@ fn validation_rejects_overlapping_response_error_status_dispatch() {
     document = base.clone();
     document.operations[0].responses[0].status = ResponseStatus::Unknown;
     document.operations[0].errors[0].status = ErrorStatus::Default;
+    document.validate().unwrap();
+
+    document = base.clone();
+    document.operations[0].responses[0].status = ResponseStatus::Default;
+    document.operations[0].errors[0].status = ErrorStatus::Default;
+    assert!(has_collision(&document));
+
+    document = base.clone();
+    document.operations[0].responses[0].status = ResponseStatus::Default;
+    document.operations[0].errors[0].status = ErrorStatus::Class(5);
     document.validate().unwrap();
 
     let mut disjoint = base;

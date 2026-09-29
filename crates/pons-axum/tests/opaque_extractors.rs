@@ -2,7 +2,7 @@ use pons_axum::Router;
 use pons_axum::extract::{Json, RawForm, RawPathParams, RawQuery, Request};
 use pons_axum::routing::{get, post};
 use pons_core::Schema;
-use pons_ir::{ContentKind, Info, InlineType, PathSegment, TypeRef};
+use pons_ir::{ContentKind, Info, InlineType, OpaqueWire, PathSegment, TypeRef};
 use serde::Serialize;
 use std::collections::BTreeMap;
 
@@ -69,7 +69,10 @@ fn raw_extractors_report_opaque_contract_shapes() {
     assert_eq!(form.body.as_ref().unwrap().content, ContentKind::Form);
     assert_eq!(
         form.body.as_ref().unwrap().ty,
-        TypeRef::Inline(InlineType::Any)
+        TypeRef::Inline(InlineType::Opaque {
+            codec: "axum.form".into(),
+            wire: OpaqueWire::Unknown,
+        })
     );
     assert!(form.diagnostics.iter().any(|diagnostic| {
         diagnostic.code == "PONS-W101" && diagnostic.message.contains("raw form fields")

@@ -1,6 +1,7 @@
 use pons_core::{Schema, TypeCx};
 use pons_ir::{
-    Direction, Document, EnumRepr, IR_VERSION, Info, InlineType, TypeKind, TypeRef, VariantPayload,
+    DiagnosticSeverity, Direction, Document, EnumRepr, IR_VERSION, Info, InlineType, OpaqueWire,
+    TypeKind, TypeRef, VariantPayload,
 };
 use std::collections::BTreeMap;
 
@@ -12,9 +13,9 @@ struct ClosedRequest {
 }
 
 #[derive(pons_core::Schema)]
-/// Request payload for an account login.
+#[doc = "Request payload for an account login."]
 struct LoginRequest {
-    /// Account email address.
+    #[doc = "Account email address."]
     email: String,
     nickname: Option<String>,
 }
@@ -60,8 +61,123 @@ struct CustomEncoding {
 }
 
 #[derive(pons_core::Schema)]
+#[allow(dead_code)]
+struct NewtypeCustomEncoding(#[serde(with = "custom_wire")] String);
+
+#[derive(pons_core::Schema)]
+#[serde(transparent)]
+#[allow(dead_code)]
+struct TransparentCustomEncoding(#[serde(with = "custom_wire")] String);
+
+#[derive(pons_core::Schema)]
+#[allow(dead_code)]
+struct TupleCustomEncoding(#[serde(with = "custom_wire")] String, u64);
+
+#[derive(pons_core::Schema)]
+#[allow(dead_code)]
+enum CustomEnumEncoding {
+    Newtype(#[serde(with = "custom_wire")] String),
+    Tuple(#[serde(with = "custom_wire")] String, u64),
+    Struct {
+        #[serde(with = "custom_wire")]
+        value: String,
+    },
+}
+
+#[derive(pons_core::Schema)]
+#[allow(dead_code)]
+enum FlattenedCustomEnumEncoding {
+    Struct {
+        #[serde(flatten, with = "custom_wire")]
+        value: String,
+    },
+}
+
+#[derive(pons_core::Schema)]
+#[allow(dead_code)]
+enum FlattenedEnumPayload {
+    Struct {
+        id: u64,
+        #[serde(flatten)]
+        audit: AuditFields,
+    },
+}
+
+#[derive(pons_core::Schema)]
+#[allow(dead_code)]
+enum FlattenedMapEnumPayload {
+    Struct {
+        id: u64,
+        #[serde(flatten)]
+        extra: BTreeMap<String, String>,
+    },
+}
+
+#[derive(pons_core::Schema)]
+#[allow(dead_code)]
+struct AuditFieldsWithMap {
+    created_by: String,
+    #[serde(flatten)]
+    extra: BTreeMap<String, String>,
+}
+
+#[derive(pons_core::Schema)]
+#[allow(dead_code)]
+enum NestedFlattenedEnumPayload {
+    Struct {
+        id: u64,
+        #[serde(flatten)]
+        audit: AuditFieldsWithMap,
+    },
+}
+
+#[derive(pons_core::Schema)]
+#[allow(dead_code)]
+struct FlattenedCustomEncoding {
+    #[serde(flatten, with = "custom_wire")]
+    value: String,
+}
+
+#[derive(pons_core::Schema)]
+#[serde(deny_unknown_fields)]
+#[allow(dead_code)]
+struct ClosedFlattenedCustomEncoding {
+    id: u64,
+    #[serde(flatten, with = "custom_wire")]
+    value: String,
+}
+
+#[derive(pons_core::Schema)]
 #[serde(from = "String", into = "u64")]
 struct Converted(u64);
+
+#[derive(pons_core::Schema)]
+#[serde(default)]
+#[allow(dead_code)]
+struct ContainerDefaults {
+    value: String,
+    count: u8,
+    notes: Option<String>,
+}
+
+#[derive(pons_core::Schema)]
+#[allow(dead_code)]
+struct OneSidedCodecs {
+    #[serde(serialize_with = "encode_value")]
+    encoded: Vec<u8>,
+    #[serde(deserialize_with = "decode_value")]
+    decoded: Vec<u8>,
+    #[serde(with = "custom_wire")]
+    mirrored: String,
+}
+
+#[derive(pons_core::Schema)]
+#[allow(dead_code)]
+struct OneSidedCodecFlatten {
+    id: u64,
+    #[serde(flatten, serialize_with = "encode_value")]
+    audit: AuditFields,
+}
 
 #[derive(pons_core::Schema)]
 struct AuditFields {
@@ -76,9 +192,24 @@ struct FlattenedStruct {
 }
 
 #[derive(pons_core::Schema)]
+#[allow(dead_code)]
+struct NullableFlatten {
+    #[serde(flatten)]
+    inner: Option<AuditFields>,
+}
+
+#[derive(pons_core::Schema)]
 struct FlattenedMap {
     #[serde(flatten)]
     attributes: std::collections::HashMap<String, String>,
+}
+
+#[derive(pons_core::Schema)]
+#[allow(dead_code)]
+struct FlattenedNestedMapStruct {
+    id: u64,
+    #[serde(flatten)]
+    audit: AuditFieldsWithMap,
 }
 
 #[derive(pons_core::Schema)]
@@ -109,6 +240,28 @@ enum StatusError {
     Client,
     #[pons(status = "default")]
     Fallback,
+}
+
+fn document(
+    types: BTreeMap<String, pons_ir::TypeDef>,
+    diagnostics: Vec<pons_ir::Diagnostic>,
+) -> Document {
+    Document {
+        ir_version: IR_VERSION.to_owned(),
+        info: Info {
+            title: "Schema test".into(),
+            version: "1".into(),
+            description: None,
+            servers: Vec::new(),
+            ext: BTreeMap::new(),
+        },
+        types,
+        auth_schemes: BTreeMap::new(),
+        common_errors: Vec::new(),
+        operations: Vec::new(),
+        ext: BTreeMap::new(),
+        diagnostics,
+    }
 }
 
 #[test]
@@ -252,7 +405,7 @@ fn applies_serde_field_renames_defaults_and_direction_skips() {
 }
 
 #[test]
-fn custom_serde_functions_produce_a_diagnostic_and_any_type() {
+fn custom_serde_functions_produce_a_diagnostic_and_opaque_type() {
     let mut cx = TypeCx::new();
     let reference = CustomEncoding::schema(&mut cx, Direction::Output);
     let TypeRef::Named(named) = reference else {
@@ -261,8 +414,282 @@ fn custom_serde_functions_produce_a_diagnostic_and_any_type() {
     let TypeKind::Struct { fields, .. } = &cx.definitions()[&named.id].definition else {
         panic!()
     };
-    assert!(matches!(fields[0].ty, TypeRef::Inline(InlineType::Any)));
+    let TypeRef::Inline(InlineType::Opaque { codec, wire }) = &fields[0].ty else {
+        panic!()
+    };
+    assert!(codec.contains("custom_wire"));
+    assert_eq!(*wire, OpaqueWire::Unknown);
     assert_eq!(cx.diagnostics()[0].code, "PONS-W101");
+}
+
+#[test]
+fn custom_serde_handlers_keep_composite_shapes_opaque() {
+    let mut cx = TypeCx::new();
+    let newtype = NewtypeCustomEncoding::schema(&mut cx, Direction::Output);
+    let transparent = TransparentCustomEncoding::schema(&mut cx, Direction::Output);
+    let tuple = TupleCustomEncoding::schema(&mut cx, Direction::Output);
+    let enumeration = CustomEnumEncoding::schema(&mut cx, Direction::Output);
+
+    let TypeRef::Named(newtype) = newtype else {
+        panic!()
+    };
+    let TypeRef::Named(transparent) = transparent else {
+        panic!()
+    };
+    let TypeRef::Named(tuple) = tuple else {
+        panic!()
+    };
+    let TypeRef::Named(enumeration) = enumeration else {
+        panic!()
+    };
+    let TypeKind::Newtype { inner: newtype } = &cx.definitions()[&newtype.id].definition else {
+        panic!()
+    };
+    let TypeKind::Newtype { inner: transparent } = &cx.definitions()[&transparent.id].definition
+    else {
+        panic!()
+    };
+    let TypeKind::Newtype { inner: tuple } = &cx.definitions()[&tuple.id].definition else {
+        panic!()
+    };
+    let TypeKind::Enum { variants, .. } = &cx.definitions()[&enumeration.id].definition else {
+        panic!()
+    };
+
+    assert!(matches!(
+        newtype,
+        TypeRef::Inline(InlineType::Opaque { .. })
+    ));
+    assert!(matches!(
+        transparent,
+        TypeRef::Inline(InlineType::Opaque { .. })
+    ));
+    let TypeRef::Inline(InlineType::Tuple { items }) = tuple else {
+        panic!()
+    };
+    assert!(matches!(
+        items[0],
+        TypeRef::Inline(InlineType::Opaque { .. })
+    ));
+    let VariantPayload::Newtype { ty } = &variants[0].payload else {
+        panic!()
+    };
+    assert!(matches!(ty, TypeRef::Inline(InlineType::Opaque { .. })));
+    let VariantPayload::Tuple { items } = &variants[1].payload else {
+        panic!()
+    };
+    assert!(matches!(
+        items[0],
+        TypeRef::Inline(InlineType::Opaque { .. })
+    ));
+    let VariantPayload::Struct { fields } = &variants[2].payload else {
+        panic!()
+    };
+    assert!(matches!(
+        fields[0].ty,
+        TypeRef::Inline(InlineType::Opaque { .. })
+    ));
+
+    let (types, diagnostics) = cx.into_parts();
+    let document = document(types, diagnostics);
+    assert!(document.validate().is_ok());
+    assert!(document.has_opaque());
+}
+
+#[test]
+fn flattened_custom_enum_payload_fails_validation_instead_of_naming_a_field() {
+    let mut cx = TypeCx::new();
+    let reference = FlattenedCustomEnumEncoding::schema(&mut cx, Direction::Output);
+    let TypeRef::Named(named) = reference else {
+        panic!()
+    };
+    let TypeKind::Enum { variants, .. } = &cx.definitions()[&named.id].definition else {
+        panic!()
+    };
+    let VariantPayload::Struct { fields } = &variants[0].payload else {
+        panic!()
+    };
+    assert_eq!(fields.len(), 1);
+    assert!(matches!(
+        fields[0].ty,
+        TypeRef::Inline(InlineType::Opaque { .. })
+    ));
+    let error = &fields[0].diagnostics[0];
+    assert_eq!(error.severity, DiagnosticSeverity::Error);
+    assert_eq!(error.code, "PONS-E101");
+    assert!(error.message.contains("flatten"));
+
+    let (types, diagnostics) = cx.into_parts();
+    let document = document(types, diagnostics);
+    let errors = document.validate().unwrap_err();
+    assert!(
+        errors
+            .iter()
+            .any(|error| error.to_string().contains("PONS-E101"))
+    );
+    assert!(document.has_opaque());
+}
+
+#[test]
+fn struct_flatten_in_enum_payload_expands_to_named_fields() {
+    let mut cx = TypeCx::new();
+    let reference = FlattenedEnumPayload::schema(&mut cx, Direction::Output);
+    let TypeRef::Named(named) = reference else {
+        panic!()
+    };
+    let TypeKind::Enum { variants, .. } = &cx.definitions()[&named.id].definition else {
+        panic!()
+    };
+    let VariantPayload::Struct { fields } = &variants[0].payload else {
+        panic!()
+    };
+    assert_eq!(
+        fields
+            .iter()
+            .map(|field| field.wire.as_str())
+            .collect::<Vec<_>>(),
+        ["id", "created_by"]
+    );
+    assert!(cx.diagnostics().is_empty());
+
+    let (types, diagnostics) = cx.into_parts();
+    assert!(document(types, diagnostics).validate().is_ok());
+}
+
+#[test]
+fn enum_payload_map_flatten_is_an_error_instead_of_a_narrowed_payload() {
+    let mut cx = TypeCx::new();
+    let reference = FlattenedMapEnumPayload::schema(&mut cx, Direction::Output);
+    let TypeRef::Named(named) = reference else {
+        panic!()
+    };
+    let TypeKind::Enum { variants, .. } = &cx.definitions()[&named.id].definition else {
+        panic!()
+    };
+    let VariantPayload::Struct { fields } = &variants[0].payload else {
+        panic!()
+    };
+
+    assert_eq!(
+        fields
+            .iter()
+            .map(|field| field.wire.as_str())
+            .collect::<Vec<_>>(),
+        ["id"]
+    );
+    let diagnostic = &cx.diagnostics()[0];
+    assert_eq!(diagnostic.severity, DiagnosticSeverity::Error);
+    assert_eq!(diagnostic.code, "PONS-E101");
+    assert!(diagnostic.message.contains("flatten"));
+    assert!(diagnostic.message.contains("VariantPayload::Struct"));
+
+    let (types, diagnostics) = cx.into_parts();
+    let errors = document(types, diagnostics).validate().unwrap_err();
+    assert!(
+        errors
+            .iter()
+            .any(|error| error.to_string().contains("PONS-E101"))
+    );
+}
+
+#[test]
+fn nested_flatten_inside_an_enum_payload_is_reported_instead_of_dropped() {
+    let mut cx = TypeCx::new();
+    let reference = NestedFlattenedEnumPayload::schema(&mut cx, Direction::Output);
+    let TypeRef::Named(named) = reference else {
+        panic!()
+    };
+    let TypeKind::Enum { variants, .. } = &cx.definitions()[&named.id].definition else {
+        panic!()
+    };
+    let VariantPayload::Struct { fields } = &variants[0].payload else {
+        panic!()
+    };
+
+    assert_eq!(
+        fields
+            .iter()
+            .map(|field| field.wire.as_str())
+            .collect::<Vec<_>>(),
+        ["id"]
+    );
+    assert_eq!(cx.diagnostics().len(), 1);
+    assert_eq!(cx.diagnostics()[0].severity, DiagnosticSeverity::Error);
+
+    let (types, diagnostics) = cx.into_parts();
+    assert!(document(types, diagnostics).validate().is_err());
+}
+
+#[test]
+fn struct_flatten_keeps_nested_flattened_types_that_structs_can_represent() {
+    let mut cx = TypeCx::new();
+    let reference = FlattenedNestedMapStruct::schema(&mut cx, Direction::Output);
+    let TypeRef::Named(named) = reference else {
+        panic!()
+    };
+    let TypeKind::Struct {
+        fields, flattened, ..
+    } = &cx.definitions()[&named.id].definition
+    else {
+        panic!()
+    };
+    assert_eq!(
+        fields
+            .iter()
+            .map(|field| field.wire.as_str())
+            .collect::<Vec<_>>(),
+        ["id", "created_by"]
+    );
+    assert!(matches!(
+        flattened.as_slice(),
+        [TypeRef::Inline(InlineType::Map { .. })]
+    ));
+    assert!(cx.diagnostics().is_empty());
+    let (types, diagnostics) = cx.into_parts();
+    assert!(document(types, diagnostics).validate().is_ok());
+}
+
+#[test]
+fn custom_serde_functions_with_flatten_are_diagnosed_and_opaque() {
+    let mut cx = TypeCx::new();
+    let reference = FlattenedCustomEncoding::schema(&mut cx, Direction::Output);
+    let TypeRef::Named(named) = reference else {
+        panic!()
+    };
+    let TypeKind::Struct {
+        fields, flattened, ..
+    } = &cx.definitions()[&named.id].definition
+    else {
+        panic!()
+    };
+    assert!(fields.is_empty());
+    let TypeRef::Inline(InlineType::Opaque { codec, wire }) = &flattened[0] else {
+        panic!()
+    };
+    assert!(codec.contains("custom_wire"));
+    assert_eq!(*wire, OpaqueWire::Unknown);
+    assert!(cx.diagnostics().iter().any(|diagnostic| {
+        diagnostic.code == "PONS-W101"
+            && diagnostic.message.contains("custom serde handler")
+            && diagnostic.message.contains("flatten")
+    }));
+}
+
+#[test]
+fn closed_custom_flatten_stays_opaque_instead_of_exact() {
+    let mut cx = TypeCx::new();
+    let reference = ClosedFlattenedCustomEncoding::schema(&mut cx, Direction::Input);
+    let TypeRef::Named(named) = reference else {
+        panic!()
+    };
+    let (types, diagnostics) = cx.into_parts();
+    let document = document(types, diagnostics);
+    assert!(document.validate().is_ok());
+    let encoded = serde_json::to_value(&document).unwrap();
+    let definition = &encoded["types"][named.id.as_str()];
+    assert_eq!(definition["openness"], "reject");
+    assert_eq!(definition["flattened"][0]["kind"], "opaque");
+    assert_eq!(definition["flattened"][0]["wire"], "unknown");
 }
 
 #[test]
@@ -334,22 +761,7 @@ fn recursive_named_types_resolve_to_the_registered_id() {
         })
     );
     let (types, diagnostics) = cx.into_parts();
-    let document = Document {
-        ir_version: IR_VERSION.to_owned(),
-        info: Info {
-            title: "Schema test".into(),
-            version: "1".into(),
-            description: None,
-            servers: Vec::new(),
-            ext: BTreeMap::new(),
-        },
-        types,
-        auth_schemes: BTreeMap::new(),
-        common_errors: Vec::new(),
-        operations: Vec::new(),
-        ext: BTreeMap::new(),
-        diagnostics,
-    };
+    let document = document(types, diagnostics);
     assert!(document.validate().is_ok());
 }
 
@@ -476,6 +888,37 @@ fn schema_implementations_cover_collections_and_tuples() {
 }
 
 #[test]
+fn nullable_flatten_is_diagnosed_and_lowered_to_an_unknown_type() {
+    let mut cx = TypeCx::new();
+    let reference = NullableFlatten::schema(&mut cx, Direction::Input);
+    let TypeRef::Named(named) = reference else {
+        panic!()
+    };
+    let TypeKind::Struct {
+        fields, flattened, ..
+    } = &cx.definitions()[&named.id].definition
+    else {
+        panic!()
+    };
+    assert!(fields.is_empty());
+    assert!(matches!(
+        flattened.as_slice(),
+        [TypeRef::Inline(InlineType::Any)]
+    ));
+    let diagnostic = cx
+        .diagnostics()
+        .iter()
+        .find(|diagnostic| diagnostic.code == "PONS-E101")
+        .expect("nullable flatten diagnostic");
+    assert_eq!(diagnostic.severity, DiagnosticSeverity::Error);
+    assert!(diagnostic.message.contains("nullable"));
+    assert!(diagnostic.message.contains("flatten"));
+
+    let (types, diagnostics) = cx.into_parts();
+    assert!(document(types, diagnostics).validate().is_err());
+}
+
+#[test]
 fn flattened_structs_inline_fields_and_maps_keep_their_type() {
     let mut cx = TypeCx::new();
     let fields = FlattenedStruct::schema(&mut cx, Direction::Output);
@@ -511,4 +954,141 @@ fn flattened_structs_inline_fields_and_maps_keep_their_type() {
         map_types.as_slice(),
         [TypeRef::Inline(InlineType::Map { .. })]
     ));
+}
+
+fn struct_shape<'cx>(
+    cx: &'cx TypeCx,
+    reference: &TypeRef,
+) -> (&'cx [pons_ir::Field], &'cx [TypeRef]) {
+    let TypeRef::Named(named) = reference else {
+        panic!()
+    };
+    let TypeKind::Struct {
+        fields, flattened, ..
+    } = &cx.definitions()[&named.id].definition
+    else {
+        panic!()
+    };
+    (fields, flattened)
+}
+
+#[test]
+fn container_level_serde_default_makes_every_field_optional_on_input() {
+    let mut cx = TypeCx::new();
+    let input = ContainerDefaults::schema(&mut cx, Direction::Input);
+    let output = ContainerDefaults::schema(&mut cx, Direction::Output);
+    let both = ContainerDefaults::schema(&mut cx, Direction::Both);
+
+    let (input, _) = struct_shape(&cx, &input);
+    let (output, _) = struct_shape(&cx, &output);
+    let (both, _) = struct_shape(&cx, &both);
+    assert_eq!(input.len(), 3);
+    assert!(
+        input
+            .iter()
+            .all(|field| field.presence == pons_ir::Presence::Optional)
+    );
+    assert!(
+        output
+            .iter()
+            .all(|field| field.presence == pons_ir::Presence::Required)
+    );
+    assert!(
+        both.iter()
+            .all(|field| field.presence == pons_ir::Presence::Optional)
+    );
+    assert!(cx.diagnostics().is_empty());
+
+    let (types, diagnostics) = cx.into_parts();
+    assert!(document(types, diagnostics).validate().is_ok());
+}
+
+#[test]
+fn one_sided_codecs_only_make_their_own_direction_opaque() {
+    let mut cx = TypeCx::new();
+    let input = OneSidedCodecs::schema(&mut cx, Direction::Input);
+    let output = OneSidedCodecs::schema(&mut cx, Direction::Output);
+    let both = OneSidedCodecs::schema(&mut cx, Direction::Both);
+
+    let (input, _) = struct_shape(&cx, &input);
+    let (output, _) = struct_shape(&cx, &output);
+    let (both, _) = struct_shape(&cx, &both);
+
+    assert!(matches!(
+        input[0].ty,
+        TypeRef::Inline(InlineType::Array { .. })
+    ));
+    let TypeRef::Inline(InlineType::Opaque { codec, wire }) = &input[1].ty else {
+        panic!()
+    };
+    let labels: Vec<&str> = codec.split(',').collect();
+    assert_eq!(labels.len(), 1);
+    assert!(labels[0].starts_with("deserialize_with"));
+    assert!(labels[0].contains("decode_value"));
+    assert_eq!(*wire, OpaqueWire::Unknown);
+
+    let TypeRef::Inline(InlineType::Opaque { codec, .. }) = &output[0].ty else {
+        panic!()
+    };
+    let labels: Vec<&str> = codec.split(',').collect();
+    assert_eq!(labels.len(), 1);
+    assert!(labels[0].starts_with("serialize_with"));
+    assert!(labels[0].contains("encode_value"));
+    assert!(matches!(
+        output[1].ty,
+        TypeRef::Inline(InlineType::Array { .. })
+    ));
+
+    for (fields, expected) in [(input, 1), (output, 1), (both, 2)] {
+        let TypeRef::Inline(InlineType::Opaque { codec, .. }) = &fields[2].ty else {
+            panic!()
+        };
+        let labels: Vec<&str> = codec.split(',').collect();
+        assert_eq!(labels.len(), expected);
+        assert!(labels.iter().all(|label| label.contains("custom_wire")));
+    }
+
+    assert_eq!(cx.diagnostics().len(), 1);
+    assert_eq!(cx.diagnostics()[0].code, "PONS-W101");
+    assert!(cx.diagnostics()[0].message.contains("custom serde handler"));
+
+    let (types, diagnostics) = cx.into_parts();
+    let document = document(types, diagnostics);
+    assert!(document.validate().is_ok());
+    assert!(document.has_opaque());
+}
+
+#[test]
+fn one_sided_codec_with_flatten_only_opaques_the_codec_direction() {
+    let mut cx = TypeCx::new();
+    let input = OneSidedCodecFlatten::schema(&mut cx, Direction::Input);
+    let output = OneSidedCodecFlatten::schema(&mut cx, Direction::Output);
+
+    let (input_fields, input_flattened) = struct_shape(&cx, &input);
+    let (output_fields, output_flattened) = struct_shape(&cx, &output);
+    assert_eq!(
+        input_fields
+            .iter()
+            .map(|field| field.wire.as_str())
+            .collect::<Vec<_>>(),
+        ["id", "created_by"]
+    );
+    assert!(input_flattened.is_empty());
+    assert_eq!(
+        output_fields
+            .iter()
+            .map(|field| field.wire.as_str())
+            .collect::<Vec<_>>(),
+        ["id"]
+    );
+    assert!(matches!(
+        output_flattened,
+        [TypeRef::Inline(InlineType::Opaque { .. })]
+    ));
+    assert!(cx.diagnostics().iter().any(|diagnostic| {
+        diagnostic.code == "PONS-W101" && diagnostic.message.contains("flatten")
+    }));
+
+    let (types, diagnostics) = cx.into_parts();
+    assert!(document(types, diagnostics).validate().is_ok());
 }

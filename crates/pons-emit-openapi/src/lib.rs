@@ -2,9 +2,10 @@ mod operations;
 mod schemas;
 mod security;
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
-use pons_ir::Document;
+use pons_ir::{Document, ObjectOpenness, TypeKind};
+use pons_plugin::{Coverage, operation_subject};
 use serde_json::{Map, Value, json};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -18,13 +19,31 @@ impl std::fmt::Display for EmitError {
 
 impl std::error::Error for EmitError {}
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EmitMode {
+    Strict,
+    Lossy,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EmitOutput {
+    pub content: String,
+    pub warnings: Vec<String>,
+    pub coverage: Coverage,
+}
+
 struct Builder<'a> {
     document: &'a Document,
     schema_names: BTreeMap<String, String>,
     security_names: BTreeMap<String, String>,
+    selected_variants: std::cell::RefCell<BTreeSet<(String, String)>>,
 }
 
 pub fn emit(document: &Document) -> Result<String, EmitError> {
+    emit_with_mode(document, EmitMode::Strict).map(|output| output.content)
+}
+
+pub fn emit_with_mode(document: &Document, mode: EmitMode) -> Result<EmitOutput, EmitError> {
     document.validate().map_err(|errors| {
         EmitError(
             errors
@@ -50,6 +69,7 @@ pub fn emit(document: &Document) -> Result<String, EmitError> {
                 .keys()
                 .map(|id| (id.clone(), readable_name(std::slice::from_ref(id)))),
         ),
+        selected_variants: std::cell::RefCell::new(BTreeSet::new()),
     };
     let mut output = Map::new();
     output.insert("openapi".into(), json!("3.1.1"));
@@ -98,10 +118,229 @@ pub fn emit(document: &Document) -> Result<String, EmitError> {
         "diagnostics": document.diagnostics,
     });
     output.insert("x-pons".into(), metadata);
-    let mut output = serde_json::to_string_pretty(&Value::Object(output))
+    let mut content = serde_json::to_string_pretty(&Value::Object(output))
         .map_err(|error| EmitError(format!("cannot serialize OpenAPI document: {error}")))?;
-    output.push('\n');
-    Ok(output)
+    content.push('\n');
+    let mut coverage = pons_plugin::coverage_for_document(&document, mode == EmitMode::Lossy)
+        .map_err(EmitError)?;
+    for operation in &document.operations {
+        if operation.stream.is_some() || operation.provides.is_some() {
+            let subject = format!("operations.{}", operation_subject(operation));
+            merge_coverage(&mut coverage, subject, CoverageSeverity::Opaque);
+        }
+    }
+    mark_preservation_coverage(&document, &mut coverage);
+    let warnings = coverage_warnings(mode, &coverage)?;
+    Ok(EmitOutput {
+        content,
+        warnings,
+        coverage,
+    })
+}
+
+fn coverage_warnings(mode: EmitMode, coverage: &Coverage) -> Result<Vec<String>, EmitError> {
+    if mode == EmitMode::Strict {
+        for (level, subjects) in [
+            ("unsupported", &coverage.unsupported),
+            ("lossy", &coverage.lossy),
+        ] {
+            if !subjects.is_empty() {
+                return Err(EmitError(format!(
+                    "OpenAPI emitter reported {level} coverage in strict mode: {}",
+                    subjects.iter().cloned().collect::<Vec<_>>().join(", ")
+                )));
+            }
+        }
+        return Ok(Vec::new());
+    }
+    Ok([
+        ("opaque", &coverage.opaque),
+        ("lossy", &coverage.lossy),
+        ("unsupported", &coverage.unsupported),
+    ]
+    .into_iter()
+    .filter(|(_, subjects)| !subjects.is_empty())
+    .map(|(level, subjects)| {
+        format!(
+            "OpenAPI emits {level} coverage at {}",
+            subjects.iter().cloned().collect::<Vec<_>>().join(", ")
+        )
+    })
+    .collect())
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum CoverageSeverity {
+    Exact,
+    Opaque,
+    Lossy,
+    Unsupported,
+}
+
+fn merge_coverage(coverage: &mut Coverage, subject: String, required: CoverageSeverity) {
+    coverage.exact.remove(&subject);
+    let current = if coverage.unsupported.remove(&subject) {
+        CoverageSeverity::Unsupported
+    } else if coverage.lossy.remove(&subject) {
+        CoverageSeverity::Lossy
+    } else if coverage.opaque.remove(&subject) {
+        CoverageSeverity::Opaque
+    } else {
+        CoverageSeverity::Exact
+    };
+    match current.max(required) {
+        CoverageSeverity::Exact => {
+            coverage.exact.insert(subject);
+        }
+        CoverageSeverity::Opaque => {
+            coverage.opaque.insert(subject);
+        }
+        CoverageSeverity::Lossy => {
+            coverage.lossy.insert(subject);
+        }
+        CoverageSeverity::Unsupported => {
+            coverage.unsupported.insert(subject);
+        }
+    }
+}
+
+fn mark_preservation_coverage(document: &Document, coverage: &mut Coverage) {
+    let serialized_types = document
+        .types
+        .iter()
+        .filter_map(|(id, definition)| {
+            serde_json::to_value(definition)
+                .ok()
+                .map(|value| (id.clone(), value))
+        })
+        .collect::<BTreeMap<_, _>>();
+    let mut preserved = document
+        .types
+        .iter()
+        .filter_map(|(id, definition)| {
+            let TypeKind::Struct { openness, .. } = &definition.definition else {
+                return None;
+            };
+            matches!(
+                openness,
+                ObjectOpenness::PreserveTyped { .. } | ObjectOpenness::PreserveOpaque
+            )
+            .then_some(id.clone())
+        })
+        .collect::<BTreeSet<_>>();
+    let mut dependents = BTreeMap::<String, Vec<String>>::new();
+    for (id, value) in &serialized_types {
+        let mut references = BTreeSet::new();
+        collect_type_references(value, &serialized_types, &mut references);
+        for reference in references {
+            dependents.entry(reference).or_default().push(id.clone());
+        }
+    }
+    let mut pending = preserved.iter().cloned().collect::<Vec<_>>();
+    while let Some(reference) = pending.pop() {
+        let Some(dependents) = dependents.get(&reference) else {
+            continue;
+        };
+        for dependent in dependents {
+            if preserved.insert(dependent.clone()) {
+                pending.push(dependent.clone());
+            }
+        }
+    }
+    if preserved.is_empty() {
+        return;
+    }
+    for id in &preserved {
+        merge_coverage(coverage, format!("types.{id}"), CoverageSeverity::Opaque);
+    }
+    let Ok(operations) = serde_json::to_value(&document.operations) else {
+        return;
+    };
+    let Some(operations) = operations.as_array() else {
+        return;
+    };
+    let common_errors = serde_json::to_value(&document.common_errors).ok();
+    for (operation, value) in document.operations.iter().zip(operations) {
+        let inherited = operation.errors_inherit
+            && common_errors.as_ref().is_some_and(|errors| {
+                references_preserved_type(errors, &serialized_types, &preserved)
+            });
+        if inherited || references_preserved_type(value, &serialized_types, &preserved) {
+            let subject = format!("operations.{}", operation_subject(operation));
+            merge_coverage(coverage, subject, CoverageSeverity::Opaque);
+        }
+    }
+}
+
+fn collect_type_references(
+    value: &Value,
+    types: &BTreeMap<String, Value>,
+    references: &mut BTreeSet<String>,
+) {
+    collect_type_references_inner(value, types, references, &mut BTreeSet::new());
+}
+
+fn collect_type_references_inner(
+    value: &Value,
+    types: &BTreeMap<String, Value>,
+    references: &mut BTreeSet<String>,
+    active_variants: &mut BTreeSet<(String, String)>,
+) {
+    match value {
+        Value::Object(fields) => {
+            if let Some(reference) = fields.get("ref").and_then(Value::as_str)
+                && fields
+                    .keys()
+                    .all(|key| matches!(key.as_str(), "ref" | "variant"))
+            {
+                if let Some(variant) = fields.get("variant").and_then(Value::as_str)
+                    && let Some(payload) = types
+                        .get(reference)
+                        .and_then(|definition| definition.get("variants"))
+                        .and_then(Value::as_array)
+                        .and_then(|variants| {
+                            variants.iter().find(|entry| {
+                                entry.get("wire").and_then(Value::as_str) == Some(variant)
+                            })
+                        })
+                        .and_then(|entry| entry.get("payload"))
+                {
+                    let active = (reference.to_owned(), variant.to_owned());
+                    if active_variants.insert(active.clone()) {
+                        collect_type_references_inner(payload, types, references, active_variants);
+                        active_variants.remove(&active);
+                    }
+                } else {
+                    references.insert(reference.to_owned());
+                }
+                return;
+            }
+            for (key, value) in fields {
+                if key == "ext" || key == "default" || key == "pagination" {
+                    continue;
+                }
+                collect_type_references_inner(value, types, references, active_variants);
+            }
+        }
+        Value::Array(values) => {
+            for value in values {
+                collect_type_references_inner(value, types, references, active_variants);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn references_preserved_type(
+    value: &Value,
+    types: &BTreeMap<String, Value>,
+    preserved: &BTreeSet<String>,
+) -> bool {
+    let mut references = BTreeSet::new();
+    collect_type_references(value, types, &mut references);
+    references
+        .iter()
+        .any(|reference| preserved.contains(reference))
 }
 
 fn unique_names(items: impl Iterator<Item = (String, String)>) -> BTreeMap<String, String> {
@@ -150,9 +389,10 @@ fn readable_name(words: &[String]) -> String {
 mod tests {
     use pons_ir::{
         AuthScheme, ByteEncoding, ContentKind, Direction, ErrorStatus, InlineType, NamedRef,
-        OAuthFlow, OAuthFlowKind, ObjectOpenness, PathSegment, Presence, ResponseHeader,
-        ResponseStatus, StreamKind, TypeDef, TypeKind, TypeRef,
+        OAuthFlow, OAuthFlowKind, ObjectOpenness, OpaqueWire, PathSegment, Presence,
+        ResponseHeader, ResponseStatus, StreamKind, TypeDef, TypeKind, TypeRef,
     };
+    use pons_plugin::Coverage;
     use serde_json::{Value, json};
 
     fn fixture() -> pons_ir::Document {
@@ -278,6 +518,326 @@ mod tests {
     }
 
     #[test]
+    fn preserves_operation_id_punctuation() {
+        let mut document = fixture();
+        document.operations[0].id = vec![
+            vec!["under_score".into()],
+            vec!["dot.name".into()],
+            vec!["percent%name".into()],
+        ];
+        let output: Value = serde_json::from_str(&super::emit(&document).unwrap()).unwrap();
+        assert_eq!(
+            output["paths"]["/auth/login"]["post"]["operationId"],
+            "under_score.dot.name.percent%name"
+        );
+    }
+
+    #[test]
+    fn rejects_operation_id_collisions() {
+        let mut document = fixture();
+        document.operations[0].id = vec![vec!["same".into()], vec!["part".into()]];
+        document.operations[1].id = vec![vec!["same.part".into()]];
+        assert!(
+            super::emit(&document)
+                .unwrap_err()
+                .0
+                .contains("duplicate OpenAPI operationId same.part")
+        );
+    }
+
+    #[test]
+    fn emits_opaque_metadata_without_inventing_a_schema() {
+        let mut document = fixture();
+        let user = document.types.get_mut("User").unwrap();
+        let TypeKind::Struct { fields, .. } = &mut user.definition else {
+            unreachable!()
+        };
+        fields[0].ty = TypeRef::Inline(InlineType::Opaque {
+            codec: "example.codec".into(),
+            wire: OpaqueWire::Json,
+        });
+        let emitted = super::emit_with_mode(&document, super::EmitMode::Strict).unwrap();
+        assert!(emitted.coverage.opaque.contains("types.User"));
+        assert!(emitted.coverage.opaque.contains("operations.auth.login"));
+        let output: Value = serde_json::from_str(&emitted.content).unwrap();
+        let field = &output["components"]["schemas"]["User"]["properties"]["id"];
+        assert_eq!(field["x-pons-opaque"]["codec"], "example.codec");
+        assert_eq!(field["x-pons-opaque"]["wire"], "json");
+        assert!(field.get("type").is_none());
+    }
+
+    #[test]
+    fn lossy_mode_warns_for_non_exact_coverage() {
+        let mut raw: Value = serde_json::to_value(fixture()).unwrap();
+        raw["types"]["LoginError"]["variants"][1]["payload"]["fields"][0]["ty"]["wire"] =
+            json!("number");
+        raw["types"]["LoginError"]["variants"][1]["payload"]["fields"][0]["ty"]["bits"] = json!(64);
+        let document: pons_ir::Document = serde_json::from_value(raw).unwrap();
+
+        let strict = super::emit_with_mode(&document, super::EmitMode::Strict).unwrap();
+        assert!(strict.warnings.is_empty());
+        assert!(strict.coverage.exact.contains("types.LoginError"));
+
+        let lossy = super::emit_with_mode(&document, super::EmitMode::Lossy).unwrap();
+        assert!(lossy.coverage.lossy.contains("types.LoginError"));
+        assert!(
+            lossy
+                .warnings
+                .iter()
+                .any(|warning| warning.contains("lossy coverage")
+                    && warning.contains("types.LoginError"))
+        );
+    }
+
+    #[test]
+    fn opaque_feature_marks_preserve_lossy_classification() {
+        let mut raw: Value = serde_json::to_value(fixture()).unwrap();
+        raw["types"]["User"]["fields"][0]["ty"]["wire"] = json!("number");
+        raw["types"]["User"]["fields"][0]["ty"]["bits"] = json!(64);
+        let document: pons_ir::Document = serde_json::from_value(raw).unwrap();
+
+        let emitted = super::emit_with_mode(&document, super::EmitMode::Lossy).unwrap();
+        for subject in [
+            "types.User",
+            "operations.auth.login",
+            "operations.events.watch",
+        ] {
+            assert!(emitted.coverage.lossy.contains(subject), "{subject}");
+            assert!(!emitted.coverage.opaque.contains(subject), "{subject}");
+        }
+        assert!(emitted.warnings.iter().any(|warning| {
+            warning.contains("lossy coverage")
+                && warning.contains("types.User")
+                && warning.contains("operations.auth.login")
+                && warning.contains("operations.events.watch")
+        }));
+    }
+
+    #[test]
+    fn rejects_mismatched_byte_stream_media_type_override() {
+        let mut document = fixture();
+        {
+            let operation = document
+                .operations
+                .iter_mut()
+                .find(|operation| operation.stream.is_some())
+                .unwrap();
+            operation.stream.as_mut().unwrap().kind = StreamKind::Bytes {
+                content_type: "application/pdf".into(),
+            };
+            operation.responses[0].media_type = Some("application/json".into());
+        }
+        assert!(
+            super::emit(&document)
+                .unwrap_err()
+                .0
+                .contains("does not match stream kind media type")
+        );
+
+        document
+            .operations
+            .iter_mut()
+            .find(|operation| operation.stream.is_some())
+            .unwrap()
+            .responses[0]
+            .media_type = Some("application/pdf".into());
+        assert!(super::emit(&document).is_ok());
+
+        {
+            let operation = document
+                .operations
+                .iter_mut()
+                .find(|operation| operation.stream.is_some())
+                .unwrap();
+            operation.stream.as_mut().unwrap().kind = StreamKind::Bytes {
+                content_type: "Application/PDF ; Version=1".into(),
+            };
+            operation.responses[0].media_type = Some("application/pdf; version=1".into());
+        }
+        assert!(super::emit(&document).is_ok());
+    }
+
+    #[test]
+    fn rejects_sse_and_ndjson_media_type_overrides() {
+        let mut document = fixture();
+        for (kind, expected) in [
+            (StreamKind::Sse { events: vec![] }, "text/event-stream"),
+            (
+                StreamKind::Ndjson {
+                    item: TypeRef::Inline(InlineType::Bool),
+                },
+                "application/x-ndjson",
+            ),
+        ] {
+            for (media_type, accepted) in [
+                (expected.to_owned(), true),
+                (format!("{expected}; charset=utf-8"), true),
+                (format!("{expected} ; CharSet=UTF-8"), true),
+                ("application/json".into(), false),
+                ("application/octet-stream".into(), false),
+            ] {
+                let operation = document
+                    .operations
+                    .iter_mut()
+                    .find(|operation| operation.stream.is_some())
+                    .unwrap();
+                operation.stream.as_mut().unwrap().kind = kind.clone();
+                operation.responses[0].media_type = Some(media_type.clone());
+                assert_eq!(
+                    super::emit(&document).is_ok(),
+                    accepted,
+                    "{media_type:?} on an {expected} stream"
+                );
+            }
+
+            let operation = document
+                .operations
+                .iter_mut()
+                .find(|operation| operation.stream.is_some())
+                .unwrap();
+            operation.stream.as_mut().unwrap().kind = kind;
+            operation.responses[0].media_type = None;
+            let emitted: Value = serde_json::from_str(&super::emit(&document).unwrap()).unwrap();
+            assert!(emitted.to_string().contains(expected));
+        }
+    }
+
+    #[test]
+    fn lossy_mode_warns_for_opaque_coverage_while_strict_allows_it() {
+        let mut document = fixture();
+        let user = document.types.get_mut("User").unwrap();
+        let TypeKind::Struct { fields, .. } = &mut user.definition else {
+            unreachable!()
+        };
+        fields[0].ty = TypeRef::Inline(InlineType::Opaque {
+            codec: "example.codec".into(),
+            wire: OpaqueWire::Json,
+        });
+
+        let strict = super::emit_with_mode(&document, super::EmitMode::Strict).unwrap();
+        assert!(strict.warnings.is_empty());
+        assert!(strict.coverage.opaque.contains("types.User"));
+
+        let lossy = super::emit_with_mode(&document, super::EmitMode::Lossy).unwrap();
+        assert!(
+            lossy.warnings.iter().any(
+                |warning| warning.contains("opaque coverage") && warning.contains("types.User")
+            )
+        );
+    }
+
+    #[test]
+    fn strict_mode_rejects_lossy_and_unsupported_coverage() {
+        let lossy = Coverage {
+            lossy: ["types.User".into()].into_iter().collect(),
+            ..Coverage::default()
+        };
+        assert!(
+            super::coverage_warnings(super::EmitMode::Strict, &lossy)
+                .unwrap_err()
+                .0
+                .contains("lossy coverage")
+        );
+        let unsupported = Coverage {
+            unsupported: ["types.User".into()].into_iter().collect(),
+            ..Coverage::default()
+        };
+        assert!(
+            super::coverage_warnings(super::EmitMode::Strict, &unsupported)
+                .unwrap_err()
+                .0
+                .contains("unsupported coverage")
+        );
+        let opaque = Coverage {
+            opaque: ["types.User".into()].into_iter().collect(),
+            ..Coverage::default()
+        };
+        assert!(super::coverage_warnings(super::EmitMode::Strict, &opaque).is_ok());
+    }
+
+    #[test]
+    fn marks_extension_only_operations_as_opaque() {
+        let document = fixture();
+        let emitted = super::emit_with_mode(&document, super::EmitMode::Strict).unwrap();
+        assert!(emitted.coverage.opaque.contains("operations.auth.login"));
+        assert!(emitted.coverage.opaque.contains("operations.events.watch"));
+        assert!(emitted.coverage.opaque.contains("types.User"));
+        assert!(emitted.coverage.opaque.contains("types.LoginRequest"));
+        assert!(!emitted.coverage.exact.contains("operations.auth.login"));
+        assert!(!emitted.coverage.exact.contains("operations.events.watch"));
+        assert!(!emitted.coverage.lossy.contains("operations.auth.login"));
+        assert!(!emitted.coverage.lossy.contains("operations.events.watch"));
+    }
+
+    #[test]
+    fn marks_preservation_through_type_references() {
+        let mut raw = serde_json::to_value(fixture()).unwrap();
+        raw["types"]["Wrapper"] = json!({
+            "kind": "struct",
+            "name": ["wrapper"],
+            "direction": "both",
+            "openness": "reject",
+            "fields": [{
+                "wire": "user",
+                "ident": ["user"],
+                "ty": { "ref": "User" },
+                "presence": "required"
+            }]
+        });
+        raw["operations"][1]["stream"] = Value::Null;
+        raw["operations"][1]["responses"] = json!([{
+            "status": 200,
+            "content": "json",
+            "body": { "ref": "Wrapper" }
+        }]);
+        let document: pons_ir::Document = serde_json::from_value(raw).unwrap();
+        let emitted = super::emit_with_mode(&document, super::EmitMode::Strict).unwrap();
+        assert!(emitted.coverage.opaque.contains("types.Wrapper"));
+        assert!(emitted.coverage.opaque.contains("operations.events.watch"));
+    }
+
+    #[test]
+    fn emits_recursive_selected_enum_variants() {
+        let mut raw: Value = serde_json::to_value(fixture()).unwrap();
+        raw["types"]["Chain"] = json!({
+            "kind": "enum",
+            "name": ["chain"],
+            "direction": "both",
+            "repr": {"kind": "external"},
+            "variants": [
+                {
+                    "wire": "next",
+                    "ident": ["next"],
+                    "payload": {"kind": "newtype", "ty": {"ref": "Chain", "variant": "next"}}
+                },
+                {"wire": "leaf", "ident": ["leaf"], "payload": {"kind": "unit"}}
+            ]
+        });
+        raw["types"]["User"]["fields"]
+            .as_array_mut()
+            .unwrap()
+            .push(json!({
+                "wire": "chain",
+                "ident": ["chain"],
+                "ty": {"ref": "Chain", "variant": "next"},
+                "presence": "required"
+            }));
+        let document: pons_ir::Document = serde_json::from_value(raw).unwrap();
+        let output = super::emit(&document).unwrap();
+        let value: Value = serde_json::from_str(&output).unwrap();
+        assert_eq!(value["openapi"], "3.1.1");
+        assert!(
+            value["components"]["schemas"]["Chain"]["oneOf"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|schema| schema
+                    .to_string()
+                    .contains("#/components/schemas/Chain/oneOf/"))
+        );
+    }
+
+    #[test]
     fn emits_declared_error_response_headers() {
         let mut document = fixture();
         document.operations[0].errors[0]
@@ -352,6 +912,25 @@ mod tests {
     }
 
     #[test]
+    fn rejects_nullable_flatten_before_emitting_a_contract() {
+        let mut raw: serde_json::Value =
+            serde_json::from_str(include_str!("../../../fixtures/login.json")).unwrap();
+        raw["types"]["LoginRequest"]["flattened"] = serde_json::json!([{
+            "kind": "nullable",
+            "inner": {"ref": "User"}
+        }]);
+        let document: pons_ir::Document = serde_json::from_value(raw).unwrap();
+        for mode in [super::EmitMode::Strict, super::EmitMode::Lossy] {
+            assert!(
+                super::emit_with_mode(&document, mode)
+                    .unwrap_err()
+                    .0
+                    .contains("nullable flattened")
+            );
+        }
+    }
+
+    #[test]
     fn emits_optional_request_bodies() {
         let mut document = fixture();
         let login = document
@@ -388,6 +967,34 @@ mod tests {
         let output: Value = serde_json::from_str(&super::emit(&document).unwrap()).unwrap();
         assert!(output["paths"]["/auth/login"]["post"]["responses"]["2XX"].is_object());
         assert!(output["paths"]["/auth/login"]["post"]["responses"]["default"].is_object());
+    }
+
+    #[test]
+    fn escapes_path_literals_like_the_typescript_client() {
+        let mut document = fixture();
+        document.operations[0].path = vec![PathSegment::Literal {
+            lit: "a b?c#dé%f".into(),
+        }];
+        document.operations[1].path = vec![PathSegment::Literal {
+            lit: "a%20b".into(),
+        }];
+        let output: Value = serde_json::from_str(&super::emit(&document).unwrap()).unwrap();
+        let paths = output["paths"].as_object().unwrap();
+        assert!(paths.contains_key("/a%20b%3Fc%23d%C3%A9%25f"), "{paths:?}");
+        assert!(paths.contains_key("/a%2520b"), "{paths:?}");
+    }
+
+    #[test]
+    fn rejects_default_success_and_error_dispatch_collision() {
+        let mut document = fixture();
+        document.operations[0].responses[0].status = ResponseStatus::Default;
+        document.operations[0].errors[0].status = ErrorStatus::Default;
+        assert!(
+            super::emit(&document)
+                .unwrap_err()
+                .0
+                .contains("collides with a success response")
+        );
     }
 
     #[test]

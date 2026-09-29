@@ -10,8 +10,8 @@ use pons_axum::{
 };
 use pons_core::Schema;
 use pons_ir::{
-    AuthScheme, ContentKind, CredentialLocator, CredentialProvision, Info, InlineType, PathSegment,
-    ResponseStatus, TypeKind, TypeRef,
+    AuthScheme, ContentKind, CredentialLocator, CredentialProvision, Info, InlineType, OpaqueWire,
+    PathSegment, ResponseStatus, TypeKind, TypeRef,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -232,6 +232,24 @@ async fn multipart_user(_multipart: Multipart) -> pons_axum::extract::Json<User>
     })
 }
 
+#[derive(Deserialize, Serialize, Schema)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+enum FlattenedCreate {
+    Simple {
+        name: String,
+        #[serde(flatten)]
+        extra: BTreeMap<String, String>,
+    },
+}
+
+async fn flattened_create(
+    pons_axum::extract::Json(FlattenedCreate::Simple { name, .. }): pons_axum::extract::Json<
+        FlattenedCreate,
+    >,
+) -> pons_axum::extract::Json<User> {
+    pons_axum::extract::Json(User { id: 1, name })
+}
+
 async fn delete_user() -> NoContent {
     NoContent
 }
@@ -310,9 +328,28 @@ fn router_describes_multipart_request_as_opaque() {
         .unwrap();
     let body = operation.body.as_ref().unwrap();
     assert_eq!(body.content, ContentKind::Multipart);
-    assert_eq!(body.ty, TypeRef::Inline(InlineType::Any));
+    assert_eq!(
+        body.ty,
+        TypeRef::Inline(InlineType::Opaque {
+            codec: "axum.multipart".into(),
+            wire: OpaqueWire::Unknown,
+        })
+    );
     assert!(operation.diagnostics.iter().any(|diagnostic| {
         diagnostic.code == "PONS-W101" && diagnostic.message.contains("multipart fields are opaque")
+    }));
+    assert!(router.into_document().is_err());
+}
+
+#[test]
+fn enum_payload_flatten_refuses_to_publish_a_narrowed_body() {
+    let router = Router::<()>::new(info()).route("/flattened", post(flattened_create));
+    let document = router.document();
+    let operation = &document.operations[0];
+    assert!(operation.diagnostics.iter().any(|diagnostic| {
+        diagnostic.code == "PONS-E101"
+            && diagnostic.severity == pons_ir::DiagnosticSeverity::Error
+            && diagnostic.message.contains("flatten")
     }));
     assert!(router.into_document().is_err());
 }

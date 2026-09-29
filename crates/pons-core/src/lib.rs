@@ -106,6 +106,14 @@ impl TypeCx {
     }
 
     pub fn push_diagnostic(&mut self, code: &str, message: impl Into<String>) {
+        self.push(DiagnosticSeverity::Warning, code, message);
+    }
+
+    pub fn push_error(&mut self, code: &str, message: impl Into<String>) {
+        self.push(DiagnosticSeverity::Error, code, message);
+    }
+
+    fn push(&mut self, severity: DiagnosticSeverity, code: &str, message: impl Into<String>) {
         let message = message.into();
         if self
             .diagnostics
@@ -115,7 +123,7 @@ impl TypeCx {
             return;
         }
         self.diagnostics.push(Diagnostic {
-            severity: DiagnosticSeverity::Warning,
+            severity,
             code: code.to_owned(),
             message,
             origin: None,

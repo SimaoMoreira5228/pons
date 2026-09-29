@@ -2,7 +2,7 @@ use axum::response::IntoResponse;
 use pons_core::{ErrorSpec, Schema, TypeCx};
 use pons_ir::{
     AuthRequirement, Body, ContentKind, CredentialProvision, Diagnostic, Direction, ErrorResponse,
-    HeaderParameter, InlineType, Presence, Response, ResponseHeader, ResponseStatus,
+    HeaderParameter, InlineType, OpaqueWire, Presence, Response, ResponseHeader, ResponseStatus,
     StreamDescription, TypeRef,
 };
 
@@ -348,7 +348,7 @@ impl<T: Schema> DescribeRequest for axum::extract::Form<T> {
 
 impl DescribeRequest for axum::extract::Multipart {
     fn describe(cx: &mut OperationCx) {
-        cx.request_body::<OpaqueBody>(ContentKind::Multipart);
+        cx.request_body::<OpaqueMultipart>(ContentKind::Multipart);
         cx.error(
             "PONS-W101",
             "multipart fields are opaque; wrap them with a typed request description",
@@ -358,7 +358,7 @@ impl DescribeRequest for axum::extract::Multipart {
 
 impl DescribeRequest for axum::extract::RawForm {
     fn describe(cx: &mut OperationCx) {
-        cx.request_body::<OpaqueBody>(ContentKind::Form);
+        cx.request_body::<OpaqueForm>(ContentKind::Form);
         cx.error(
             "PONS-W101",
             "raw form fields are opaque; use Form<T> for a typed form",
@@ -520,11 +520,26 @@ impl<T: crate::SseEvent, S> DescribeResponse for crate::Sse<T, S> {
 
 pub struct ByteArray;
 
-pub struct OpaqueBody;
+pub struct OpaqueForm;
 
-impl Schema for OpaqueBody {
+pub struct OpaqueMultipart;
+
+fn opaque(codec: &str) -> TypeRef {
+    TypeRef::Inline(InlineType::Opaque {
+        codec: codec.into(),
+        wire: OpaqueWire::Unknown,
+    })
+}
+
+impl Schema for OpaqueForm {
     fn schema(_: &mut TypeCx, _: Direction) -> TypeRef {
-        TypeRef::Inline(InlineType::Any)
+        opaque("axum.form")
+    }
+}
+
+impl Schema for OpaqueMultipart {
+    fn schema(_: &mut TypeCx, _: Direction) -> TypeRef {
+        opaque("axum.multipart")
     }
 }
 

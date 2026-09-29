@@ -25,6 +25,7 @@ pub(super) fn expand(container: &ast::Container<'_>) -> TokenStream {
             fields,
             container.attrs.transparent(),
             container.attrs.deny_unknown_fields(),
+            !container.attrs.default().is_none(),
         ),
         ast::Data::Enum(variants) => enum_definition(variants, container.attrs.tag()),
     };
@@ -100,19 +101,17 @@ fn struct_definition(
     fields: &[ast::Field<'_>],
     transparent: bool,
     deny_unknown_fields: bool,
+    container_default: bool,
 ) -> TokenStream {
     if transparent || matches!(style, ast::Style::Newtype) {
         let field = fields.first().expect("newtype structs have a field");
-        let ty = field.ty;
+        let ty = field_type_expression(field);
         return quote!(::pons_core::ir::TypeKind::Newtype {
-            inner: <#ty as ::pons_core::Schema>::schema(cx, direction),
+            inner: #ty,
         });
     }
     if matches!(style, ast::Style::Tuple) {
-        let items = fields.iter().map(|field| {
-            let ty = field.ty;
-            quote!(<#ty as ::pons_core::Schema>::schema(cx, direction))
-        });
+        let items = fields.iter().map(field_type_expression);
         return quote!(::pons_core::ir::TypeKind::Newtype {
             inner: ::pons_core::ir::TypeRef::Inline(::pons_core::ir::InlineType::Tuple {
                 items: vec![#(#items),*],
@@ -120,7 +119,9 @@ fn struct_definition(
         });
     }
 
-    let field_builders = fields.iter().map(|field| field_expression(field, true));
+    let field_builders = fields
+        .iter()
+        .map(|field| field_expression(field, true, container_default));
     quote! {
         let mut fields = Vec::new();
         let mut flattened = Vec::new();
@@ -235,22 +236,22 @@ fn payload_expression(style: ast::Style, fields: &[ast::Field<'_>]) -> TokenStre
     match style {
         ast::Style::Unit => quote!(::pons_core::ir::VariantPayload::Unit),
         ast::Style::Newtype => {
-            let ty = fields.first().expect("newtype variants have a field").ty;
+            let field = fields.first().expect("newtype variants have a field");
+            let ty = field_type_expression(field);
             quote!(::pons_core::ir::VariantPayload::Newtype {
-                ty: <#ty as ::pons_core::Schema>::schema(cx, direction),
+                ty: #ty,
             })
         }
         ast::Style::Tuple => {
-            let items = fields.iter().map(|field| {
-                let ty = field.ty;
-                quote!(<#ty as ::pons_core::Schema>::schema(cx, direction))
-            });
+            let items = fields.iter().map(|field| field_type_expression(field));
             quote!(::pons_core::ir::VariantPayload::Tuple {
                 items: vec![#(#items),*]
             })
         }
         ast::Style::Struct => {
-            let field_builders = fields.iter().map(|field| field_expression(field, false));
+            let field_builders = fields
+                .iter()
+                .map(|field| field_expression(field, false, false));
             quote!({
                 let mut fields = Vec::new();
                 let mut flattened = Vec::new();
@@ -261,20 +262,15 @@ fn payload_expression(style: ast::Style, fields: &[ast::Field<'_>]) -> TokenStre
     }
 }
 
-fn field_expression(field: &ast::Field<'_>, supports_flatten: bool) -> TokenStream {
-    let ty = field.ty;
-    let wire_in = field.attrs.name().deserialize_name();
-    let wire_out = field.attrs.name().serialize_name();
-    let member = field.member.to_token_stream().to_string();
-    let ident = words(&member);
+fn field_expression(
+    field: &ast::Field<'_>,
+    supports_flatten: bool,
+    container_default: bool,
+) -> TokenStream {
     let skip_input = field.attrs.skip_deserializing();
     let skip_output = field.attrs.skip_serializing();
-    let optional_on_input = has_default(&field.attrs) || is_option(field.ty);
-    let optional_on_output = field.attrs.skip_serializing_if().is_some();
     let flatten = field.attrs.flatten();
-    let doc = doc_value(&field.original.attrs);
-    let custom_wire =
-        field.attrs.serialize_with().is_some() || field.attrs.deserialize_with().is_some();
+    let codecs = Codecs::new(&field.attrs);
     let canonical_name = field.attrs.name().deserialize_name().to_string();
     let aliases: Vec<_> = field
         .attrs
@@ -292,39 +288,70 @@ fn field_expression(field: &ast::Field<'_>, supports_flatten: bool) -> TokenStre
         );
         quote!(cx.push_diagnostic("PONS-W101", #message);)
     };
-    quote! {
+    let included = quote! {
         let included = match direction {
             ::pons_core::ir::Direction::Input => !#skip_input,
             ::pons_core::ir::Direction::Output => !#skip_output,
             ::pons_core::ir::Direction::Both => !#skip_input && !#skip_output,
         };
+    };
+    let regular = field_body(field, supports_flatten, container_default, flatten, false);
+    if !flatten || !codecs.any() {
+        return quote! {
+            #included
+            if included {
+                #alias_warning
+                #regular
+            }
+        };
+    }
+    let opaque = field_body(field, supports_flatten, container_default, flatten, true);
+    let probe = codecs.opaque_probe();
+    quote! {
+        #included
         if included {
             #alias_warning
-            let wire = match direction {
-                ::pons_core::ir::Direction::Input => #wire_in,
-                ::pons_core::ir::Direction::Output | ::pons_core::ir::Direction::Both => #wire_out,
-            };
-            let ty = if #custom_wire {
-                cx.push_diagnostic("PONS-W101", "custom serde handler prevents exact type extraction; using any");
-                ::pons_core::ir::TypeRef::Inline(::pons_core::ir::InlineType::Any)
+            if #probe {
+                #opaque
             } else {
-                <#ty as ::pons_core::Schema>::schema(cx, direction)
-            };
-            if #flatten {
-                if let Some((nested_fields, nested_flattened)) = cx.flattened_fields(&ty) {
-                    fields.extend(nested_fields);
-                    flattened.extend(nested_flattened);
-                } else if #supports_flatten {
-                    flattened.push(ty);
-                } else {
-                    cx.push_diagnostic("PONS-W101", "non-struct flatten in enum payload is not represented");
-                }
+                #regular
+            }
+        }
+    }
+}
+
+fn field_body(
+    field: &ast::Field<'_>,
+    supports_flatten: bool,
+    container_default: bool,
+    flatten: bool,
+    opaque: bool,
+) -> TokenStream {
+    let wire_in = field.attrs.name().deserialize_name();
+    let wire_out = field.attrs.name().serialize_name();
+    let ident = words(&field.member.to_token_stream().to_string());
+    let optional_on_input = container_default || has_default(&field.attrs) || is_option(field.ty);
+    let optional_on_output = field.attrs.skip_serializing_if().is_some();
+    let doc = doc_value(&field.original.attrs);
+    let presence = quote! {
+        let presence = match direction {
+            ::pons_core::ir::Direction::Input => if #optional_on_input { ::pons_core::ir::Presence::Optional } else { ::pons_core::ir::Presence::Required },
+            ::pons_core::ir::Direction::Output => if #optional_on_output { ::pons_core::ir::Presence::Optional } else { ::pons_core::ir::Presence::Required },
+            ::pons_core::ir::Direction::Both => if #optional_on_input || #optional_on_output { ::pons_core::ir::Presence::Optional } else { ::pons_core::ir::Presence::Required },
+        };
+    };
+    let ty = field_type_expression(field);
+    if opaque {
+        return quote! {
+            let ty = #ty;
+            if #supports_flatten {
+                flattened.push(ty);
             } else {
-                let presence = match direction {
-                    ::pons_core::ir::Direction::Input => if #optional_on_input { ::pons_core::ir::Presence::Optional } else { ::pons_core::ir::Presence::Required },
-                    ::pons_core::ir::Direction::Output => if #optional_on_output { ::pons_core::ir::Presence::Optional } else { ::pons_core::ir::Presence::Required },
-                    ::pons_core::ir::Direction::Both => if #optional_on_input || #optional_on_output { ::pons_core::ir::Presence::Optional } else { ::pons_core::ir::Presence::Required },
+                let wire = match direction {
+                    ::pons_core::ir::Direction::Input => #wire_in,
+                    ::pons_core::ir::Direction::Output | ::pons_core::ir::Direction::Both => #wire_out,
                 };
+                #presence
                 fields.push(::pons_core::ir::Field {
                     wire: wire.to_owned(),
                     ident: #ident,
@@ -333,11 +360,150 @@ fn field_expression(field: &ast::Field<'_>, supports_flatten: bool) -> TokenStre
                     default: Default::default(),
                     access: None,
                     doc: #doc,
-                    diagnostics: Vec::new(),
+                    diagnostics: vec![::pons_core::ir::Diagnostic {
+                        severity: ::pons_core::ir::DiagnosticSeverity::Error,
+                        code: "PONS-E101".into(),
+                        message: "custom serde flatten in an enum variant payload has no wire key; VariantPayload::Struct cannot represent flattened output".into(),
+                        origin: None,
+                        ext: Default::default(),
+                    }],
                     ext: Default::default(),
                 });
             }
+        };
+    }
+    quote! {
+        let wire = match direction {
+            ::pons_core::ir::Direction::Input => #wire_in,
+            ::pons_core::ir::Direction::Output | ::pons_core::ir::Direction::Both => #wire_out,
+        };
+        let ty = #ty;
+        let ty = if #flatten
+            && #supports_flatten
+            && matches!(
+                &ty,
+                ::pons_core::ir::TypeRef::Inline(
+                    ::pons_core::ir::InlineType::Nullable { .. }
+                )
+            )
+        {
+            cx.push_error(
+                "PONS-E101",
+                "serde flatten of a nullable type is not representable; None omits flattened fields instead of producing null",
+            );
+            ::pons_core::ir::TypeRef::Inline(::pons_core::ir::InlineType::Any)
+        } else {
+            ty
+        };
+        if #flatten {
+            if let Some((nested_fields, nested_flattened)) = cx.flattened_fields(&ty)
+                && (#supports_flatten || nested_flattened.is_empty())
+            {
+                fields.extend(nested_fields);
+                flattened.extend(nested_flattened);
+            } else if #supports_flatten {
+                flattened.push(ty);
+            } else {
+                cx.push_error("PONS-E101", "serde flatten in an enum variant payload is not representable; VariantPayload::Struct has no flattened list, so flattened maps and nested flattened types would be dropped");
+            }
+        } else {
+            #presence
+            fields.push(::pons_core::ir::Field {
+                wire: wire.to_owned(),
+                ident: #ident,
+                ty,
+                presence,
+                default: Default::default(),
+                access: None,
+                doc: #doc,
+                diagnostics: Vec::new(),
+                ext: Default::default(),
+            });
         }
+    }
+}
+
+fn field_type_expression(field: &ast::Field<'_>) -> TokenStream {
+    let ty = field.ty;
+    let codecs = Codecs::new(&field.attrs);
+    if !codecs.any() {
+        return quote!(<#ty as ::pons_core::Schema>::schema(cx, direction));
+    }
+    let message = if field.attrs.flatten() {
+        "custom serde handler with flatten is opaque; its wire fields are not representable"
+    } else {
+        "custom serde handler is opaque"
+    };
+    let input = codecs.label_input;
+    let output = codecs.label_output;
+    let both = codecs.label_both;
+    quote! {{
+        let codec = match direction {
+            ::pons_core::ir::Direction::Input => #input,
+            ::pons_core::ir::Direction::Output => #output,
+            ::pons_core::ir::Direction::Both => #both,
+        };
+        match codec {
+            ::std::option::Option::Some(codec) => {
+                cx.push_diagnostic("PONS-W101", #message);
+                ::pons_core::ir::TypeRef::Inline(::pons_core::ir::InlineType::Opaque {
+                    codec,
+                    wire: ::pons_core::ir::OpaqueWire::Unknown,
+                })
+            }
+            ::std::option::Option::None => <#ty as ::pons_core::Schema>::schema(cx, direction),
+        }
+    }}
+}
+
+struct Codecs {
+    label_input: TokenStream,
+    label_output: TokenStream,
+    label_both: TokenStream,
+    has_codec: bool,
+}
+
+impl Codecs {
+    fn new(attrs: &attr::Field) -> Self {
+        let serialize = attrs
+            .serialize_with()
+            .map(|path| format!("serialize_with={}", path.to_token_stream()));
+        let deserialize = attrs
+            .deserialize_with()
+            .map(|path| format!("deserialize_with={}", path.to_token_stream()));
+        Self {
+            label_input: label(deserialize.clone()),
+            label_output: label(serialize.clone()),
+            label_both: label(match (serialize, deserialize) {
+                (Some(serialize), Some(deserialize)) => Some(format!("{serialize},{deserialize}")),
+                (serialize, deserialize) => serialize.or(deserialize),
+            }),
+            has_codec: attrs.serialize_with().is_some() || attrs.deserialize_with().is_some(),
+        }
+    }
+
+    fn any(&self) -> bool {
+        self.has_codec
+    }
+
+    fn opaque_probe(&self) -> TokenStream {
+        let input = &self.label_input;
+        let output = &self.label_output;
+        let both = &self.label_both;
+        quote! {
+            match direction {
+                ::pons_core::ir::Direction::Input => #input.is_some(),
+                ::pons_core::ir::Direction::Output => #output.is_some(),
+                ::pons_core::ir::Direction::Both => #both.is_some(),
+            }
+        }
+    }
+}
+
+fn label(codec: Option<String>) -> TokenStream {
+    match codec {
+        Some(codec) => quote!(::std::option::Option::Some(#codec.to_owned())),
+        None => quote!(::std::option::Option::<String>::None),
     }
 }
 

@@ -4,12 +4,13 @@ mod runtime_auth;
 mod types;
 mod wire_validation;
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use pons_ir::{
     Document, InlineType, IntegerWire, ObjectOpenness, PathSegment, StreamKind, TypeDef, TypeKind,
     TypeRef, VariantPayload,
 };
+use pons_plugin::Coverage;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GeneratedFile {
@@ -44,6 +45,7 @@ pub enum ErrorStrategy {
 pub struct EmitOutput {
     pub files: Vec<GeneratedFile>,
     pub warnings: Vec<String>,
+    pub coverage: Coverage,
 }
 
 pub fn emit(document: &Document) -> Result<Vec<GeneratedFile>, EmitError> {
@@ -83,6 +85,25 @@ pub fn emit_with_strategy(
         ));
     }
     if document.operations.iter().any(|operation| {
+        operation.body.as_ref().is_some_and(|body| {
+            body.content == pons_ir::ContentKind::Multipart && body.media_type.is_some()
+        })
+    }) {
+        return Err(EmitError(
+            "the TypeScript emitter does not support multipart media type overrides".into(),
+        ));
+    }
+    if document.operations.iter().any(|operation| {
+        operation
+            .body
+            .as_ref()
+            .is_some_and(|body| body.content == pons_ir::ContentKind::Stream)
+    }) {
+        return Err(EmitError(
+            "the TypeScript emitter does not support streaming request bodies".into(),
+        ));
+    }
+    if document.operations.iter().any(|operation| {
         operation.stream.as_ref().is_some_and(|stream| {
             !matches!(
                 &stream.kind,
@@ -98,13 +119,17 @@ pub fn emit_with_strategy(
             "the TypeScript emitter supports SSE and NDJSON streams only".into(),
         ));
     }
-    let integer_scan = scan_integer_references(&document);
-    if let Some(path) = integer_scan.fractional_constraint_paths.first() {
+    let coverage = pons_plugin::coverage_for_document(&document, mode == EmitMode::Lossy)
+        .map_err(EmitError)?;
+    validate_query_types(&document)?;
+    let type_scan = scan_type_references(&document);
+    if let Some(path) = type_scan.fractional_constraint_paths.first() {
         return Err(EmitError(format!(
             "the TypeScript emitter cannot enforce fractional integer constraint {path}"
         )));
     }
-    let wide_integers = integer_scan.wide_paths;
+    let opaque_paths = type_scan.opaque_paths;
+    let wide_integers = type_scan.wide_paths;
     let names = type_names(&document);
     let preserve_wide_integers = mode == EmitMode::Strict && !wide_integers.is_empty();
     let files = vec![
@@ -123,26 +148,52 @@ pub fn emit_with_strategy(
             )?,
         },
     ];
-    let warnings = (mode == EmitMode::Lossy && !wide_integers.is_empty())
-        .then(|| {
-            format!(
+    let mut warnings = Vec::new();
+    if mode == EmitMode::Lossy {
+        if !wide_integers.is_empty() {
+            warnings.push(format!(
                 "TypeScript emits wide numeric integers as number at {}",
                 wide_integers.join(", ")
-            )
-        })
-        .into_iter()
-        .collect();
-    Ok(EmitOutput { files, warnings })
+            ));
+        }
+        if !opaque_paths.is_empty() {
+            warnings.push(format!(
+                "TypeScript emits opaque values as unknown at {}",
+                opaque_paths.join(", ")
+            ));
+        }
+    }
+    Ok(EmitOutput {
+        files,
+        warnings,
+        coverage,
+    })
+}
+
+fn validate_query_types(document: &Document) -> Result<(), EmitError> {
+    for (index, operation) in document.operations.iter().enumerate() {
+        let Some(query) = &operation.query else {
+            continue;
+        };
+        pons_ir::query_fields(document, query).map_err(|rejection| {
+            EmitError(format!(
+                "the TypeScript emitter rejects this query at operations[{index}].query: {}",
+                rejection.message()
+            ))
+        })?;
+    }
+    Ok(())
 }
 
 #[derive(Default)]
-struct IntegerScan {
+struct TypeScan {
     wide_paths: Vec<String>,
+    opaque_paths: Vec<String>,
     fractional_constraint_paths: Vec<String>,
 }
 
-fn scan_integer_references(document: &Document) -> IntegerScan {
-    let mut scan = IntegerScan::default();
+fn scan_type_references(document: &Document) -> TypeScan {
+    let mut scan = TypeScan::default();
     for (id, definition) in &document.types {
         scan_definition(&format!("types.{id}"), definition, &mut scan);
     }
@@ -235,7 +286,7 @@ fn scan_integer_references(document: &Document) -> IntegerScan {
     scan
 }
 
-fn scan_definition(path: &str, definition: &TypeDef, scan: &mut IntegerScan) {
+fn scan_definition(path: &str, definition: &TypeDef, scan: &mut TypeScan) {
     match &definition.definition {
         TypeKind::Struct {
             fields,
@@ -265,7 +316,7 @@ fn scan_definition(path: &str, definition: &TypeDef, scan: &mut IntegerScan) {
     }
 }
 
-fn scan_payload(payload: &VariantPayload, path: &str, scan: &mut IntegerScan) {
+fn scan_payload(payload: &VariantPayload, path: &str, scan: &mut TypeScan) {
     match payload {
         VariantPayload::Unit => {}
         VariantPayload::Newtype { ty } => scan_type_ref(ty, &format!("{path}.ty"), scan),
@@ -282,7 +333,7 @@ fn scan_payload(payload: &VariantPayload, path: &str, scan: &mut IntegerScan) {
     }
 }
 
-fn scan_type_ref(reference: &TypeRef, path: &str, scan: &mut IntegerScan) {
+fn scan_type_ref(reference: &TypeRef, path: &str, scan: &mut TypeScan) {
     let TypeRef::Inline(inline) = reference else {
         return;
     };
@@ -312,6 +363,7 @@ fn scan_type_ref(reference: &TypeRef, path: &str, scan: &mut IntegerScan) {
                 }
             }
         }
+        InlineType::Opaque { .. } => scan.opaque_paths.push(path.to_owned()),
         InlineType::Nullable { inner } => scan_type_ref(inner, &format!("{path}.inner"), scan),
         InlineType::Array { item, .. } => scan_type_ref(item, &format!("{path}.item"), scan),
         InlineType::Map { key, value } => {
@@ -333,21 +385,39 @@ fn is_integer_number(value: &serde_json::Value) -> bool {
         .is_some_and(|number| number.as_i128().is_some() || number.as_u128().is_some())
 }
 
+fn unique_names(bases: impl IntoIterator<Item = String>) -> Vec<String> {
+    let bases = bases.into_iter().collect::<Vec<_>>();
+    let reserved = bases.iter().cloned().collect::<BTreeSet<_>>();
+    let mut assigned = BTreeSet::new();
+    let mut seen = BTreeSet::new();
+    bases
+        .into_iter()
+        .map(|base| {
+            let first = seen.insert(base.clone());
+            let mut suffix = if first { 1 } else { 2 };
+            loop {
+                let candidate = if suffix == 1 {
+                    base.clone()
+                } else {
+                    format!("{base}{suffix}")
+                };
+                if (first || !reserved.contains(&candidate)) && assigned.insert(candidate.clone()) {
+                    break candidate;
+                }
+                suffix += 1;
+            }
+        })
+        .collect()
+}
+
 fn type_names(document: &Document) -> BTreeMap<String, String> {
-    let mut result = BTreeMap::new();
-    let mut used = BTreeMap::<String, usize>::new();
-    for (id, definition) in &document.types {
-        let base = pascal(&definition.name);
-        let count = used.entry(base.clone()).or_default();
-        *count += 1;
-        let name = if *count == 1 {
-            base
-        } else {
-            format!("{base}{count}")
-        };
-        result.insert(id.clone(), name);
-    }
-    result
+    let names = unique_names(
+        document
+            .types
+            .values()
+            .map(|definition| pascal(&definition.name)),
+    );
+    document.types.keys().cloned().zip(names).collect()
 }
 
 fn pascal(words: &[String]) -> String {
@@ -472,9 +542,10 @@ pub(crate) fn string(value: &str) -> String {
 #[cfg(test)]
 mod tests {
     use pons_ir::{
-        ContentKind, Document, IR_VERSION, InlineType, IntegerWire, ObjectOpenness, ResponseStatus,
-        StreamKind, TypeKind, TypeRef,
+        ContentKind, Document, IR_VERSION, InlineType, IntegerWire, ObjectOpenness, PathSegment,
+        ResponseStatus, StreamKind, TypeKind, TypeRef,
     };
+    use serde_json::json;
     use std::collections::BTreeMap;
 
     #[test]
@@ -500,6 +571,7 @@ mod tests {
         assert!(client.contains("kind: \"api_key\", location: \"header\""));
         assert!(client.contains("AuthAttachment"));
         assert!(client.contains("authAdapters?: Record<string, AuthAdapter>"));
+        assert!(client.contains("group.length === 0"));
         assert!(client.contains("kind: \"auth_adapter\""));
         assert!(client.contains("attachment.headers"));
         assert!(client.contains("signal?: AbortSignal"));
@@ -519,7 +591,7 @@ mod tests {
         assert!(client.contains("retry?: RetryOptions | false"));
         assert!(client.contains("fetchWithRetry"));
         assert!(client.contains("retry-after"));
-        assert!(client.contains("Date.parse(retryAfter)"));
+        assert!(client.contains("Date.parse(retryAfterText)"));
         assert!(client.contains("idempotent: boolean"));
         assert!(client.contains("setTimeout"));
         assert!(client.contains("kind: \"timeout\""));
@@ -531,14 +603,21 @@ mod tests {
         assert!(client.contains("withResponseHeaders"));
         assert!(client.contains("return { value, headers: responseHeaders"));
         assert!(client.contains("export type TokenStore"));
+        assert!(
+            client
+                .contains("A store returns a `{ value, ...metadata }` record, never a bare string")
+        );
         assert!(client.contains("export type CredentialSource"));
         assert!(client.contains("kind: \"auth_source\""));
-        assert!(client.contains("await source.set(nextCredential, expiresAt)"));
-        assert!(client.contains("client.authValues[provides.scheme]"));
-        assert!(client.contains("client.authExpirations[provides.scheme]"));
+        assert!(client.contains("await source.set(nextCredential, {"));
+        assert!(client.contains("client.authRecords[scheme] = records"));
+        assert!(client.contains("credentialRecords(client, provides.scheme)"));
+        assert!(client.contains("storeCredentialRecord(client, provides.scheme, next)"));
+        assert!(client.contains("path?: string"));
         assert!(client.contains("expiresAt:"));
         assert!(client.contains("Date.parse(value)"));
-        assert!(client.contains("source.set(nextCredential, expiresAt)"));
+        assert!(client.contains("source.set(nextCredential, {"));
+        assert!(client.contains("host: credentialUrl.hostname"));
         assert!(client.contains("AsyncIterable<Result<EventsWatchEvent, EventsWatchStreamError>>"));
         assert!(client.contains(
             "ResponseWithHeaders<AsyncIterable<Result<EventsWatchEvent, EventsWatchStreamError>>"
@@ -551,8 +630,13 @@ mod tests {
         assert!(client.contains("application/problem+json"));
         assert!(client.contains("stream === \"ndjson\""));
         assert!(client.contains("\"text/event-stream\""));
-        assert!(client.contains("actualContentType !== mediaTypeBase(expectedContentType)"));
-        assert!(client.contains("const text = await response.text()"));
+        assert!(
+            client.contains(
+                "responseMediaTypeMatches(actualContentType, expectedContentType ?? \"\")"
+            )
+        );
+        assert!(client.contains("function mediaTypeMatches"));
+        assert!(client.contains("const text = await readResponseText(response, responseContent)"));
         assert!(client.contains("rawValue = parseJson(text, preserveWideIntegers)"));
         assert!(client.contains("invalid JSON response"));
         assert!(!client.contains("responseContent.includes(\"text/event-stream\")"));
@@ -579,7 +663,7 @@ mod tests {
         let undeclared_success = client.find("undeclared success response").unwrap();
         assert!(declared_success < declared_error && declared_error < undeclared_success);
         let stream_capture = client
-            .find("captureCredential(client, response, provides, undefined, false)")
+            .find("captureCredential(client, response, provides, undefined, false, finalUrl)")
             .unwrap();
         let stream_return = client.find("return ok(withSuccessStatus(readSse").unwrap();
         assert!(stream_capture < stream_return);
@@ -599,7 +683,11 @@ mod tests {
             .find(|file| file.path == "client.ts")
             .unwrap();
         assert!(client.content.contains("\"tenant\": [\"events:read\"]"));
-        assert!(client.content.contains("scopes: authScopes[scheme]"));
+        assert!(
+            client
+                .content
+                .contains("Object.prototype.hasOwnProperty.call(authScopes, scheme)")
+        );
     }
 
     #[test]
@@ -625,8 +713,10 @@ mod tests {
         else {
             unreachable!()
         };
+        let mut login_fields = fields.clone();
+        login_fields[0].presence = pons_ir::Presence::Optional;
         login.definition = TypeKind::Struct {
-            fields: fields.clone(),
+            fields: login_fields,
             flattened: flattened.clone(),
             openness: ObjectOpenness::PreserveTyped {
                 value: TypeRef::Inline(InlineType::String {
@@ -642,8 +732,287 @@ mod tests {
             .into_iter()
             .find(|file| file.path == "types.ts")
             .unwrap();
-        assert!(types.content.contains("[key: string]: string"));
+        assert!(types.content.contains("[key: string]: string | undefined"));
         assert!(types.content.contains("[key: string]: unknown"));
+    }
+
+    #[test]
+    fn emits_fields_according_to_direction_and_access() {
+        let mut raw: serde_json::Value =
+            serde_json::from_str(include_str!("../../../fixtures/login.json")).unwrap();
+        raw["types"]["LoginRequest"] = json!({
+            "kind": "struct",
+            "name": ["login", "request"],
+            "direction": "input",
+            "openness": "reject",
+            "fields": [
+                {"wire": "email", "ident": ["email"], "ty": {"kind": "string"}, "presence": "required"},
+                {"wire": "secret", "ident": ["secret"], "ty": {"kind": "string"}, "presence": "required", "access": "write_only"},
+                {"wire": "server_id", "ident": ["server", "id"], "ty": {"kind": "string"}, "presence": "required", "access": "read_only"}
+            ]
+        });
+        raw["types"]["User"] = json!({
+            "kind": "struct",
+            "name": ["user"],
+            "direction": "output",
+            "openness": "reject",
+            "fields": [
+                {"wire": "id", "ident": ["id"], "ty": {"kind": "string"}, "presence": "required", "access": "read_only"},
+                {"wire": "secret", "ident": ["secret"], "ty": {"kind": "string"}, "presence": "required", "access": "write_only"},
+                {"wire": "value", "ident": ["value"], "ty": {"kind": "string"}, "presence": "required"}
+            ]
+        });
+        raw["types"]["Both"] = json!({
+            "kind": "struct",
+            "name": ["both"],
+            "direction": "both",
+            "openness": "reject",
+            "fields": [
+                {"wire": "id", "ident": ["id"], "ty": {"kind": "string"}, "presence": "required", "access": "read_only"},
+                {"wire": "secret", "ident": ["secret"], "ty": {"kind": "string"}, "presence": "required", "access": "write_only"},
+                {"wire": "value", "ident": ["value"], "ty": {"kind": "string"}, "presence": "required"}
+            ]
+        });
+        let document: Document = serde_json::from_value(raw).unwrap();
+        let types = super::emit(&document)
+            .unwrap()
+            .into_iter()
+            .find(|file| file.path == "types.ts")
+            .unwrap()
+            .content;
+        assert!(
+            types.contains("export type LoginRequest = { \"email\": string; \"secret\": string };")
+        );
+        assert!(types.contains("export type User = { \"id\": string; \"value\": string };"));
+        assert!(types.contains(
+            "export type Both = { \"id\"?: string; \"secret\"?: string; \"value\": string };"
+        ));
+    }
+
+    #[test]
+    fn preserves_types_prefix_in_wire_literals() {
+        let mut raw: serde_json::Value =
+            serde_json::from_str(include_str!("../../../fixtures/login.json")).unwrap();
+        raw["types"]["User"]["fields"][0]["wire"] = json!("Types.field");
+        raw["types"]["LoginError"]["repr"]["tag"] = json!("Types.tag");
+        raw["types"]["LoginError"]["variants"][0]["wire"] = json!("Types.variant");
+        raw["operations"][0]["errors"][0]["body"]["variant"] = json!("Types.variant");
+        let document: Document = serde_json::from_value(raw).unwrap();
+        let files = super::emit(&document).unwrap();
+        let types = files
+            .into_iter()
+            .find(|file| file.path == "types.ts")
+            .unwrap()
+            .content;
+        assert!(types.contains("\"Types.field\": string"));
+        assert!(types.contains("\"Types.tag\": \"Types.variant\""));
+        let client = super::emit(&document)
+            .unwrap()
+            .into_iter()
+            .find(|file| file.path == "client.ts")
+            .unwrap()
+            .content;
+        assert!(client.contains("Types.LoginRequest"));
+    }
+
+    #[test]
+    fn checks_typed_openness_against_flattened_fields() {
+        let mut raw: serde_json::Value =
+            serde_json::from_str(include_str!("../../../fixtures/login.json")).unwrap();
+        raw["types"]["Metadata"] = json!({
+            "kind": "struct",
+            "name": ["metadata"],
+            "direction": "both",
+            "openness": "reject",
+            "fields": [
+                {"wire": "flat", "ident": ["flat"], "ty": {"kind": "string"}, "presence": "required"}
+            ]
+        });
+        raw["types"]["Outer"] = json!({
+            "kind": "struct",
+            "name": ["outer"],
+            "direction": "both",
+            "openness": {"preserve_typed": {"value": {"kind": "string"}}},
+            "fields": [
+                {"wire": "own", "ident": ["own"], "ty": {"kind": "string"}, "presence": "required"}
+            ],
+            "flattened": [{"ref": "Metadata"}]
+        });
+        let mut document: Document = serde_json::from_value(raw).unwrap();
+        let types = super::emit(&document)
+            .unwrap()
+            .into_iter()
+            .find(|file| file.path == "types.ts")
+            .unwrap()
+            .content;
+        assert!(types.contains(
+            "export type Outer = { \"own\": string; [key: string]: string } & Metadata;"
+        ));
+        let TypeKind::Struct { fields, .. } =
+            &mut document.types.get_mut("Metadata").unwrap().definition
+        else {
+            unreachable!()
+        };
+        fields[0].ty = TypeRef::Inline(InlineType::Int {
+            bits: 32,
+            signed: false,
+            wire: IntegerWire::Number,
+            minimum: None,
+            maximum: None,
+            multiple_of: None,
+        });
+        assert!(
+            super::emit(&document)
+                .unwrap_err()
+                .0
+                .contains("direct or flattened fields")
+        );
+    }
+
+    #[test]
+    fn rejects_structs_flattened_with_maps() {
+        let mut raw: serde_json::Value =
+            serde_json::from_str(include_str!("../../../fixtures/login.json")).unwrap();
+        raw["types"]["LoginRequest"]["flattened"] = json!([{
+            "kind": "map",
+            "key": {"kind": "string"},
+            "value": {"kind": "string"}
+        }]);
+        let document: Document = serde_json::from_value(raw).unwrap();
+        assert!(
+            super::emit(&document)
+                .unwrap_err()
+                .0
+                .contains("cannot flatten maps")
+        );
+    }
+
+    #[test]
+    fn rejects_query_types_without_a_wire_name() {
+        let scalar = || {
+            TypeRef::Inline(InlineType::String {
+                format: None,
+                min_length: None,
+                max_length: None,
+                pattern: None,
+            })
+        };
+        let mut document: Document =
+            serde_json::from_str(include_str!("../../../fixtures/login.json")).unwrap();
+        document.operations[1].query = Some(scalar());
+        let error = super::emit(&document).unwrap_err();
+        assert!(error.0.contains("operations[1].query"), "{}", error.0);
+        assert!(error.0.contains("structs"), "{}", error.0);
+
+        let mut raw: serde_json::Value =
+            serde_json::from_str(include_str!("../../../fixtures/login.json")).unwrap();
+        raw["types"]["QueryAlias"] = json!({
+            "kind": "newtype",
+            "name": ["query", "alias"],
+            "direction": "input",
+            "inner": {"kind": "string"}
+        });
+        let document: Document = serde_json::from_value(raw.clone()).unwrap();
+        let mut document = document;
+        document.operations[1].query = Some(TypeRef::Named(pons_ir::NamedRef {
+            id: "QueryAlias".into(),
+            variant: None,
+        }));
+        assert!(
+            super::emit(&document)
+                .unwrap_err()
+                .0
+                .contains("operations[1].query")
+        );
+
+        raw["types"]["QueryAlias"] = json!({
+            "kind": "newtype",
+            "name": ["query", "alias"],
+            "direction": "input",
+            "inner": {"ref": "EventQuery"}
+        });
+        let mut document: Document = serde_json::from_value(raw).unwrap();
+        document.operations[1].query = Some(TypeRef::Named(pons_ir::NamedRef {
+            id: "QueryAlias".into(),
+            variant: None,
+        }));
+        assert!(super::emit(&document).is_ok());
+    }
+
+    #[test]
+    fn rejects_nullable_flatten_before_emitting_a_contract() {
+        let mut raw: serde_json::Value =
+            serde_json::from_str(include_str!("../../../fixtures/login.json")).unwrap();
+        raw["types"]["LoginRequest"]["flattened"] = json!([{
+            "kind": "nullable",
+            "inner": {"ref": "User"}
+        }]);
+        let document: Document = serde_json::from_value(raw).unwrap();
+        for mode in [super::EmitMode::Strict, super::EmitMode::Lossy] {
+            assert!(
+                super::emit_with_mode(&document, mode)
+                    .unwrap_err()
+                    .0
+                    .contains("nullable flattened")
+            );
+        }
+    }
+
+    #[test]
+    fn rejects_streaming_request_bodies() {
+        let mut document: Document =
+            serde_json::from_str(include_str!("../../../fixtures/login.json")).unwrap();
+        document.operations[0].body.as_mut().unwrap().content = ContentKind::Stream;
+        for mode in [super::EmitMode::Strict, super::EmitMode::Lossy] {
+            let error = super::emit_with_mode(&document, mode).unwrap_err();
+            assert!(error.0.contains("streaming request bodies"), "{}", error.0);
+        }
+    }
+
+    #[test]
+    fn rejects_required_nullable_request_headers_and_path_parameters() {
+        let mut document: Document =
+            serde_json::from_str(include_str!("../../../fixtures/login.json")).unwrap();
+        let watch = &mut document.operations[1];
+        watch.headers[0].presence = pons_ir::Presence::Required;
+        watch.headers[0].ty = TypeRef::Inline(InlineType::Nullable {
+            inner: Box::new(TypeRef::Inline(InlineType::String {
+                format: None,
+                min_length: None,
+                max_length: None,
+                pattern: None,
+            })),
+        });
+        let error = super::emit(&document).unwrap_err();
+        assert!(
+            error
+                .0
+                .contains("required request header X-Request-ID cannot be nullable"),
+            "{}",
+            error.0
+        );
+
+        let mut document: Document =
+            serde_json::from_str(include_str!("../../../fixtures/login.json")).unwrap();
+        document.operations[1].path[1] = PathSegment::Param {
+            param: "cursor".into(),
+            ty: TypeRef::Inline(InlineType::Nullable {
+                inner: Box::new(TypeRef::Inline(InlineType::String {
+                    format: None,
+                    min_length: None,
+                    max_length: None,
+                    pattern: None,
+                })),
+            }),
+        };
+        let error = super::emit(&document).unwrap_err();
+        assert!(
+            error
+                .0
+                .contains("required path parameter cursor cannot be nullable"),
+            "{}",
+            error.0
+        );
     }
 
     #[test]
@@ -840,7 +1209,7 @@ mod tests {
         let client = output.iter().find(|file| file.path == "client.ts").unwrap();
         assert!(client.content.contains("\"X-Retry-Count\": [bigint]"));
         assert!(client.content.contains(
-            "decodeWire(parseJson(value, preserveWideIntegers), schema, preserveWideIntegers)"
+            "decodeWire(parseJson(value, preserveWideIntegers), schema, preserveWideIntegers, opaque)"
         ));
         assert!(
             !client
@@ -898,6 +1267,27 @@ mod tests {
     }
 
     #[test]
+    fn reports_wide_integer_coverage_by_mode() {
+        let mut document: Document =
+            serde_json::from_str(include_str!("../../../fixtures/login.json")).unwrap();
+        let definition = document.types.get_mut("User").unwrap();
+        let TypeKind::Struct { fields, .. } = &mut definition.definition else {
+            panic!()
+        };
+        let TypeRef::Inline(InlineType::Int { wire, .. }) = &mut fields[0].ty else {
+            panic!()
+        };
+        *wire = IntegerWire::Number;
+
+        let strict = super::emit_with_mode(&document, super::EmitMode::Strict).unwrap();
+        assert!(strict.coverage.exact.contains("types.User"));
+        assert!(strict.coverage.lossy.is_empty());
+        let lossy = super::emit_with_mode(&document, super::EmitMode::Lossy).unwrap();
+        assert!(lossy.coverage.lossy.contains("types.User"));
+        assert!(lossy.coverage.lossy.contains("operations.auth.login"));
+    }
+
+    #[test]
     fn types_sse_error_events_as_stream_failures() {
         let mut document: Document =
             serde_json::from_str(include_str!("../../../fixtures/login.json")).unwrap();
@@ -927,6 +1317,84 @@ mod tests {
                 .contains("kind: \"server_error\"; body: string")
         );
         assert!(!client.content.contains("event: \"error\"; data:"));
+    }
+
+    #[test]
+    fn allocates_unique_generated_declaration_names() {
+        let mut document: Document =
+            serde_json::from_str(include_str!("../../../fixtures/login.json")).unwrap();
+        let template = document.types.get("LoginRequest").unwrap().clone();
+        for (id, name) in [
+            ("Collision0", vec!["collision"]),
+            ("Collision1", vec!["collision", "2"]),
+            ("Collision2", vec!["collision"]),
+        ] {
+            let mut definition = template.clone();
+            definition.name = name.into_iter().map(str::to_owned).collect();
+            document.types.insert(id.into(), definition);
+        }
+        let stream = document
+            .operations
+            .iter()
+            .find(|operation| operation.stream.is_some())
+            .unwrap()
+            .clone();
+        let mut ndjson = stream.clone();
+        let item = match &ndjson.stream.as_ref().unwrap().kind {
+            StreamKind::Sse { events } => events[0].data.clone(),
+            _ => unreachable!(),
+        };
+        ndjson.stream.as_mut().unwrap().kind = StreamKind::Ndjson { item };
+        document.operations = [
+            (vec![vec!["a"]], stream.clone()),
+            (vec![vec!["a", "stream"]], stream.clone()),
+            (vec![vec!["b"]], ndjson),
+            (vec![vec!["b", "stream"]], stream),
+        ]
+        .into_iter()
+        .map(|(id, mut operation)| {
+            operation.id = id
+                .into_iter()
+                .map(|segment| segment.into_iter().map(str::to_owned).collect())
+                .collect();
+            operation
+        })
+        .collect();
+
+        let files = super::emit(&document).unwrap();
+        let types = &files
+            .iter()
+            .find(|file| file.path == "types.ts")
+            .unwrap()
+            .content;
+        let client = &files
+            .iter()
+            .find(|file| file.path == "client.ts")
+            .unwrap()
+            .content;
+        for source in [types, client] {
+            let declarations = source.matches("export type ").count();
+            let names = source
+                .lines()
+                .filter_map(|line| line.strip_prefix("export type "))
+                .map(|line| line.split_whitespace().next().unwrap())
+                .collect::<std::collections::BTreeSet<_>>();
+            assert_eq!(names.len(), declarations);
+        }
+        for name in ["Collision", "Collision2", "Collision3"] {
+            assert!(types.contains(&format!("export type {name} =")));
+        }
+        for name in ["AEvent", "BItem"] {
+            assert!(client.contains(&format!("export type {name} =")));
+        }
+        for name in [
+            "AStreamError",
+            "AStreamError2",
+            "BStreamError",
+            "BStreamError2",
+        ] {
+            assert!(client.contains(&format!("export type {name} =")));
+        }
     }
 
     #[test]

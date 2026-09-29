@@ -927,6 +927,27 @@
         {
           "type": "object",
           "properties": {
+            "codec": {
+              "type": "string"
+            },
+            "kind": {
+              "type": "string",
+              "const": "opaque"
+            },
+            "wire": {
+              "$ref": "#/$defs/OpaqueWire"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "codec",
+            "wire"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
             "inner": {
               "$ref": "#/$defs/TypeRef"
             },
@@ -1117,6 +1138,15 @@
             "preserve_typed"
           ]
         }
+      ]
+    },
+    "OpaqueWire": {
+      "type": "string",
+      "enum": [
+        "json",
+        "text",
+        "bytes",
+        "unknown"
       ]
     },
     "Operation": {

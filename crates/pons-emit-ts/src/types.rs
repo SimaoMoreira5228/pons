@@ -1,8 +1,8 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use pons_ir::{
-    Document, EnumRepr, Field, InlineType, IntegerWire, ObjectOpenness, TypeDef, TypeKind, TypeRef,
-    Variant, VariantPayload,
+    Access, Direction, Document, EnumRepr, Field, InlineType, IntegerWire, ObjectOpenness, TypeDef,
+    TypeKind, TypeRef, Variant, VariantPayload,
 };
 
 use crate::{EmitError, EmitMode, string};
@@ -20,7 +20,7 @@ pub(super) fn emit(
             definition_type(definition, document, names, mode)?
         ));
     }
-    Ok(output.replace("Types.", ""))
+    Ok(output)
 }
 
 fn definition_type(
@@ -35,23 +35,43 @@ fn definition_type(
             flattened,
             openness,
         } => {
+            let flattened_types = flattened_field_types(flattened, document, names, mode)?;
+            let fields = fields
+                .iter()
+                .filter(|field| field_is_visible(field, definition.direction))
+                .collect::<Vec<_>>();
+            let mut known_types = fields
+                .iter()
+                .map(|field| local_type_ref(&field.ty, document, names, mode))
+                .collect::<Result<Vec<_>, _>>()?;
+            known_types.extend(flattened_types);
             let mut members = fields
                 .iter()
-                .map(|field| field_type(field, document, names, mode))
+                .map(|field| field_type(field, definition.direction, document, names, mode))
                 .collect::<Result<Vec<_>, _>>()?;
             match openness {
                 ObjectOpenness::Reject => {}
                 ObjectOpenness::PreserveTyped { value } => {
-                    let extra = type_ref(value, document, names, mode)?;
-                    for field in fields {
-                        if type_ref(&field.ty, document, names, mode)? != extra {
-                            return Err(EmitError(
-                                "TypeScript cannot represent typed object openness when fields have different types"
-                                    .into(),
-                            ));
-                        }
+                    let extra =
+                        local_type_ref(openness_value(value, document), document, names, mode)?;
+                    if known_types.iter().any(|ty| *ty != extra) {
+                        return Err(EmitError(
+                            "TypeScript cannot represent typed object openness when direct or flattened fields have different types"
+                                .into(),
+                        ));
                     }
-                    members.push(format!("[key: string]: {extra}"));
+                    let index_type = if fields.iter().any(|field| {
+                        field.presence == pons_ir::Presence::Optional
+                            || matches!(
+                                (definition.direction, field.access),
+                                (Direction::Both, Some(Access::ReadOnly | Access::WriteOnly))
+                            )
+                    }) {
+                        format!("{extra} | undefined")
+                    } else {
+                        extra
+                    };
+                    members.push(format!("[key: string]: {index_type}"));
                 }
                 ObjectOpenness::PreserveOpaque => {
                     members.push("[key: string]: unknown".into());
@@ -59,34 +79,159 @@ fn definition_type(
             }
             let mut ty = format!("{{ {} }}", members.join("; "));
             for flat in flattened {
-                ty = format!("{ty} & {}", type_ref(flat, document, names, mode)?);
+                ty = format!("{ty} & {}", local_type_ref(flat, document, names, mode)?);
             }
             Ok(ty)
         }
-        TypeKind::Enum { repr, variants } => enum_type(repr, variants, document, names, mode),
-        TypeKind::Newtype { inner } => type_ref(inner, document, names, mode),
+        TypeKind::Enum { repr, variants } => {
+            enum_type(definition.direction, repr, variants, document, names, mode)
+        }
+        TypeKind::Newtype { inner } => local_type_ref(inner, document, names, mode),
     }
+}
+
+fn openness_value<'a>(ty: &'a TypeRef, document: &'a Document) -> &'a TypeRef {
+    let mut current = ty;
+    let mut visited = BTreeSet::new();
+    loop {
+        match current {
+            TypeRef::Inline(InlineType::Map { value, .. }) => return value,
+            TypeRef::Named(named) if visited.insert(named.id.clone()) => {
+                let Some(TypeKind::Newtype { inner }) = document
+                    .types
+                    .get(&named.id)
+                    .map(|definition| &definition.definition)
+                else {
+                    return current;
+                };
+                current = inner;
+            }
+            _ => return current,
+        }
+    }
+}
+
+fn field_is_visible(field: &Field, direction: Direction) -> bool {
+    !matches!(
+        (direction, field.access),
+        (Direction::Input, Some(Access::ReadOnly)) | (Direction::Output, Some(Access::WriteOnly))
+    )
+}
+
+fn flattened_field_types(
+    references: &[TypeRef],
+    document: &Document,
+    names: &BTreeMap<String, String>,
+    mode: EmitMode,
+) -> Result<Vec<String>, EmitError> {
+    let mut result = Vec::new();
+    let mut visited = BTreeSet::new();
+    for reference in references {
+        collect_flattened_field_types(reference, document, names, mode, &mut visited, &mut result)?;
+    }
+    Ok(result)
+}
+
+fn collect_flattened_field_types(
+    reference: &TypeRef,
+    document: &Document,
+    names: &BTreeMap<String, String>,
+    mode: EmitMode,
+    visited: &mut BTreeSet<String>,
+    result: &mut Vec<String>,
+) -> Result<(), EmitError> {
+    let TypeRef::Named(reference) = reference else {
+        if matches!(reference, TypeRef::Inline(InlineType::Map { .. })) {
+            return Err(EmitError(
+                "the TypeScript emitter cannot flatten maps into structs".into(),
+            ));
+        }
+        return Ok(());
+    };
+    if !visited.insert(reference.id.clone()) {
+        return Ok(());
+    }
+    let definition = document
+        .types
+        .get(&reference.id)
+        .ok_or_else(|| EmitError(format!("unknown type {}", reference.id)))?;
+    match &definition.definition {
+        TypeKind::Struct {
+            fields,
+            flattened,
+            openness,
+        } => {
+            for field in fields
+                .iter()
+                .filter(|field| field_is_visible(field, definition.direction))
+            {
+                result.push(local_type_ref(&field.ty, document, names, mode)?);
+            }
+            if let ObjectOpenness::PreserveTyped { value } = openness {
+                result.push(local_type_ref(
+                    openness_value(value, document),
+                    document,
+                    names,
+                    mode,
+                )?);
+            }
+            for reference in flattened {
+                collect_flattened_field_types(reference, document, names, mode, visited, result)?;
+            }
+        }
+        TypeKind::Newtype { inner } => {
+            collect_flattened_field_types(inner, document, names, mode, visited, result)?;
+        }
+        TypeKind::Enum { .. } => {}
+    }
+    Ok(())
 }
 
 fn field_type(
     field: &Field,
+    direction: Direction,
     document: &Document,
     names: &BTreeMap<String, String>,
     mode: EmitMode,
 ) -> Result<String, EmitError> {
     let key = string(&field.wire);
-    let presence = if field.presence == pons_ir::Presence::Optional {
+    let access_specific = matches!(
+        (direction, field.access),
+        (Direction::Both, Some(Access::ReadOnly | Access::WriteOnly))
+    );
+    let presence = if field.presence == pons_ir::Presence::Optional || access_specific {
         "?"
     } else {
         ""
     };
     Ok(format!(
         "{key}{presence}: {}",
-        type_ref(&field.ty, document, names, mode)?
+        local_type_ref(&field.ty, document, names, mode)?
     ))
 }
 
+fn is_object_type<'a>(mut ty: &'a TypeRef, document: &'a Document) -> bool {
+    let mut visited = BTreeSet::new();
+    loop {
+        let TypeRef::Named(reference) = ty else {
+            return false;
+        };
+        if !visited.insert(reference.id.clone()) {
+            return false;
+        }
+        let Some(definition) = document.types.get(&reference.id) else {
+            return false;
+        };
+        match &definition.definition {
+            TypeKind::Struct { .. } => return true,
+            TypeKind::Newtype { inner } => ty = inner,
+            TypeKind::Enum { .. } => return false,
+        }
+    }
+}
+
 fn enum_type(
+    direction: Direction,
     repr: &EnumRepr,
     variants: &[Variant],
     document: &Document,
@@ -97,12 +242,12 @@ fn enum_type(
     for variant in variants {
         let payload = match &variant.payload {
             VariantPayload::Unit => "null".into(),
-            VariantPayload::Newtype { ty } => type_ref(ty, document, names, mode)?,
+            VariantPayload::Newtype { ty } => local_type_ref(ty, document, names, mode)?,
             VariantPayload::Tuple { items } => format!(
                 "[{}]",
                 items
                     .iter()
-                    .map(|item| type_ref(item, document, names, mode))
+                    .map(|item| local_type_ref(item, document, names, mode))
                     .collect::<Result<Vec<_>, _>>()?
                     .join(", ")
             ),
@@ -110,7 +255,8 @@ fn enum_type(
                 "{{ {} }}",
                 fields
                     .iter()
-                    .map(|field| field_type(field, document, names, mode))
+                    .filter(|field| field_is_visible(field, direction))
+                    .map(|field| field_type(field, direction, document, names, mode))
                     .collect::<Result<Vec<_>, _>>()?
                     .join("; ")
             ),
@@ -126,7 +272,16 @@ fn enum_type(
                 let tag = string(tag);
                 match &variant.payload {
                     VariantPayload::Unit => format!("{{ {tag}: {wire} }}"),
-                    _ => format!("{{ {tag}: {wire} }} & {payload}"),
+                    VariantPayload::Struct { .. } => format!("{{ {tag}: {wire} }} & {payload}"),
+                    VariantPayload::Newtype { ty } if is_object_type(ty, document) => {
+                        format!("{{ {tag}: {wire} }} & {payload}")
+                    }
+                    _ => {
+                        return Err(EmitError(
+                            "TypeScript cannot represent internally tagged newtype or tuple payloads"
+                                .into(),
+                        ));
+                    }
                 }
             }
             EnumRepr::Adjacent { tag, content } => {
@@ -154,13 +309,37 @@ pub(super) fn type_ref(
     names: &BTreeMap<String, String>,
     mode: EmitMode,
 ) -> Result<String, EmitError> {
+    type_ref_with_namespace(reference, document, names, mode, true)
+}
+
+fn local_type_ref(
+    reference: &TypeRef,
+    document: &Document,
+    names: &BTreeMap<String, String>,
+    mode: EmitMode,
+) -> Result<String, EmitError> {
+    type_ref_with_namespace(reference, document, names, mode, false)
+}
+
+fn type_ref_with_namespace(
+    reference: &TypeRef,
+    document: &Document,
+    names: &BTreeMap<String, String>,
+    mode: EmitMode,
+    qualify: bool,
+) -> Result<String, EmitError> {
     match reference {
         TypeRef::Named(reference) => {
             let name = names
                 .get(&reference.id)
                 .ok_or_else(|| EmitError(format!("unknown type {}", reference.id)))?;
+            let name = if qualify {
+                format!("Types.{name}")
+            } else {
+                name.clone()
+            };
             let Some(variant) = &reference.variant else {
-                return Ok(format!("Types.{name}"));
+                return Ok(name);
             };
             let filter = match document
                 .types
@@ -191,9 +370,9 @@ pub(super) fn type_ref(
                     repr: EnumRepr::Adjacent { tag, .. },
                     ..
                 }) => format!("{{ {}: {} }}", string(tag), string(variant)),
-                _ => return Ok(format!("Types.{name}")),
+                _ => return Ok(name),
             };
-            Ok(format!("Extract<Types.{name}, {filter}>"))
+            Ok(format!("Extract<{name}, {filter}>"))
         }
         TypeRef::Inline(inline) => match inline {
             InlineType::Bool => Ok("boolean".into()),
@@ -214,22 +393,24 @@ pub(super) fn type_ref(
             InlineType::Bytes { .. } => Ok("Uint8Array".into()),
             InlineType::Null => Ok("null".into()),
             InlineType::Any => Ok("unknown".into()),
+            InlineType::Opaque { .. } => Ok("unknown".into()),
             InlineType::Nullable { inner } => Ok(format!(
                 "{} | null",
-                type_ref(inner, document, names, mode)?
+                type_ref_with_namespace(inner, document, names, mode, qualify)?
             )),
-            InlineType::Array { item, .. } => {
-                Ok(format!("Array<{}>", type_ref(item, document, names, mode)?))
-            }
+            InlineType::Array { item, .. } => Ok(format!(
+                "Array<{}>",
+                type_ref_with_namespace(item, document, names, mode, qualify)?
+            )),
             InlineType::Map { value, .. } => Ok(format!(
                 "Record<string, {}>",
-                type_ref(value, document, names, mode)?
+                type_ref_with_namespace(value, document, names, mode, qualify)?
             )),
             InlineType::Tuple { items } => Ok(format!(
                 "[{}]",
                 items
                     .iter()
-                    .map(|item| type_ref(item, document, names, mode))
+                    .map(|item| type_ref_with_namespace(item, document, names, mode, qualify))
                     .collect::<Result<Vec<_>, _>>()?
                     .join(", ")
             )),

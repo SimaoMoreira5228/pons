@@ -7,7 +7,7 @@ use pons_ir::{
 };
 
 use crate::runtime;
-use crate::{EmitError, EmitMode, ErrorStrategy, camel, pascal, string, types};
+use crate::{EmitError, EmitMode, ErrorStrategy, camel, pascal, string, types, unique_names};
 
 struct Node {
     children: BTreeMap<String, Node>,
@@ -27,19 +27,63 @@ impl Node {
         let mut members = self
             .operations
             .iter()
-            .map(|(name, value)| format!("{indent}{name}: {value}"))
+            .map(|(name, value)| {
+                let key = if name == "__proto__" {
+                    format!("[{}]", string(name))
+                } else {
+                    name.clone()
+                };
+                format!("{indent}{key}: {value}")
+            })
             .collect::<Vec<_>>();
-        members.extend(
-            self.children
-                .iter()
-                .map(|(name, child)| format!("{indent}{name}: {}", child.render(depth + 2))),
-        );
+        members.extend(self.children.iter().map(|(name, child)| {
+            let key = if name == "__proto__" {
+                format!("[{}]", string(name))
+            } else {
+                name.clone()
+            };
+            format!("{indent}{key}: {}", child.render(depth + 2))
+        }));
         format!(
             "{{\n{}\n{}}}",
             members.join(",\n"),
             " ".repeat(depth.saturating_sub(2))
         )
     }
+}
+
+fn operation_type_names(document: &Document) -> Vec<Vec<String>> {
+    let mut stream_operations = Vec::with_capacity(document.operations.len());
+    let mut candidates = Vec::new();
+    for operation in &document.operations {
+        let id = operation.id.iter().flatten().cloned().collect::<Vec<_>>();
+        let name = pascal(&id);
+        candidates.extend([
+            format!("{name}Args"),
+            format!("{name}Response"),
+            format!("{name}Error"),
+        ]);
+        let stream_name = match operation.stream.as_ref().map(|stream| &stream.kind) {
+            Some(StreamKind::Sse { .. }) => Some("Event"),
+            Some(StreamKind::Ndjson { .. }) => Some("Item"),
+            _ => None,
+        };
+        stream_operations.push(stream_name.is_some());
+        if let Some(stream_name) = stream_name {
+            candidates.push(format!("{name}{stream_name}"));
+            candidates.push(format!("{name}StreamError"));
+        }
+    }
+    let mut names = unique_names(candidates).into_iter();
+    stream_operations
+        .into_iter()
+        .map(|stream| {
+            let count = if stream { 5 } else { 3 };
+            let allocated = names.by_ref().take(count).collect::<Vec<_>>();
+            debug_assert_eq!(allocated.len(), count);
+            allocated
+        })
+        .collect()
 }
 
 pub(super) fn emit(
@@ -49,6 +93,7 @@ pub(super) fn emit(
     preserve_wide_integers: bool,
     error_strategy: ErrorStrategy,
 ) -> Result<String, EmitError> {
+    let opaque_required = mode == EmitMode::Strict && document.has_reachable_opaque();
     let mut output = if error_strategy == ErrorStrategy::Throw {
         String::from(
             "type Result<T, E> = { isOk(): boolean; isErr(): boolean; value?: T; error?: E };\nfunction ok<T>(value: T): Result<T, never> { return { isOk: () => true, isErr: () => false, value }; }\nfunction err<E>(error: E): Result<never, E> { return { isOk: () => false, isErr: () => true, error }; }\n",
@@ -62,27 +107,24 @@ pub(super) fn emit(
     output.push('\n');
     output.push_str(&auth_types(document));
     output.push_str(&type_definitions(document)?);
-    output.push_str("\nexport type AuthAttachment = { headers?: Record<string, string>; query?: Record<string, string>; cookies?: Record<string, string> };\nexport type AuthAdapter = (context: { scheme: string; scopes: readonly string[]; method: string; url: URL; headers: Headers }) => AuthAttachment | Promise<AuthAttachment>;\nexport type TokenStore = { get(): string | undefined | Promise<string | undefined>; set(value: string, expiresAt?: number): void | Promise<void>; clear(): void | Promise<void> };\nexport type CredentialSource = string | (() => string | undefined | Promise<string | undefined>) | TokenStore;\nexport type RequestInterceptor = (context: { url: URL; init: RequestInit }) => void | Promise<void>;\nexport type ResponseInterceptor = (context: { response: Response; url: URL; init: RequestInit }) => void | Promise<void>;\nexport type Interceptors = { request?: RequestInterceptor; response?: ResponseInterceptor };\nexport type ResponseWithHeaders<T, H> = { value: T; headers: H };\nexport type ResponseWithStatus<T> = { value: T; status: number };\nexport type ClientFailure = { kind: \"network\"; cause: unknown } | { kind: \"timeout\"; afterMs: number } | { kind: \"aborted\"; cause: unknown } | { kind: \"auth_adapter\"; scheme: string; cause: unknown } | { kind: \"auth_source\"; scheme: string; cause: unknown } | { kind: \"interceptor\"; phase: \"request\" | \"response\"; cause: unknown } | { kind: \"protocol\"; message: string } | { kind: \"unexpected_http\"; status: number; body: unknown } | { kind: \"auth\"; schemes: string[] };\n\n");
+    output.push_str("export type OpaqueWire = \"json\" | \"text\" | \"bytes\" | \"unknown\";\n");
+    output.push_str("export type OpaqueCodec = { encode(value: unknown, wire: OpaqueWire): unknown; decode(value: unknown, wire: OpaqueWire): unknown };\n");
+    output.push_str("export type OpaqueCodecRegistry = Record<string, OpaqueCodec>;\n");
+    output.push_str("\nexport type AuthAttachment = { headers?: Record<string, string>; query?: Record<string, string>; cookies?: Record<string, string> };\nexport type AuthAdapter = (context: { scheme: string; scopes: readonly string[]; method: string; url: URL; headers: Headers }) => AuthAttachment | Promise<AuthAttachment>;\n/** Scope and lifetime captured with a credential. `expiresAt` is a Unix millisecond timestamp; `host`, `path`, `secure`, and `origin` bind the value to the response that issued it. */\nexport type CredentialMetadata = { expiresAt?: number; path?: string; secure?: boolean; host?: string; origin?: string };\nexport type StoredCredential = { value: string } & CredentialMetadata;\n/** A store returns a `{ value, ...metadata }` record, never a bare string, and must persist the metadata it is given in `set` so that expiry and origin scope survive a new client. A record with a non-string `value` or a metadata field of the wrong type is rejected. */\nexport type TokenStore = { get(): StoredCredential | undefined | Promise<StoredCredential | undefined>; set(value: string, metadata?: CredentialMetadata): void | Promise<void>; clear(): void | Promise<void> };\nexport type CredentialSource = string | (() => string | undefined | Promise<string | undefined>) | TokenStore;\nexport type RequestInterceptor = (context: { url: URL; init: RequestInit }) => void | Promise<void>;\nexport type ResponseInterceptor = (context: { response: Response; url: URL; init: RequestInit }) => void | Promise<void>;\nexport type Interceptors = { request?: RequestInterceptor; response?: ResponseInterceptor };\nexport type ResponseWithHeaders<T, H> = { value: T; headers: H };\nexport type ResponseWithStatus<T> = { value: T; status: number };\nexport type ClientFailure = { kind: \"network\"; cause: unknown } | { kind: \"timeout\"; afterMs: number } | { kind: \"aborted\"; cause: unknown } | { kind: \"auth_adapter\"; scheme: string; cause: unknown } | { kind: \"auth_source\"; scheme: string; cause: unknown } | { kind: \"opaque_codec\"; codec: string; phase: \"encode\" | \"decode\"; cause: unknown } | { kind: \"interceptor\"; phase: \"request\" | \"response\"; cause: unknown } | { kind: \"protocol\"; message: string } | { kind: \"unexpected_http\"; status: number; body: unknown } | { kind: \"auth\"; schemes: string[] };\n\n");
     output.push_str("export type RetryOptions = { attempts?: number; backoffMs?: number; maxBackoffMs?: number; jitterMs?: number };\n");
     output.push_str("export type CallOptions = { headers?: HeadersInit; signal?: AbortSignal; timeout?: number; retry?: RetryOptions | false };\n");
-    output.push_str("export type ClientOptions = { baseUrl: string; headers?: HeadersInit | (() => HeadersInit | Promise<HeadersInit>); auth?: Record<string, CredentialSource>; authAdapters?: Record<string, AuthAdapter>; fetch?: typeof fetch; signal?: AbortSignal; timeout?: number; retry?: RetryOptions; interceptors?: Interceptors };\n\n");
+    output.push_str(&format!(
+        "export type ClientOptions = {{ baseUrl: string; headers?: HeadersInit | (() => HeadersInit | Promise<HeadersInit>); auth?: Record<string, CredentialSource>; authAdapters?: Record<string, AuthAdapter>; opaqueCodecs{}: OpaqueCodecRegistry; fetch?: typeof fetch; signal?: AbortSignal; timeout?: number; retry?: RetryOptions; interceptors?: Interceptors }};\n\n",
+        if opaque_required { "" } else { "?" },
+    ));
     output.push_str(&runtime::render());
 
     let mut tree = Node::new();
-    let mut type_names = BTreeMap::new();
-    for operation in &document.operations {
-        let id = operation.id.iter().flatten().cloned().collect::<Vec<_>>();
-        let base = pascal(&id);
-        let count = type_names.entry(base.clone()).or_insert(0usize);
-        *count += 1;
-        let unique = if *count == 1 {
-            base
-        } else {
-            format!("{base}{count}")
-        };
+    let operation_names = operation_type_names(document);
+    for (operation, declaration_names) in document.operations.iter().zip(operation_names) {
         let (declarations, function) = operation_function(
             operation,
-            &unique,
+            &declaration_names,
             document,
             names,
             mode,
@@ -110,7 +152,10 @@ pub(super) fn emit(
         }
         node.operations.push((leaf, function));
     }
-    output.push_str("export function createClient(client: ClientOptions) {\n  const auth = { ...client.auth };\n  const authValues: Record<string, string> = {};\n  const authExpirations: Record<string, number> = {};\n  const configured = { ...client, auth, authValues, authExpirations };\n  return ");
+    output.push_str(&format!(
+        "export function createClient(client: ClientOptions) {{\n  const auth: Record<string, CredentialSource> = Object.assign(Object.create(null), client.auth ?? {{}});\n  const authAdapters: Record<string, AuthAdapter> = Object.assign(Object.create(null), client.authAdapters ?? {{}});\n  const authRecords: Record<string, CredentialValue[]> = Object.create(null);\n  const authInvalidated: Record<string, boolean> = Object.create(null);\n  const configured = {{ ...client, auth, authAdapters, authRecords, authInvalidated, opaque: {{ codecs: client.opaqueCodecs, required: {opaque_required}, allowUnsafeWideIntegers: {} }} }};\n  return ",
+        !preserve_wide_integers,
+    ));
     output.push_str(&tree.render(2));
     output.push_str(";\n}\n");
     Ok(output)
@@ -137,11 +182,11 @@ fn auth_types(document: &Document) -> String {
             }
             AuthScheme::Custom { .. } => "{ kind: \"custom\" }".into(),
         };
-        entries.push(format!("  {key}: {value}"));
+        entries.push(format!("  authSchemes[{key}] = {value};"));
     }
     format!(
-        "const authSchemes: Record<string, {{ kind: string; location?: string; name?: string }}> = {{\n{}\n}};\n",
-        entries.join(",\n")
+        "const authSchemes: Record<string, {{ kind: string; location?: string; name?: string }}> = Object.create(null);\n{}\n",
+        entries.join("\n")
     )
 }
 
@@ -152,31 +197,36 @@ fn type_definitions(document: &Document) -> Result<String, EmitError> {
         .map(|(id, definition)| {
             let mut value = serde_json::to_value(&definition.definition)
                 .map_err(|error| EmitError(format!("cannot encode type metadata: {error}")))?;
+            value["direction"] = serde_json::to_value(definition.direction)
+                .map_err(|error| EmitError(format!("cannot encode type direction: {error}")))?;
             normalize_integer_constraints(&mut value);
             Ok((id.clone(), value))
         })
         .collect::<Result<BTreeMap<_, _>, _>>()?;
     let definitions = serde_json::to_string(&definitions)
         .map_err(|error| EmitError(format!("cannot encode type metadata: {error}")))?;
+    let encoded = serde_json::to_string(&definitions)
+        .map_err(|error| EmitError(format!("cannot encode type metadata: {error}")))?;
     Ok(format!(
-        "const typeDefinitions: Record<string, any> = {definitions};\n"
+        "const typeDefinitions: Record<string, any> = Object.assign(Object.create(null), JSON.parse({encoded}));\n"
     ))
 }
 
 fn operation_function(
     operation: &Operation,
-    name: &str,
+    declaration_names: &[String],
     document: &Document,
     names: &BTreeMap<String, String>,
     mode: EmitMode,
     preserve_wide_integers: bool,
     error_strategy: ErrorStrategy,
 ) -> Result<(String, String), EmitError> {
-    let args_name = format!("{name}Args");
-    let success_name = format!("{name}Response");
-    let error_name = format!("{name}Error");
+    let args_name = &declaration_names[0];
+    let success_name = &declaration_names[1];
+    let error_name = &declaration_names[2];
     let args = operation_args(operation, document, names, mode)?;
-    let (success, stream_types) = response_type(operation, name, document, names, mode)?;
+    let (success, stream_types) =
+        response_type(operation, declaration_names, document, names, mode)?;
     let errors = if operation.errors_inherit {
         operation
             .errors
@@ -257,9 +307,14 @@ fn operation_function(
         .scopes
         .iter()
         .map(|(scheme, scopes)| {
+            let key = string(scheme);
+            let key = if scheme == "__proto__" {
+                format!("[{key}]")
+            } else {
+                key
+            };
             format!(
-                "{}: [{}]",
-                string(scheme),
+                "{key}: [{}]",
                 scopes
                     .iter()
                     .map(|scope| string(scope))
@@ -378,14 +433,14 @@ fn operation_args(
 
 fn response_type(
     operation: &Operation,
-    name: &str,
+    declaration_names: &[String],
     document: &Document,
     names: &BTreeMap<String, String>,
     mode: EmitMode,
 ) -> Result<(String, String), EmitError> {
     if let Some(StreamKind::Sse { events }) = operation.stream.as_ref().map(|stream| &stream.kind) {
-        let event_name = format!("{name}Event");
-        let failure_name = format!("{name}StreamError");
+        let event_name = &declaration_names[3];
+        let failure_name = &declaration_names[4];
         let variants = events
             .iter()
             .filter(|event| event.event != "error")
@@ -425,8 +480,8 @@ fn response_type(
     }
     if let Some(StreamKind::Ndjson { item }) = operation.stream.as_ref().map(|stream| &stream.kind)
     {
-        let item_name = format!("{name}Item");
-        let failure_name = format!("{name}StreamError");
+        let item_name = &declaration_names[3];
+        let failure_name = &declaration_names[4];
         let stream_type = format!("AsyncIterable<Result<{item_name}, {failure_name}>>");
         return Ok((
             stream_response_type(operation, &stream_type, document, names, mode)?,
@@ -464,12 +519,18 @@ fn stream_response_type(
     names: &BTreeMap<String, String>,
     mode: EmitMode,
 ) -> Result<String, EmitError> {
-    let responses = operation
-        .responses
-        .iter()
-        .filter(|response| response.content == ContentKind::Stream)
-        .map(|response| response_value_type(stream_type.into(), response, document, names, mode))
-        .collect::<Result<Vec<_>, _>>()?;
+    let mut responses = Vec::new();
+    for response in &operation.responses {
+        let body = if response.content == ContentKind::Stream {
+            stream_type.to_owned()
+        } else {
+            match &response.body {
+                Some(body) => types::type_ref(body, document, names, mode)?,
+                None => "void".into(),
+            }
+        };
+        responses.push(response_value_type(body, response, document, names, mode)?);
+    }
     if responses.is_empty() {
         Ok(stream_type.into())
     } else {
@@ -610,9 +671,12 @@ fn path_expression(operation: &Operation) -> String {
         .path
         .iter()
         .map(|segment| match segment {
-            PathSegment::Literal { lit } => string(lit),
+            PathSegment::Literal { lit } => format!("encodePathSegment({})", string(lit)),
             PathSegment::Param { param, .. } => {
-                format!("encodeURIComponent(String(pathValues[{}]))", string(param))
+                format!(
+                    "encodePathSegment(stringifyCarrier(pathValues[{}]))",
+                    string(param)
+                )
             }
         })
         .collect::<Vec<_>>();

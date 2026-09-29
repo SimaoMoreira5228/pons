@@ -293,6 +293,10 @@ pub enum InlineType {
     },
     Null,
     Any,
+    Opaque {
+        codec: String,
+        wire: OpaqueWire,
+    },
     Nullable {
         inner: Box<TypeRef>,
     },
@@ -315,6 +319,15 @@ pub enum InlineType {
 pub enum IntegerWire {
     Number,
     String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum OpaqueWire {
+    Json,
+    Text,
+    Bytes,
+    Unknown,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
