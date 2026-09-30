@@ -16,7 +16,7 @@ fn main() -> ExitCode {
     match run(env::args_os().skip(1).collect()) {
         Ok(()) => ExitCode::SUCCESS,
         Err(CliError::Usage(message)) => {
-            eprint!("{message}");
+            eprintln!("pons: {message}");
             ExitCode::from(2)
         }
         Err(CliError::Failure(message)) => {
@@ -28,7 +28,9 @@ fn main() -> ExitCode {
 
 fn run(args: Vec<OsString>) -> Result<(), CliError> {
     let Some(command) = args.first().and_then(|arg| arg.to_str()) else {
-        return Err(CliError::Usage(HELP.into()));
+        return Err(CliError::Usage(
+            "no command given; run \"pons --help\" for usage".into(),
+        ));
     };
     if matches!(command, "--help" | "-h" | "help") {
         print!("{HELP}");
@@ -36,7 +38,10 @@ fn run(args: Vec<OsString>) -> Result<(), CliError> {
     }
     if command == "diff" {
         if args.len() != 3 {
-            return Err(CliError::Usage(HELP.into()));
+            return Err(CliError::Usage(format!(
+                "diff expects two documents, got {}",
+                args.len() - 1
+            )));
         }
         let old = read_document(Path::new(&args[1]))?;
         let new = read_document(Path::new(&args[2]))?;
@@ -62,53 +67,77 @@ fn run(args: Vec<OsString>) -> Result<(), CliError> {
         };
     }
     if command == "emit" {
-        if args.len() < 5 || args[1] != "--target" {
-            return Err(CliError::Usage(HELP.into()));
+        if args.len() < 5 {
+            return Err(CliError::Usage(
+                "emit expects --target <name> <ir.json> <output-dir> [options]".into(),
+            ));
+        }
+        if args[1] != "--target" {
+            return Err(CliError::Usage(format!(
+                "emit expects --target as its first option, not {:?}",
+                args[1]
+            )));
         }
         let target = args[2]
             .to_str()
-            .ok_or_else(|| CliError::Usage(HELP.into()))?;
-        let mut strict = true;
-        let mut strict_flag = false;
-        let mut lossy_flag = false;
+            .ok_or_else(|| CliError::Usage("--target expects a target name".into()))?;
+        let mut mode: Option<bool> = None;
         let mut errors_flag = false;
         let mut error_strategy = ErrorStrategy::Neverthrow;
         let mut coverage_path: Option<OsString> = None;
         let mut index = 5;
         while index < args.len() {
-            match args[index].to_str() {
-                Some("--strict") if !strict_flag && !lossy_flag => strict_flag = true,
-                Some("--lossy") if !strict_flag && !lossy_flag => {
-                    strict_flag = true;
-                    lossy_flag = true;
-                    strict = false;
+            let Some(flag) = args[index].to_str() else {
+                return Err(CliError::Usage(format!(
+                    "emit option {index} is not valid UTF-8"
+                )));
+            };
+            match flag {
+                "--strict" => {
+                    if mode == Some(false) {
+                        return Err(CliError::Usage("--strict conflicts with --lossy".into()));
+                    }
+                    mode = Some(true);
                 }
-                Some("--errors") if !errors_flag => {
+                "--lossy" => {
+                    if mode == Some(true) {
+                        return Err(CliError::Usage("--lossy conflicts with --strict".into()));
+                    }
+                    mode = Some(false);
+                }
+                "--errors" if errors_flag => {
+                    return Err(CliError::Usage("--errors given more than once".into()));
+                }
+                "--errors" => {
                     if target != "ts" {
-                        return Err(CliError::Failure(format!(
+                        return Err(CliError::Usage(format!(
                             "--errors is only supported by the TypeScript target, not {target}"
                         )));
                     }
                     errors_flag = true;
                     index += 1;
-                    error_strategy = match args.get(index).and_then(|value| value.to_str()) {
-                        Some("neverthrow") => ErrorStrategy::Neverthrow,
-                        Some("throw") => ErrorStrategy::Throw,
-                        _ => return Err(CliError::Usage(HELP.into())),
+                    error_strategy = match value_for("--errors", args.get(index))? {
+                        "neverthrow" => ErrorStrategy::Neverthrow,
+                        "throw" => ErrorStrategy::Throw,
+                        value => {
+                            return Err(CliError::Usage(format!(
+                                "--errors expects neverthrow or throw, not {value:?}"
+                            )));
+                        }
                     };
                 }
-                Some("--coverage") if coverage_path.is_none() => {
-                    index += 1;
-                    coverage_path = Some(
-                        args.get(index)
-                            .cloned()
-                            .ok_or_else(|| CliError::Usage(HELP.into()))?,
-                    );
+                "--coverage" if coverage_path.is_some() => {
+                    return Err(CliError::Usage("--coverage given more than once".into()));
                 }
-                _ => return Err(CliError::Usage(HELP.into())),
+                "--coverage" => {
+                    index += 1;
+                    coverage_path = Some(value_for("--coverage", args.get(index))?.into());
+                }
+                other => return Err(CliError::Usage(format!("unexpected emit option {other:?}"))),
             }
             index += 1;
         }
+        let strict = mode.unwrap_or(true);
         let document = read_document(Path::new(&args[3]))?;
         validate(&document)?;
         return emit::run(
@@ -120,26 +149,39 @@ fn run(args: Vec<OsString>) -> Result<(), CliError> {
             error_strategy,
         );
     }
-    if args.len() != 2 {
-        return Err(CliError::Usage(HELP.into()));
-    }
-
-    let path = Path::new(&args[1]);
     match command {
-        "check" => {
+        "check" | "fmt" if args.len() == 2 => {
+            let path = Path::new(&args[1]);
             let document = read_document(path)?;
             validate(&document)?;
-            println!("valid: {}", path.display());
-            Ok(())
+            if command == "check" {
+                println!("valid: {}", path.display());
+                Ok(())
+            } else {
+                rewrite_canonical(path, &document)
+            }
         }
-        "fmt" => {
-            let document = read_document(path)?;
-            validate(&document)?;
-            rewrite_canonical(path, &document)?;
-            Ok(())
-        }
-        _ => Err(CliError::Usage(HELP.into())),
+        "check" | "fmt" => Err(CliError::Usage(format!(
+            "{command} expects one document, got {}",
+            args.len() - 1
+        ))),
+        _ => Err(CliError::Usage(format!(
+            "unknown command {command:?}; run \"pons --help\" for usage"
+        ))),
     }
+}
+
+fn value_for<'a>(flag: &str, value: Option<&'a OsString>) -> Result<&'a str, CliError> {
+    let value = value.ok_or_else(|| CliError::Usage(format!("{flag} requires a value")))?;
+    let value = value
+        .to_str()
+        .ok_or_else(|| CliError::Usage(format!("{flag} requires a UTF-8 value")))?;
+    if value.starts_with('-') {
+        return Err(CliError::Usage(format!(
+            "{flag} expects a value, not the flag {value:?}"
+        )));
+    }
+    Ok(value)
 }
 
 fn read_document(path: &Path) -> Result<Document, CliError> {
@@ -211,6 +253,7 @@ fn rewrite_canonical(path: &Path, document: &Document) -> Result<(), CliError> {
     Ok(())
 }
 
+#[derive(Debug)]
 enum CliError {
     Usage(String),
     Failure(String),

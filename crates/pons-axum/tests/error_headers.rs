@@ -31,6 +31,41 @@ impl IntoResponse for UserError {
     }
 }
 
+#[derive(Debug, Serialize, Schema, pons_core::ApiError)]
+enum SlotError {
+    #[pons(status = 404)]
+    Missing,
+    #[pons(status = 409)]
+    Conflict,
+    #[pons(status = "4xx")]
+    Throttled,
+    #[pons(status = "default")]
+    Unexpected,
+}
+
+impl IntoResponse for SlotError {
+    fn into_response(self) -> axum::response::Response {
+        match self {
+            Self::Missing => StatusCode::CONFLICT.into_response(),
+            Self::Conflict => StatusCode::OK.into_response(),
+            Self::Throttled => StatusCode::TOO_MANY_REQUESTS.into_response(),
+            Self::Unexpected => StatusCode::SERVICE_UNAVAILABLE.into_response(),
+        }
+    }
+}
+
+#[derive(Debug, Serialize, Schema, pons_core::ApiError)]
+enum OverloadedError {
+    #[pons(status = 429)]
+    Limited,
+}
+
+impl IntoResponse for OverloadedError {
+    fn into_response(self) -> axum::response::Response {
+        StatusCode::SERVICE_UNAVAILABLE.into_response()
+    }
+}
+
 fn required_error() -> WithErrorHeader<RetryAfter, UserError> {
     WithErrorHeader::new(UserError::Limited, 3)
 }
@@ -95,4 +130,25 @@ fn error_header_wrapper_preserves_runtime_and_contract_metadata() {
         optional_operation.errors[0].headers[0].presence,
         Presence::Optional
     );
+}
+
+#[test]
+fn the_declared_error_status_owns_the_served_status() {
+    let declared = WithErrorHeader::<RetryAfter, _>::new(SlotError::Missing, 1).into_response();
+    assert_eq!(declared.status(), StatusCode::CONFLICT);
+    assert!(!declared.headers().contains_key("content-type"));
+
+    let undeclared = WithErrorHeader::<RetryAfter, _>::new(SlotError::Conflict, 1).into_response();
+    assert_eq!(undeclared.status(), StatusCode::INTERNAL_SERVER_ERROR);
+
+    let declared = WithErrorHeader::<RetryAfter, _>::new(SlotError::Throttled, 1).into_response();
+    assert_eq!(declared.status(), StatusCode::TOO_MANY_REQUESTS);
+
+    let declared = WithErrorHeader::<RetryAfter, _>::new(SlotError::Unexpected, 1).into_response();
+    assert_eq!(declared.status(), StatusCode::SERVICE_UNAVAILABLE);
+
+    let single = WithErrorHeader::<RetryAfter, _>::new(OverloadedError::Limited, 1).into_response();
+    assert_eq!(single.status(), StatusCode::TOO_MANY_REQUESTS);
+    assert_eq!(single.headers()["Retry-After"], "1");
+    assert!(!single.headers().contains_key("content-type"));
 }

@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::fs;
 use std::path::Path;
 use std::process::Command;
@@ -36,6 +37,14 @@ fn custom_auth_input(directory: &Path) -> std::path::PathBuf {
         serde_json::json!({ "kind": "custom", "description": "tenant handshake" });
     fs::write(&path, serde_json::to_vec(&contract).unwrap()).unwrap();
     path
+}
+
+fn rejecting_openness_input() -> String {
+    let mut contract: Value = serde_json::from_str(FIXTURE).unwrap();
+    for id in ["User", "LoginRequest"] {
+        contract["types"][id]["openness"] = serde_json::json!("reject");
+    }
+    serde_json::to_string(&contract).unwrap()
 }
 
 #[test]
@@ -192,11 +201,11 @@ const PRESERVED_SUBJECTS: [&str; 4] = [
     "types.User",
 ];
 
-fn coverage_for(target: &str) -> Value {
+fn coverage_for(target: &str, input: &str) -> Value {
     let directory = tempfile::tempdir().unwrap();
     let output_dir = directory.path().join("generated");
     let input_path = directory.path().join("api.json");
-    fs::write(&input_path, FIXTURE).unwrap();
+    fs::write(&input_path, input).unwrap();
     let output = pons()
         .args(["emit", "--target", target])
         .arg(&input_path)
@@ -213,9 +222,31 @@ fn coverage_for(target: &str) -> Value {
     serde_json::from_str(&fs::read_to_string(output_dir.join("coverage.json")).unwrap()).unwrap()
 }
 
+fn coverage_levels(coverage: &Value) -> BTreeMap<String, pons_ir::CoverageLevel> {
+    let mut levels = BTreeMap::new();
+    for (level, subjects) in [
+        (pons_ir::CoverageLevel::Exact, &coverage["exact"]),
+        (pons_ir::CoverageLevel::Opaque, &coverage["opaque"]),
+        (pons_ir::CoverageLevel::Lossy, &coverage["lossy"]),
+        (
+            pons_ir::CoverageLevel::Unsupported,
+            &coverage["unsupported"],
+        ),
+    ] {
+        for subject in subjects.as_array().unwrap() {
+            let subject = subject.as_str().unwrap();
+            assert!(
+                levels.insert(subject.to_owned(), level).is_none(),
+                "{subject}"
+            );
+        }
+    }
+    levels
+}
+
 #[test]
 fn emit_writes_requested_coverage() {
-    let coverage = coverage_for("ts");
+    let coverage = coverage_for("ts", FIXTURE);
     assert_eq!(coverage["opaque"], serde_json::json!(PRESERVED_SUBJECTS));
     assert_eq!(
         coverage["exact"],
@@ -226,8 +257,39 @@ fn emit_writes_requested_coverage() {
 }
 
 #[test]
+fn targets_never_claim_more_capability_than_canonical_coverage() {
+    for input in [FIXTURE.to_owned(), rejecting_openness_input()] {
+        let document: pons_ir::Document = serde_json::from_str(&input).unwrap();
+        let canonical = pons_ir::canonical_coverage(&document, false).unwrap();
+        let reported = ["openapi", "ts"]
+            .map(|target| (target, coverage_levels(&coverage_for(target, &input))));
+
+        for (target, levels) in &reported {
+            assert_eq!(
+                levels.keys().collect::<Vec<_>>(),
+                canonical.keys().collect::<Vec<_>>(),
+                "{target} coverage subjects"
+            );
+        }
+        for (subject, level) in &canonical {
+            for (target, levels) in &reported {
+                assert!(
+                    levels[subject] >= *level,
+                    "{target} reports {subject} as {} where canonical coverage is {}",
+                    levels[subject].as_str(),
+                    level.as_str()
+                );
+            }
+        }
+    }
+}
+
+#[test]
 fn every_target_classifies_the_fixture_the_same_way() {
-    assert_eq!(coverage_for("openapi"), coverage_for("ts"));
+    assert_eq!(
+        coverage_for("openapi", FIXTURE),
+        coverage_for("ts", FIXTURE)
+    );
 }
 
 #[test]
@@ -293,7 +355,11 @@ fn emit_rejects_the_error_strategy_for_non_typescript_targets() {
                 .unwrap();
 
             let stderr = String::from_utf8_lossy(&output.stderr);
-            assert!(!output.status.success(), "{target} --errors {strategy}");
+            assert_eq!(
+                output.status.code(),
+                Some(2),
+                "{target} --errors {strategy}"
+            );
             assert_eq!(
                 stderr.trim(),
                 format!("pons: --errors is only supported by the TypeScript target, not {target}"),
@@ -301,6 +367,133 @@ fn emit_rejects_the_error_strategy_for_non_typescript_targets() {
             );
             assert!(!output_dir.exists(), "{target} --errors {strategy}");
         }
+    }
+}
+
+#[test]
+fn emit_rejects_a_flag_supplied_as_another_flag_s_value() {
+    let directory = tempfile::tempdir().unwrap();
+    let input_path = directory.path().join("api.json");
+    fs::write(&input_path, FIXTURE).unwrap();
+
+    for (flag, value) in [
+        ("--coverage", "--lossy"),
+        ("--coverage", "--strict"),
+        ("--errors", "--lossy"),
+        ("--errors", "--coverage"),
+    ] {
+        let output_dir = directory
+            .path()
+            .join(format!("generated{flag}{value}").replace('-', ""));
+        let output = pons()
+            .args(["emit", "--target", "ts"])
+            .arg(&input_path)
+            .arg(&output_dir)
+            .args([flag, value])
+            .output()
+            .unwrap();
+
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert_eq!(output.status.code(), Some(2), "{flag} {value}: {stderr}");
+        assert!(stderr.contains(flag), "{flag} {value}: {stderr}");
+        assert!(stderr.contains(value), "{flag} {value}: {stderr}");
+        assert!(
+            !output_dir.exists(),
+            "{flag} {value} wrote to {}",
+            output_dir.display()
+        );
+    }
+}
+
+#[test]
+fn emit_accepts_a_repeated_coverage_flag_and_rejects_a_conflict() {
+    let directory = tempfile::tempdir().unwrap();
+    let input = wide_number_input(directory.path());
+
+    for (flag, warns) in [("--strict", false), ("--lossy", true)] {
+        let output_dir = directory.path().join(format!("generated-{flag}"));
+        let output = pons()
+            .args(["emit", "--target", "ts"])
+            .arg(&input)
+            .arg(&output_dir)
+            .args([flag, flag])
+            .output()
+            .unwrap();
+
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(output.status.success(), "{flag} {flag}: {stderr}");
+        assert_eq!(
+            stderr.contains("wide numeric integers"),
+            warns,
+            "{flag} {flag} must behave like {flag}: {stderr}"
+        );
+        assert!(output_dir.join("types.ts").exists(), "{flag} {flag}");
+    }
+
+    for flags in [["--strict", "--lossy"], ["--lossy", "--strict"]] {
+        let output_dir = directory.path().join(format!("generated{flags:?}"));
+        let output = pons()
+            .args(["emit", "--target", "ts"])
+            .arg(&input)
+            .arg(&output_dir)
+            .args(flags)
+            .output()
+            .unwrap();
+
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert_eq!(output.status.code(), Some(2), "{flags:?}: {stderr}");
+        assert!(stderr.contains("--strict"), "{flags:?}: {stderr}");
+        assert!(stderr.contains("--lossy"), "{flags:?}: {stderr}");
+        assert!(!output_dir.exists(), "{flags:?} wrote to {output_dir:?}");
+    }
+}
+
+#[test]
+fn malformed_arguments_exit_two_with_a_one_line_diagnosis() {
+    let directory = tempfile::tempdir().unwrap();
+    fs::write(directory.path().join("api.json"), FIXTURE).unwrap();
+
+    for (arguments, expected) in [
+        (vec![], "no command"),
+        (vec!["check", "a", "b"], "check expects one document"),
+        (vec!["fmt", "a", "b"], "fmt expects one document"),
+        (vec!["diff", "a"], "diff expects two documents"),
+        (
+            vec!["emit", "--target", "ts", "api.json"],
+            "emit expects --target <name> <ir.json> <output-dir>",
+        ),
+        (
+            vec!["emit", "api.json", "api.json", "api.json", "out"],
+            "not \"api.json\"",
+        ),
+        (
+            vec!["emit", "--target", "ts", "api.json", "out", "--nonsense"],
+            "--nonsense",
+        ),
+        (vec!["nonsense", "api.json"], "unknown command \"nonsense\""),
+    ] {
+        let output = pons()
+            .args(&arguments)
+            .current_dir(directory.path())
+            .output()
+            .unwrap();
+
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert_eq!(output.status.code(), Some(2), "{arguments:?}: {stderr}");
+        assert!(stderr.starts_with("pons: "), "{arguments:?}: {stderr}");
+        assert_eq!(stderr.lines().count(), 1, "{arguments:?}: {stderr}");
+        assert!(stderr.contains(expected), "{arguments:?}: {stderr}");
+        assert!(!directory.path().join("out").exists(), "{arguments:?}");
+    }
+}
+
+#[test]
+fn help_is_printed_on_stdout() {
+    for argument in ["--help", "-h", "help"] {
+        let output = pons().arg(argument).output().unwrap();
+        assert!(output.status.success(), "{argument}");
+        assert!(String::from_utf8_lossy(&output.stdout).starts_with("Usage: pons"));
+        assert!(output.stderr.is_empty(), "{argument}");
     }
 }
 

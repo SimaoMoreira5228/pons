@@ -4,7 +4,10 @@ use axum::response::{IntoResponse, Response};
 use pons_core::Schema;
 use pons_ir::{ContentKind, ResponseStatus};
 
-use crate::describe::{DescribeResponse, OperationCx, StatusResponse, is_invalid_response_header};
+use crate::describe::{
+    DescribeResponse, OperationCx, StatusResponse, invalid_response_header,
+    is_invalid_response_header, valid_status,
+};
 
 pub trait ResponseSpec {
     fn status() -> u16;
@@ -85,13 +88,15 @@ where
         if is_invalid_response_header(&response) {
             return response;
         }
-        *response.status_mut() = axum::http::StatusCode::from_u16(valid_status::<S>())
+        *response.status_mut() = axum::http::StatusCode::from_u16(spec_status::<S>())
             .expect("WithResponse requires a valid HTTP status");
         if let Some(content_type) = media_type(S::content(), S::media_type()) {
-            response.headers_mut().insert(
-                axum::http::header::CONTENT_TYPE,
-                axum::http::HeaderValue::from_static(content_type),
-            );
+            let Ok(value) = axum::http::HeaderValue::from_bytes(content_type.as_bytes()) else {
+                return invalid_response_header();
+            };
+            response
+                .headers_mut()
+                .insert(axum::http::header::CONTENT_TYPE, value);
         }
         response
     }
@@ -104,7 +109,7 @@ where
 {
     fn describe(cx: &mut OperationCx) {
         cx.response_with_media::<T>(
-            valid_status::<S>(),
+            spec_status::<S>(),
             S::content(),
             S::media_type().map(str::to_owned),
         );
@@ -166,11 +171,6 @@ fn media_type(content: ContentKind, override_type: Option<&'static str>) -> Opti
     })
 }
 
-fn valid_status<S: ResponseSpec>() -> u16 {
-    let status = S::status();
-    assert!(
-        (100..=599).contains(&status),
-        "WithResponse requires an HTTP status representable by Pons IR"
-    );
-    status
+fn spec_status<S: ResponseSpec>() -> u16 {
+    valid_status(S::status(), "WithResponse")
 }

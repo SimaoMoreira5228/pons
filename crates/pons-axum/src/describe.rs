@@ -99,6 +99,14 @@ pub(crate) fn is_invalid_response_header(response: &axum::response::Response) ->
         .is_some()
 }
 
+pub(crate) fn valid_status(status: u16, wrapper: &str) -> u16 {
+    assert!(
+        (100..=599).contains(&status),
+        "{wrapper} requires an HTTP status representable by Pons IR"
+    );
+    status
+}
+
 fn describe_response_header<S: HeaderSpec>(cx: &mut OperationCx, start: usize, presence: Presence) {
     let header = ResponseHeader {
         wire: S::NAME.to_owned(),
@@ -295,13 +303,10 @@ where
     R: StatusResponse,
 {
     fn into_response(self) -> axum::response::Response {
-        assert!(
-            (100..=599).contains(&STATUS),
-            "WithStatus requires an HTTP status representable by Pons IR"
-        );
+        let status = valid_status(STATUS, "WithStatus");
         let mut response = self.0.into_response();
         if !is_invalid_response_header(&response) {
-            *response.status_mut() = axum::http::StatusCode::from_u16(STATUS)
+            *response.status_mut() = axum::http::StatusCode::from_u16(status)
                 .expect("WithStatus requires a valid HTTP status");
         }
         response
@@ -313,10 +318,11 @@ where
     R: StatusResponse,
 {
     fn describe(cx: &mut OperationCx) {
+        let status = valid_status(STATUS, "WithStatus");
         let first_response = cx.responses.len();
         R::describe(cx);
         for response in &mut cx.responses[first_response..] {
-            response.status = ResponseStatus::Exact(STATUS);
+            response.status = ResponseStatus::Exact(status);
         }
     }
 }

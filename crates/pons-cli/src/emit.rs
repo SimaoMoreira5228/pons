@@ -248,6 +248,8 @@ fn write_file(root: &Path, file: &OutputFile) -> Result<(), CliError> {
                 .map_err(|error| {
                     CliError::Failure(format!("cannot preserve permissions: {error}"))
                 })?;
+        } else {
+            set_default_permissions(temporary.as_file(), directory)?;
         }
         temporary.persist(&parent).map_err(|error| {
             CliError::Failure(format!(
@@ -257,6 +259,38 @@ fn write_file(root: &Path, file: &OutputFile) -> Result<(), CliError> {
             ))
         })?;
     }
+    Ok(())
+}
+
+#[cfg(unix)]
+fn set_default_permissions(file: &fs::File, directory: &Path) -> Result<(), CliError> {
+    use std::os::unix::fs::PermissionsExt;
+
+    let probe = directory.join(format!(".pons-mode-{}", std::process::id()));
+    let created = fs::File::create(&probe).map_err(|error| {
+        CliError::Failure(format!(
+            "cannot probe the default file mode in {}: {error}",
+            directory.display()
+        ))
+    })?;
+    let mode = created
+        .metadata()
+        .map_err(|error| CliError::Failure(format!("cannot inspect {probe:?}: {error}")))?
+        .permissions()
+        .mode();
+    drop(created);
+    fs::remove_file(&probe).map_err(|error| {
+        CliError::Failure(format!(
+            "cannot remove the mode probe {}: {error}",
+            probe.display()
+        ))
+    })?;
+    file.set_permissions(fs::Permissions::from_mode(mode))
+        .map_err(|error| CliError::Failure(format!("cannot set default permissions: {error}")))
+}
+
+#[cfg(not(unix))]
+fn set_default_permissions(_file: &fs::File, _directory: &Path) -> Result<(), CliError> {
     Ok(())
 }
 
@@ -521,5 +555,45 @@ mod tests {
         assert!(!paths_conflict("Client.ts", "client.ts", false));
         assert!(paths_conflict("Client.ts", "client.ts", true));
         assert!(paths_conflict("Nested", "nested/file.ts", true));
+    }
+
+    #[test]
+    fn new_files_take_the_default_mode_and_existing_files_keep_theirs() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().join("output");
+        write_files(
+            &root,
+            vec![OutputFile {
+                path: "kept.ts".into(),
+                content: "old".into(),
+            }],
+        )
+        .unwrap();
+        fs::set_permissions(root.join("kept.ts"), fs::Permissions::from_mode(0o640)).unwrap();
+
+        write_files(
+            &root,
+            vec![
+                OutputFile {
+                    path: "kept.ts".into(),
+                    content: "new".into(),
+                },
+                OutputFile {
+                    path: "fresh.ts".into(),
+                    content: "new".into(),
+                },
+            ],
+        )
+        .unwrap();
+
+        let reference = directory.path().join("reference");
+        fs::File::create(&reference).unwrap();
+        let mode = |name: &str| fs::metadata(root.join(name)).unwrap().permissions().mode() & 0o777;
+        let default = fs::metadata(reference).unwrap().permissions().mode() & 0o777;
+
+        assert_eq!(mode("fresh.ts"), default, "new files skip tempfile's 0600");
+        assert_eq!(mode("kept.ts"), 0o640, "existing mode is restored");
     }
 }

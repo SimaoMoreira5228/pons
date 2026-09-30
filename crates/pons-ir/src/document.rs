@@ -9,8 +9,8 @@ use crate::operation::{
     ErrorStatus, Method, OAuthFlowKind, Operation, ResponseStatus,
 };
 use crate::types::{
-    Diagnostic, DiagnosticSeverity, EnumRepr, Field, InlineType, IntegerWire, Presence, TypeDef,
-    TypeKind, TypeRef, VariantPayload,
+    Diagnostic, DiagnosticSeverity, EnumRepr, Field, InlineType, IntegerWire, OpaqueWire, Presence,
+    TypeDef, TypeKind, TypeRef, VariantPayload,
 };
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
@@ -402,7 +402,7 @@ impl Document {
                 {
                     errors.push(ValidationError::InvalidValue {
                         path: owner.clone(),
-                        message: "raw byte bodies must use a byte type or transparent byte newtype"
+                        message: "raw byte bodies must use a byte type, byte newtype, nullable bytes, or a bytes opaque"
                             .into(),
                     });
                 }
@@ -597,7 +597,7 @@ impl Document {
                     errors.push(ValidationError::InvalidValue {
                         path: owner.clone(),
                         message: format!(
-                            "raw byte response bodies must use a byte type or transparent byte newtype (response {})",
+                            "raw byte response bodies must use a byte type, byte newtype, nullable bytes, or a bytes opaque (response {})",
                             response.status
                         ),
                     });
@@ -806,6 +806,11 @@ impl Document {
     fn is_byte_type(&self, ty: &TypeRef, visited: &mut BTreeSet<String>) -> bool {
         match ty {
             TypeRef::Inline(InlineType::Bytes { .. }) => true,
+            TypeRef::Inline(InlineType::Nullable { inner }) => self.is_byte_type(inner, visited),
+            TypeRef::Inline(InlineType::Opaque {
+                wire: OpaqueWire::Bytes,
+                ..
+            }) => true,
             TypeRef::Named(named) => {
                 if !visited.insert(named.id.clone()) {
                     return false;
@@ -1813,13 +1818,24 @@ mod tests {
 
     #[test]
     fn byte_bodies_must_resolve_to_a_byte_value() {
-        const REQUEST: &str = "raw byte bodies must use a byte type or transparent byte newtype";
-        const RESPONSE: &str =
-            "raw byte response bodies must use a byte type or transparent byte newtype";
+        const REQUEST: &str =
+            "raw byte bodies must use a byte type, byte newtype, nullable bytes, or a bytes opaque";
+        const RESPONSE: &str = "raw byte response bodies must use a byte type, byte newtype, nullable bytes, or a bytes opaque";
 
         fn bytes() -> TypeRef {
             TypeRef::Inline(InlineType::Bytes {
                 encoding: ByteEncoding::Base64,
+            })
+        }
+        fn nullable(inner: TypeRef) -> TypeRef {
+            TypeRef::Inline(InlineType::Nullable {
+                inner: Box::new(inner),
+            })
+        }
+        fn opaque(wire: OpaqueWire) -> TypeRef {
+            TypeRef::Inline(InlineType::Opaque {
+                codec: "Raw".into(),
+                wire,
             })
         }
         fn string() -> TypeRef {
@@ -1890,6 +1906,34 @@ mod tests {
         document.operations[0].body.as_mut().unwrap().ty = nested.clone();
         document.operations[0].responses[0].body = Some(nested);
         document.validate().unwrap();
+
+        for accepted in [
+            nullable(bytes()),
+            newtype(&mut document, "MaybeBytes", nullable(bytes())),
+            opaque(OpaqueWire::Bytes),
+            nullable(opaque(OpaqueWire::Bytes)),
+            newtype(&mut document, "OpaqueBytes", opaque(OpaqueWire::Bytes)),
+        ] {
+            let mut document = document.clone();
+            document.operations[0].body.as_mut().unwrap().ty = accepted.clone();
+            document.operations[0].responses[0].body = Some(accepted);
+            document.validate().unwrap();
+        }
+
+        for rejected in [
+            nullable(string()),
+            nullable(named("User")),
+            opaque(OpaqueWire::Text),
+            opaque(OpaqueWire::Json),
+            opaque(OpaqueWire::Unknown),
+            newtype(&mut document, "OpaqueText", opaque(OpaqueWire::Text)),
+        ] {
+            let mut document = document.clone();
+            document.operations[0].body.as_mut().unwrap().ty = rejected.clone();
+            rejects(&document, REQUEST);
+            document.operations[0].responses[0].body = Some(rejected);
+            rejects(&document, RESPONSE);
+        }
 
         document.operations[0].body.as_mut().unwrap().ty =
             newtype(&mut document, "Loop", named("Loop"));

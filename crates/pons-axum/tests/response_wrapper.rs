@@ -38,6 +38,22 @@ impl HeaderSpec for TraceId {
     const NAME: &'static str = "X-Trace-ID";
 }
 
+struct UndeclaredMediaType;
+
+impl ResponseSpec for UndeclaredMediaType {
+    fn status() -> u16 {
+        200
+    }
+
+    fn content() -> ContentKind {
+        ContentKind::Json
+    }
+
+    fn media_type() -> Option<&'static str> {
+        Some("application/json\n")
+    }
+}
+
 async fn created_response() -> WithResponse<User, JsonResponse<201>> {
     WithResponse::new(StatusCode::OK.into_response())
 }
@@ -136,4 +152,11 @@ fn invalid_header_responses_keep_their_status() {
         response.headers()["content-type"],
         "text/plain; charset=utf-8"
     );
+}
+
+#[test]
+fn an_invalid_declared_media_type_degrades_instead_of_panicking() {
+    let response = WithResponse::<User, UndeclaredMediaType>::new(StatusCode::OK.into_response())
+        .into_response();
+    assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
 }

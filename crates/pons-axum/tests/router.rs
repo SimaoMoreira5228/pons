@@ -269,6 +269,31 @@ async fn delete_user() -> NoContent {
     NoContent
 }
 
+async fn unservable_status() -> WithStatus<600, pons_axum::extract::Json<User>> {
+    WithStatus::new(pons_axum::extract::Json(User {
+        id: 1,
+        name: "Ada".into(),
+    }))
+}
+
+async fn informational_status() -> WithStatus<100, pons_axum::extract::Json<User>> {
+    WithStatus::new(pons_axum::extract::Json(User {
+        id: 1,
+        name: "Ada".into(),
+    }))
+}
+
+async fn first_user() -> pons_axum::extract::Json<User> {
+    pons_axum::extract::Json(User {
+        id: 1,
+        name: "Ada".into(),
+    })
+}
+
+async fn second_user() -> NoContent {
+    NoContent
+}
+
 async fn noop_layer(
     request: axum::extract::Request,
     next: axum::middleware::Next,
@@ -1049,4 +1074,38 @@ fn router_describes_path_query_body_response_and_state() {
     assert_eq!(messages[0].event, "user");
     assert!(matches!(messages[0].data, TypeRef::Named(_)));
     assert_eq!(events.responses[0].content, ContentKind::Stream);
+}
+
+#[test]
+#[should_panic(expected = "representable by Pons IR")]
+fn with_status_refuses_unservable_statuses_while_building_the_route() {
+    let _ = Router::<()>::new(info()).route("/unservable", get(unservable_status));
+}
+
+#[test]
+fn a_one_hundred_response_contract_is_refused_when_the_document_is_validated() {
+    let router = Router::<()>::new(info()).route("/informational", get(informational_status));
+    let errors = router.into_document().unwrap_err();
+    assert!(
+        errors
+            .iter()
+            .any(|error| error.to_string().contains("cannot carry a body")),
+        "a 1xx contract must be refused at build time: {errors:?}"
+    );
+}
+
+#[test]
+#[should_panic(expected = "Overlapping method route")]
+fn a_replaced_method_endpoint_is_refused_instead_of_described_twice() {
+    let router = Router::<()>::new(info()).route("/replaced", post(first_user).post(second_user));
+    let _ = router.document();
+}
+
+#[test]
+#[should_panic(expected = "Overlapping method route")]
+fn a_second_route_for_the_same_path_and_method_is_refused() {
+    let router = Router::<()>::new(info())
+        .route("/twice", get(first_user))
+        .route("/twice", get(second_user));
+    let _ = router.document();
 }
