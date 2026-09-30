@@ -126,8 +126,17 @@ fn flattened_field_types(
 ) -> Result<Vec<String>, EmitError> {
     let mut result = Vec::new();
     let mut visited = BTreeSet::new();
+    let mut visiting = Vec::new();
     for reference in references {
-        collect_flattened_field_types(reference, document, names, mode, &mut visited, &mut result)?;
+        collect_flattened_field_types(
+            reference,
+            document,
+            names,
+            mode,
+            &mut visited,
+            &mut visiting,
+            &mut result,
+        )?;
     }
     Ok(result)
 }
@@ -138,29 +147,38 @@ fn collect_flattened_field_types(
     names: &BTreeMap<String, String>,
     mode: EmitMode,
     visited: &mut BTreeSet<String>,
+    visiting: &mut Vec<String>,
     result: &mut Vec<String>,
 ) -> Result<(), EmitError> {
-    let TypeRef::Named(reference) = reference else {
-        if matches!(reference, TypeRef::Inline(InlineType::Map { .. })) {
-            return Err(EmitError(
-                "the TypeScript emitter cannot flatten maps into structs".into(),
-            ));
+    let TypeRef::Named(named) = reference else {
+        if matches!(reference, TypeRef::Inline(InlineType::Opaque { .. })) {
+            return Ok(());
         }
-        return Ok(());
+        return Err(not_a_struct_member(reference));
     };
-    if !visited.insert(reference.id.clone()) {
+    if named.variant.is_some() {
+        return Err(not_a_struct_member(reference));
+    }
+    if visiting.contains(&named.id) {
+        return Err(EmitError(format!(
+            "the type {} cannot be inlined because flattened members form a cycle",
+            named.id
+        )));
+    }
+    if !visited.insert(named.id.clone()) {
         return Ok(());
     }
     let definition = document
         .types
-        .get(&reference.id)
-        .ok_or_else(|| EmitError(format!("unknown type {}", reference.id)))?;
+        .get(&named.id)
+        .ok_or_else(|| EmitError(format!("unknown type {}", named.id)))?;
     match &definition.definition {
         TypeKind::Struct {
             fields,
             flattened,
             openness,
         } => {
+            visiting.push(named.id.clone());
             for field in fields
                 .iter()
                 .filter(|field| field_is_visible(field, definition.direction))
@@ -175,16 +193,33 @@ fn collect_flattened_field_types(
                     mode,
                 )?);
             }
-            for reference in flattened {
-                collect_flattened_field_types(reference, document, names, mode, visited, result)?;
+            for flattened in flattened {
+                collect_flattened_field_types(
+                    flattened, document, names, mode, visited, visiting, result,
+                )?;
             }
+            visiting.pop();
         }
         TypeKind::Newtype { inner } => {
-            collect_flattened_field_types(inner, document, names, mode, visited, result)?;
+            collect_flattened_field_types(inner, document, names, mode, visited, visiting, result)?
         }
-        TypeKind::Enum { .. } => {}
+        TypeKind::Enum { .. } => return Err(not_a_struct_member(reference)),
     }
     Ok(())
+}
+
+fn not_a_struct_member(ty: &TypeRef) -> EmitError {
+    let name = match ty {
+        TypeRef::Named(named) => match named.variant.as_deref() {
+            Some(variant) => format!("the {variant} variant of the type {}", named.id),
+            None => format!("the type {}", named.id),
+        },
+        TypeRef::Inline(InlineType::Map { .. }) => "an inline map".into(),
+        TypeRef::Inline(_) => "an inline type".into(),
+    };
+    EmitError(format!(
+        "{name} cannot be inlined into a struct because only struct members are representable"
+    ))
 }
 
 fn field_type(

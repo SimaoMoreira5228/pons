@@ -714,7 +714,7 @@ fn validation_rejects_overlapping_response_error_status_dispatch() {
     document = base.clone();
     document.operations[0].responses[0].status = ResponseStatus::Unknown;
     document.operations[0].errors[0].status = ErrorStatus::Default;
-    document.validate().unwrap();
+    assert!(has_collision(&document));
 
     document = base.clone();
     document.operations[0].responses[0].status = ResponseStatus::Default;

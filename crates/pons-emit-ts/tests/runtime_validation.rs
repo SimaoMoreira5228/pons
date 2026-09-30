@@ -4935,3 +4935,98 @@ if (seen !== "application/vnd.declared") throw new Error(`the declared content t
 "#;
     run_bun(&files, harness);
 }
+
+#[test]
+fn a_catch_all_success_status_still_follows_redirects() {
+    let base: pons_ir::Document =
+        serde_json::from_str(include_str!("../../../fixtures/login.json")).unwrap();
+    let harness = r#"
+import { createClient } from "./client.ts";
+
+let hops = 0;
+const client = createClient({
+  baseUrl: "https://example.test",
+  fetch: async (_url, init) => {
+    if (init?.redirect !== "manual") throw new Error("redirects are not handled by the client");
+    hops += 1;
+    if (hops === 1) {
+      return new Response(null, { status: 302, headers: { location: "https://example.test/v2/auth/login" } });
+    }
+    return new Response(JSON.stringify({ id: "1" }), {
+      status: 503,
+      headers: { "content-type": "application/json" },
+    });
+  },
+});
+const value = await client.auth.login({ body: { email: "person@example.test" } });
+if (hops !== 2) throw new Error(`the redirect was not followed: ${hops} hops`);
+if (value.status !== 503) throw new Error(`the catch-all did not match: ${JSON.stringify(value)}`);
+if (value.value.id !== "1") throw new Error(`the body was not decoded: ${JSON.stringify(value)}`);
+"#;
+    for status in [
+        pons_ir::ResponseStatus::Unknown,
+        pons_ir::ResponseStatus::Default,
+    ] {
+        let mut document = base.clone();
+        document.operations[0].responses[0].status = status;
+        let files = emit_with_strategy(&document, EmitMode::Strict, ErrorStrategy::Throw)
+            .unwrap()
+            .files;
+        run_bun(&files, harness);
+    }
+}
+
+fn a_catch_all_success_status_matches_any_status_a_fixed_one_does_not() {
+    let base: pons_ir::Document =
+        serde_json::from_str(include_str!("../../../fixtures/login.json")).unwrap();
+    let harness = r#"
+import { createClient } from "./client.ts";
+
+const unavailable = createClient({
+  baseUrl: "https://example.test",
+  fetch: async () => new Response(JSON.stringify({ id: "1" }), {
+    status: 503,
+    headers: { "content-type": "application/json" },
+  }),
+});
+const value = await unavailable.auth.login({ body: { email: "person@example.test" } });
+if (value.status !== 503) throw new Error(`the runtime status was not preserved: ${JSON.stringify(value)}`);
+if (value.value.id !== "1") throw new Error(`the body was not decoded: ${JSON.stringify(value)}`);
+"#;
+    for status in [
+        pons_ir::ResponseStatus::Unknown,
+        pons_ir::ResponseStatus::Default,
+    ] {
+        let mut document = base.clone();
+        document.operations[0].responses[0].status = status;
+        let files = emit_with_strategy(&document, EmitMode::Strict, ErrorStrategy::Throw)
+            .unwrap()
+            .files;
+        run_bun(&files, harness);
+    }
+
+    let files = emit_with_strategy(&base, EmitMode::Strict, ErrorStrategy::Throw)
+        .unwrap()
+        .files;
+    let harness = r#"
+import { createClient } from "./client.ts";
+
+const created = createClient({
+  baseUrl: "https://example.test",
+  fetch: async () => new Response(JSON.stringify({ id: "1" }), {
+    status: 201,
+    headers: { "content-type": "application/json" },
+  }),
+});
+try {
+  await created.auth.login({ body: { email: "person@example.test" } });
+  throw new Error("an undeclared 201 was accepted");
+} catch (cause) {
+  if (cause?.kind !== "protocol") throw new Error(JSON.stringify(cause));
+  if (!String(cause.message).includes("undeclared success response 201")) {
+    throw new Error(`unhelpful failure ${JSON.stringify(cause)}`);
+  }
+}
+"#;
+    run_bun(&files, harness);
+}

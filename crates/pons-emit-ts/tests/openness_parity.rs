@@ -213,7 +213,7 @@ fn a_flattened_map_is_rejected_by_both() {
         pons_emit_ts::emit(&document)
             .unwrap_err()
             .0
-            .contains("cannot flatten maps into structs")
+            .contains("an inline map cannot be inlined into a struct")
     );
 }
 

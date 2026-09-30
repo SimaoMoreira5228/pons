@@ -492,7 +492,7 @@ async function fetchWithRedirect(
   const visited = new Set([currentUrl.href]);
   for (let redirectCount = 0; ; redirectCount += 1) {
     const response = await fetchWithRetry(fetchImpl, currentUrl, currentInit, options, idempotent, errors, signal);
-    if (!REDIRECT_STATUSES.has(response.status) || findSuccess(responses, response.status) !== undefined || findDeclared(errors, response.status) !== undefined) {
+    if (!REDIRECT_STATUSES.has(response.status) || declaresStatus(responses, response.status) || declaresStatus(errors, response.status)) {
       return { response, url: currentUrl, init: currentInit };
     }
     const location = response.headers.get("location");
@@ -826,6 +826,13 @@ function preflightBody(value: unknown, schema: unknown, content: string | undefi
   return value;
 }
 
+function declaresStatus<T extends { status: number | string }>(entries: T[], actual: number): boolean {
+  return entries.some(
+    (entry) => entry.status === actual
+      || (typeof entry.status === "string" && entry.status === `${Math.floor(actual / 100)}xx`),
+  );
+}
+
 function findDeclared<T extends { status: number | string }>(entries: T[], actual: number): T | undefined {
   return entries.find((entry) => entry.status === actual)
     ?? entries.find((entry) => typeof entry.status === "string" && entry.status === `${Math.floor(actual / 100)}xx`)
@@ -835,8 +842,8 @@ function findDeclared<T extends { status: number | string }>(entries: T[], actua
 function findSuccess<T extends { status: number | string }>(entries: T[], actual: number): T | undefined {
   return entries.find((entry) => entry.status === actual)
     ?? entries.find((entry) => typeof entry.status === "string" && entry.status === `${Math.floor(actual / 100)}xx`)
-    ?? (actual >= 200 && actual < 300 ? entries.find((entry) => entry.status === "unknown") : undefined)
-    ?? (actual >= 200 && actual < 300 ? entries.find((entry) => entry.status === "default") : undefined);
+    ?? entries.find((entry) => entry.status === "unknown")
+    ?? entries.find((entry) => entry.status === "default");
 }
 
 function withSuccessStatus(

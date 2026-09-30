@@ -508,8 +508,7 @@ fn success_status(status: ResponseStatus) -> String {
     match status {
         ResponseStatus::Exact(status) => status.to_string(),
         ResponseStatus::Class(class) => format!("{class}XX"),
-        ResponseStatus::Default => "default".into(),
-        ResponseStatus::Unknown => "2XX".into(),
+        ResponseStatus::Default | ResponseStatus::Unknown => "default".into(),
     }
 }
 

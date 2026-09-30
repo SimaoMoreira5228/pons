@@ -921,7 +921,7 @@ mod tests {
             super::emit(&document)
                 .unwrap_err()
                 .0
-                .contains("cannot flatten maps")
+                .contains("an inline map cannot be inlined into a struct")
         );
     }
 

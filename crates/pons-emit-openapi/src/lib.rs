@@ -907,15 +907,18 @@ mod tests {
         let output: Value = serde_json::from_str(&super::emit(&document).unwrap()).unwrap();
         assert!(output["paths"]["/auth/login"]["post"]["responses"]["2XX"].is_object());
         document.operations[login].responses[0].status = ResponseStatus::Unknown;
+        document.operations[login].errors[0].status = ErrorStatus::Exact(503);
         let output: Value = serde_json::from_str(&super::emit(&document).unwrap()).unwrap();
-        assert_eq!(
-            output["paths"]["/auth/login"]["post"]["responses"]["2XX"]["x-pons"]["status"],
-            "unknown"
-        );
-        document.operations[login].errors[0].status = ErrorStatus::Default;
+        let responses = &output["paths"]["/auth/login"]["post"]["responses"];
+        assert_eq!(responses["default"]["x-pons"]["status"], "unknown");
+        assert!(responses.get("2XX").is_none());
+        assert!(responses["503"].is_object());
+        document.operations[login].responses[0].status = ResponseStatus::Default;
         let output: Value = serde_json::from_str(&super::emit(&document).unwrap()).unwrap();
-        assert!(output["paths"]["/auth/login"]["post"]["responses"]["2XX"].is_object());
-        assert!(output["paths"]["/auth/login"]["post"]["responses"]["default"].is_object());
+        let responses = &output["paths"]["/auth/login"]["post"]["responses"];
+        assert_eq!(responses["default"]["x-pons"]["status"], "default");
+        assert!(responses.get("2XX").is_none());
+        assert!(responses["503"].is_object());
     }
 
     #[test]

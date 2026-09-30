@@ -415,6 +415,18 @@ pub(crate) fn validate_response_for_document(
         let missing = expected.difference(&seen).cloned().collect::<Vec<_>>();
         return Err(format!("emitter coverage is missing subjects {missing:?}"));
     }
+    let canonical = pons_ir::canonical_coverage(document, false)?;
+    for (subject, level) in coverage.levels() {
+        if let Some(floor) = canonical.get(&subject)
+            && level < *floor
+        {
+            return Err(format!(
+                "emitter reported {subject} as {} coverage, better than the canonical {} coverage",
+                level.as_str(),
+                floor.as_str()
+            ));
+        }
+    }
     if mode == EmitMode::Strict && !opaque_supported && !coverage.opaque.is_empty() {
         return Err("emitter reported opaque coverage without declaring opaque support".into());
     }
@@ -814,15 +826,11 @@ mod tests {
     fn coverage_must_cover_every_subject_once_and_respect_mode() {
         let document: Document =
             serde_json::from_str(include_str!("../../../fixtures/login.json")).unwrap();
-        let exact = pons_ir::coverage_subjects(&document);
         let response = EmitResponse {
             protocol: PROTOCOL_VERSION,
             files: Vec::new(),
             diagnostics: Vec::new(),
-            coverage: Some(Coverage {
-                exact: exact.clone(),
-                ..Coverage::default()
-            }),
+            coverage: Some(coverage_for_document(&document, false).unwrap()),
             error: None,
         };
         assert!(
@@ -843,7 +851,7 @@ mod tests {
             .as_mut()
             .unwrap()
             .opaque
-            .insert("types.User".into());
+            .insert("types.EventQuery".into());
         assert!(
             validate_response_for_document(&duplicate, &document, EmitMode::Strict, true)
                 .unwrap_err()
@@ -852,8 +860,8 @@ mod tests {
 
         let mut opaque = response.clone();
         let coverage = opaque.coverage.as_mut().unwrap();
-        coverage.exact.remove("types.User");
-        coverage.opaque.insert("types.User".into());
+        coverage.exact.remove("types.EventQuery");
+        coverage.opaque.insert("types.EventQuery".into());
         assert!(
             validate_response_for_document(&opaque, &document, EmitMode::Strict, false)
                 .unwrap_err()
@@ -864,8 +872,8 @@ mod tests {
 
         let mut unsupported = response.clone();
         let coverage = unsupported.coverage.as_mut().unwrap();
-        coverage.exact.remove("types.User");
-        coverage.unsupported.insert("types.User".into());
+        coverage.exact.remove("types.EventQuery");
+        coverage.unsupported.insert("types.EventQuery".into());
         assert!(
             validate_response_for_document(&unsupported, &document, EmitMode::Strict, true)
                 .unwrap_err()
@@ -877,14 +885,66 @@ mod tests {
 
         let mut lossy = response;
         let coverage = lossy.coverage.as_mut().unwrap();
-        coverage.exact.remove("types.User");
-        coverage.lossy.insert("types.User".into());
+        coverage.exact.remove("types.EventQuery");
+        coverage.lossy.insert("types.EventQuery".into());
         assert!(
             validate_response_for_document(&lossy, &document, EmitMode::Strict, true)
                 .unwrap_err()
                 .contains("lossy coverage")
         );
         assert!(validate_response_for_document(&lossy, &document, EmitMode::Lossy, true).is_ok());
+    }
+
+    #[test]
+    fn reported_coverage_may_not_beat_canonical_coverage() {
+        let document: Document =
+            serde_json::from_str(include_str!("../../../fixtures/login.json")).unwrap();
+        let canonical = coverage_for_document(&document, false).unwrap();
+        assert!(canonical.opaque.contains("types.User"));
+
+        let mut overclaimed = canonical.clone();
+        overclaimed.opaque.remove("types.User");
+        overclaimed.exact.insert("types.User".into());
+        let response = EmitResponse {
+            protocol: PROTOCOL_VERSION,
+            files: Vec::new(),
+            diagnostics: Vec::new(),
+            coverage: Some(overclaimed),
+            error: None,
+        };
+        let error = "emitter reported types.User as exact coverage, better than the canonical \
+                     opaque coverage";
+        for mode in [EmitMode::Strict, EmitMode::Lossy] {
+            assert_eq!(
+                validate_response_for_document(&response, &document, mode, true).unwrap_err(),
+                error,
+                "{mode:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn canonical_coverage_permits_lowering_a_subject_to_lossy() {
+        let document: Document =
+            serde_json::from_str(include_str!("../../../fixtures/login.json")).unwrap();
+        let mut coverage = coverage_for_document(&document, false).unwrap();
+        coverage.opaque.remove("types.User");
+        coverage.lossy.insert("types.User".into());
+        let response = EmitResponse {
+            protocol: PROTOCOL_VERSION,
+            files: Vec::new(),
+            diagnostics: Vec::new(),
+            coverage: Some(coverage),
+            error: None,
+        };
+        assert_eq!(
+            validate_response_for_document(&response, &document, EmitMode::Strict, true)
+                .unwrap_err(),
+            "emitter reported lossy coverage in strict mode"
+        );
+        assert!(
+            validate_response_for_document(&response, &document, EmitMode::Lossy, true).is_ok()
+        );
     }
 
     #[test]
@@ -1160,17 +1220,17 @@ mod tests {
 
         let document: Document =
             serde_json::from_str(include_str!("../../../fixtures/login.json")).unwrap();
-        let subjects: Vec<String> = pons_ir::coverage_subjects(&document).into_iter().collect();
+        let canonical = coverage_for_document(&document, false).unwrap();
         let response: EmitResponse = serde_json::from_value(serde_json::json!({
             "protocol": PROTOCOL_VERSION,
-            "coverage": { "exact": subjects }
+            "coverage": serde_json::to_value(&canonical).unwrap()
         }))
         .unwrap();
         assert!(
             validate_response_for_document(&response, &document, EmitMode::Strict, true).is_ok()
         );
 
-        let mut repeated = subjects;
+        let mut repeated: Vec<String> = pons_ir::coverage_subjects(&document).into_iter().collect();
         repeated.push("types.User".into());
         let error = serde_json::from_value::<EmitResponse>(serde_json::json!({
             "protocol": PROTOCOL_VERSION,

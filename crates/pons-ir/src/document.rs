@@ -53,7 +53,7 @@ fn response_status_conflicts(response: ResponseStatus, error: &ErrorStatus) -> b
         (ResponseStatus::Default | ResponseStatus::Unknown, ErrorStatus::Class(class)) => {
             *class == 2
         }
-        (ResponseStatus::Default, ErrorStatus::Default) => true,
+        (ResponseStatus::Default | ResponseStatus::Unknown, ErrorStatus::Default) => true,
         _ => false,
     }
 }
