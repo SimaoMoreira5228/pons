@@ -7,8 +7,8 @@ mod wire_validation;
 use std::collections::{BTreeMap, BTreeSet};
 
 use pons_ir::{
-    Document, InlineType, IntegerWire, ObjectOpenness, PathSegment, StreamKind, TypeDef, TypeKind,
-    TypeRef, VariantPayload,
+    ApiKeyLocation, AuthScheme, Document, InlineType, IntegerWire, ObjectOpenness, PathSegment,
+    StreamKind, TypeDef, TypeKind, TypeRef, VariantPayload,
 };
 use pons_plugin::Coverage;
 
@@ -119,12 +119,29 @@ pub fn emit_with_strategy(
             "the TypeScript emitter supports SSE and NDJSON streams only".into(),
         ));
     }
+    let api_key_headers: BTreeMap<String, &str> = document
+        .auth_schemes
+        .iter()
+        .filter_map(|(id, scheme)| match scheme {
+            AuthScheme::ApiKey {
+                location: ApiKeyLocation::Header,
+                name,
+            } => Some((name.to_ascii_lowercase(), id.as_str())),
+            _ => None,
+        })
+        .collect();
     for (index, operation) in document.operations.iter().enumerate() {
         for header in &operation.headers {
             let name = header.wire.to_ascii_lowercase();
-            if name == "content-type" || name == "authorization" {
+            if name == "authorization" || (name == "content-type" && operation.body.is_some()) {
                 return Err(EmitError(format!(
                     "the TypeScript emitter rejects the request header at operations[{index}].headers that the runtime overwrites: {}",
+                    header.wire
+                )));
+            }
+            if let Some(scheme) = api_key_headers.get(&name) {
+                return Err(EmitError(format!(
+                    "the TypeScript emitter rejects the request header at operations[{index}].headers that the {scheme} credential overwrites: {}",
                     header.wire
                 )));
             }
@@ -159,6 +176,16 @@ pub fn emit_with_strategy(
             )?,
         },
     ];
+    if mode == EmitMode::Strict
+        && let Some((level, subjects)) = pons_ir::strict_violations(coverage.levels(), true)
+            .into_iter()
+            .next()
+    {
+        return Err(EmitError(format!(
+            "the TypeScript emitter reported {level} coverage in strict mode: {}",
+            subjects.join(", ")
+        )));
+    }
     let mut warnings = Vec::new();
     if mode == EmitMode::Lossy {
         if !wide_integers.is_empty() {
@@ -1278,6 +1305,20 @@ mod tests {
     }
 
     #[test]
+    fn coverage_agrees_with_the_canonical_coverage_of_the_fixture() {
+        let document: Document =
+            serde_json::from_str(include_str!("../../../fixtures/login.json")).unwrap();
+        let canonical = pons_ir::canonical_coverage(&document, false).unwrap();
+        let output = super::emit_with_mode(&document, super::EmitMode::Strict).unwrap();
+
+        assert_eq!(
+            output.coverage.levels().collect::<BTreeMap<_, _>>(),
+            canonical
+        );
+        assert!(output.warnings.is_empty());
+    }
+
+    #[test]
     fn reports_wide_integer_coverage_by_mode() {
         let mut document: Document =
             serde_json::from_str(include_str!("../../../fixtures/login.json")).unwrap();
@@ -1291,7 +1332,8 @@ mod tests {
         *wire = IntegerWire::Number;
 
         let strict = super::emit_with_mode(&document, super::EmitMode::Strict).unwrap();
-        assert!(strict.coverage.exact.contains("types.User"));
+        assert!(!strict.coverage.exact.contains("types.User"));
+        assert!(strict.coverage.opaque.contains("types.User"));
         assert!(strict.coverage.lossy.is_empty());
         let lossy = super::emit_with_mode(&document, super::EmitMode::Lossy).unwrap();
         assert!(lossy.coverage.lossy.contains("types.User"));

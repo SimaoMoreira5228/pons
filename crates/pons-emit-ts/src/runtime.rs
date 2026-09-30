@@ -3,7 +3,9 @@ fn render_core() -> &'static str {
 class WirePolicyError extends Error {}
 class CredentialRedirectError extends Error {
   constructor(readonly schemes: string[]) {
-    super("redirect would forward credentials outside their scope");
+    super(schemes.length > 0
+      ? "redirect would forward credentials outside their scope"
+      : "cross-origin redirect would carry request state outside the origin that produced it");
   }
 }
 class CredentialSourceError extends Error {
@@ -523,7 +525,7 @@ async function fetchWithRedirect(
         reattachQueryCredentials(nextUrl, attachedQueryCredentials, client.authInvalidated);
       }
       validateRedirectCredentials(nextUrl, currentUrl, nextInit, credentials, attachedCredentialOrigins, attachedCookies, attachedCustomCredentials);
-      if (provides !== undefined) {
+      if (provides !== undefined && sameOrigin) {
       const needsRedirectBody = provides.value.from === "body" || provides.expiresAt?.from === "body";
       if (needsRedirectBody) {
         let redirectBody: unknown;
@@ -543,8 +545,6 @@ async function fetchWithRedirect(
           }
         }
         if (bodyAvailable) await captureCredential(client, response, provides, redirectBody, true, currentUrl);
-      } else {
-        await captureCredential(client, response, provides, undefined, false, currentUrl);
       }
     }
       try {

@@ -9,3 +9,6 @@ rust-version.workspace = true
 pons-ir = { path = "../pons-ir" }
 pons-plugin = { path = "../pons-plugin" }
 serde_json.workspace = true
+
+[dev-dependencies]
+jsonschema = "0.30"

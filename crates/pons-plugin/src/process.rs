@@ -204,7 +204,7 @@ fn run_command_with_limits(
             terminate(&mut child);
             return Err(PluginError(error));
         }
-        match exited_unreaped(&child) {
+        match exited_unreaped(&mut child) {
             Ok(true) => break,
             Ok(false) if Instant::now() >= deadline => {
                 terminate(&mut child);
@@ -299,34 +299,50 @@ fn terminate(child: &mut std::process::Child) {
     let _ = child.wait();
 }
 
-fn exited_unreaped(child: &std::process::Child) -> std::io::Result<bool> {
+fn exited_unreaped(child: &mut std::process::Child) -> std::io::Result<bool> {
     #[cfg(unix)]
     {
-        let mut info = unsafe { std::mem::zeroed::<libc::siginfo_t>() };
-        loop {
-            let result = unsafe {
-                libc::waitid(
-                    libc::P_PID,
-                    child.id(),
-                    &mut info,
-                    libc::WEXITED | libc::WNOWAIT | libc::WNOHANG,
-                )
-            };
-            if result == 0 {
-                return Ok(unsafe { info.si_pid() } != 0);
-            }
-            let error = std::io::Error::last_os_error();
-            if error.raw_os_error() != Some(libc::EINTR) {
-                return Err(error);
-            }
+        if let Some(exited) = waitid_exited_unreaped(child)? {
+            return Ok(exited);
         }
     }
-    #[cfg(not(unix))]
-    {
-        child.try_wait().map(|status| status.is_some())
+    child.try_wait().map(|status| status.is_some())
+}
+
+#[cfg(unix)]
+fn waitid_exited_unreaped(child: &std::process::Child) -> std::io::Result<Option<bool>> {
+    let mut info = unsafe { std::mem::zeroed::<libc::siginfo_t>() };
+    loop {
+        let result = unsafe {
+            libc::waitid(
+                libc::P_PID,
+                child.id(),
+                &mut info,
+                libc::WEXITED | libc::WNOWAIT | libc::WNOHANG,
+            )
+        };
+        if result == 0 {
+            return Ok(Some(unsafe { info.si_pid() } != 0));
+        }
+        let error = std::io::Error::last_os_error();
+        if waitid_unsupported(&error) {
+            return Ok(None);
+        }
+        if error.raw_os_error() != Some(libc::EINTR) {
+            return Err(error);
+        }
     }
 }
 
+#[cfg(unix)]
+fn waitid_unsupported(error: &std::io::Error) -> bool {
+    matches!(
+        error.raw_os_error(),
+        Some(libc::EINVAL) | Some(libc::ENOSYS)
+    )
+}
+
+#[cfg_attr(not(unix), allow(unused_variables))]
 fn signal_process_group(child: &std::process::Child) {
     #[cfg(unix)]
     unsafe {
@@ -435,7 +451,7 @@ mod tests {
         command.process_group(0);
         let mut child = command.spawn().unwrap();
         let deadline = Instant::now() + Duration::from_secs(5);
-        while !exited_unreaped(&child).unwrap() {
+        while !exited_unreaped(&mut child).unwrap() {
             assert!(Instant::now() < deadline, "plugin never exited");
             thread::sleep(PLUGIN_POLL_INTERVAL);
         }
@@ -444,6 +460,23 @@ mod tests {
         signal_process_group(&child);
         assert_eq!(child.wait().unwrap().code(), Some(0));
         assert!(!Path::new(&format!("/proc/{}", child.id())).exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn falls_back_to_try_wait_only_where_waitid_cannot_report() {
+        for errno in [libc::EINVAL, libc::ENOSYS] {
+            assert!(
+                waitid_unsupported(&std::io::Error::from_raw_os_error(errno)),
+                "errno {errno} means this unix has no usable WNOWAIT"
+            );
+        }
+        for errno in [libc::EINTR, libc::ECHILD, libc::EPERM] {
+            assert!(
+                !waitid_unsupported(&std::io::Error::from_raw_os_error(errno)),
+                "errno {errno} is a real wait failure, not a missing capability"
+            );
+        }
     }
 
     #[cfg(target_os = "linux")]

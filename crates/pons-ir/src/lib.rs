@@ -1,3 +1,4 @@
+mod coverage;
 mod diff;
 mod document;
 mod media;
@@ -5,6 +6,7 @@ mod operation;
 mod query;
 mod types;
 
+pub use coverage::{CoverageLevel, canonical_coverage, coverage_subjects, strict_violations};
 pub use diff::{Change, ChangeLevel, Diff};
 pub use document::{Document, Info, ValidationError};
 pub use media::{is_valid_media_type, media_type_matches};

@@ -4,7 +4,7 @@ mod security;
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use pons_ir::{Document, ObjectOpenness, TypeKind};
+use pons_ir::Document;
 use pons_plugin::{Coverage, operation_subject};
 use serde_json::{Map, Value, json};
 
@@ -129,7 +129,6 @@ pub fn emit_with_mode(document: &Document, mode: EmitMode) -> Result<EmitOutput,
             merge_coverage(&mut coverage, subject, CoverageSeverity::Opaque);
         }
     }
-    mark_preservation_coverage(&document, &mut coverage);
     let warnings = coverage_warnings(mode, &coverage)?;
     Ok(EmitOutput {
         content,
@@ -140,16 +139,14 @@ pub fn emit_with_mode(document: &Document, mode: EmitMode) -> Result<EmitOutput,
 
 fn coverage_warnings(mode: EmitMode, coverage: &Coverage) -> Result<Vec<String>, EmitError> {
     if mode == EmitMode::Strict {
-        for (level, subjects) in [
-            ("unsupported", &coverage.unsupported),
-            ("lossy", &coverage.lossy),
-        ] {
-            if !subjects.is_empty() {
-                return Err(EmitError(format!(
-                    "OpenAPI emitter reported {level} coverage in strict mode: {}",
-                    subjects.iter().cloned().collect::<Vec<_>>().join(", ")
-                )));
-            }
+        if let Some((level, subjects)) = pons_ir::strict_violations(coverage.levels(), true)
+            .into_iter()
+            .next()
+        {
+            return Err(EmitError(format!(
+                "OpenAPI emitter reported {level} coverage in strict mode: {}",
+                subjects.join(", ")
+            )));
         }
         return Ok(Vec::new());
     }
@@ -202,145 +199,6 @@ fn merge_coverage(coverage: &mut Coverage, subject: String, required: CoverageSe
             coverage.unsupported.insert(subject);
         }
     }
-}
-
-fn mark_preservation_coverage(document: &Document, coverage: &mut Coverage) {
-    let serialized_types = document
-        .types
-        .iter()
-        .filter_map(|(id, definition)| {
-            serde_json::to_value(definition)
-                .ok()
-                .map(|value| (id.clone(), value))
-        })
-        .collect::<BTreeMap<_, _>>();
-    let mut preserved = document
-        .types
-        .iter()
-        .filter_map(|(id, definition)| {
-            let TypeKind::Struct { openness, .. } = &definition.definition else {
-                return None;
-            };
-            matches!(
-                openness,
-                ObjectOpenness::PreserveTyped { .. } | ObjectOpenness::PreserveOpaque
-            )
-            .then_some(id.clone())
-        })
-        .collect::<BTreeSet<_>>();
-    let mut dependents = BTreeMap::<String, Vec<String>>::new();
-    for (id, value) in &serialized_types {
-        let mut references = BTreeSet::new();
-        collect_type_references(value, &serialized_types, &mut references);
-        for reference in references {
-            dependents.entry(reference).or_default().push(id.clone());
-        }
-    }
-    let mut pending = preserved.iter().cloned().collect::<Vec<_>>();
-    while let Some(reference) = pending.pop() {
-        let Some(dependents) = dependents.get(&reference) else {
-            continue;
-        };
-        for dependent in dependents {
-            if preserved.insert(dependent.clone()) {
-                pending.push(dependent.clone());
-            }
-        }
-    }
-    if preserved.is_empty() {
-        return;
-    }
-    for id in &preserved {
-        merge_coverage(coverage, format!("types.{id}"), CoverageSeverity::Opaque);
-    }
-    let Ok(operations) = serde_json::to_value(&document.operations) else {
-        return;
-    };
-    let Some(operations) = operations.as_array() else {
-        return;
-    };
-    let common_errors = serde_json::to_value(&document.common_errors).ok();
-    for (operation, value) in document.operations.iter().zip(operations) {
-        let inherited = operation.errors_inherit
-            && common_errors.as_ref().is_some_and(|errors| {
-                references_preserved_type(errors, &serialized_types, &preserved)
-            });
-        if inherited || references_preserved_type(value, &serialized_types, &preserved) {
-            let subject = format!("operations.{}", operation_subject(operation));
-            merge_coverage(coverage, subject, CoverageSeverity::Opaque);
-        }
-    }
-}
-
-fn collect_type_references(
-    value: &Value,
-    types: &BTreeMap<String, Value>,
-    references: &mut BTreeSet<String>,
-) {
-    collect_type_references_inner(value, types, references, &mut BTreeSet::new());
-}
-
-fn collect_type_references_inner(
-    value: &Value,
-    types: &BTreeMap<String, Value>,
-    references: &mut BTreeSet<String>,
-    active_variants: &mut BTreeSet<(String, String)>,
-) {
-    match value {
-        Value::Object(fields) => {
-            if let Some(reference) = fields.get("ref").and_then(Value::as_str)
-                && fields
-                    .keys()
-                    .all(|key| matches!(key.as_str(), "ref" | "variant"))
-            {
-                if let Some(variant) = fields.get("variant").and_then(Value::as_str)
-                    && let Some(payload) = types
-                        .get(reference)
-                        .and_then(|definition| definition.get("variants"))
-                        .and_then(Value::as_array)
-                        .and_then(|variants| {
-                            variants.iter().find(|entry| {
-                                entry.get("wire").and_then(Value::as_str) == Some(variant)
-                            })
-                        })
-                        .and_then(|entry| entry.get("payload"))
-                {
-                    let active = (reference.to_owned(), variant.to_owned());
-                    if active_variants.insert(active.clone()) {
-                        collect_type_references_inner(payload, types, references, active_variants);
-                        active_variants.remove(&active);
-                    }
-                } else {
-                    references.insert(reference.to_owned());
-                }
-                return;
-            }
-            for (key, value) in fields {
-                if key == "ext" || key == "default" || key == "pagination" {
-                    continue;
-                }
-                collect_type_references_inner(value, types, references, active_variants);
-            }
-        }
-        Value::Array(values) => {
-            for value in values {
-                collect_type_references_inner(value, types, references, active_variants);
-            }
-        }
-        _ => {}
-    }
-}
-
-fn references_preserved_type(
-    value: &Value,
-    types: &BTreeMap<String, Value>,
-    preserved: &BTreeSet<String>,
-) -> bool {
-    let mut references = BTreeSet::new();
-    collect_type_references(value, types, &mut references);
-    references
-        .iter()
-        .any(|reference| preserved.contains(reference))
 }
 
 fn unique_names(items: impl Iterator<Item = (String, String)>) -> BTreeMap<String, String> {
@@ -728,32 +586,105 @@ mod tests {
     }
 
     #[test]
-    fn strict_mode_rejects_lossy_and_unsupported_coverage() {
-        let lossy = Coverage {
-            lossy: ["types.User".into()].into_iter().collect(),
-            ..Coverage::default()
-        };
-        assert!(
-            super::coverage_warnings(super::EmitMode::Strict, &lossy)
+    fn strict_mode_never_claims_more_capability_than_canonical_coverage() {
+        let mut rejecting = fixture();
+        for id in ["User", "LoginRequest"] {
+            let TypeKind::Struct { openness, .. } =
+                &mut rejecting.types.get_mut(id).unwrap().definition
+            else {
+                unreachable!()
+            };
+            *openness = ObjectOpenness::Reject;
+        }
+        let cases: [(pons_ir::Document, &[&str], &[&str]); 2] = [
+            (
+                fixture(),
+                &[
+                    "operations.auth.login",
+                    "operations.events.watch",
+                    "types.LoginRequest",
+                    "types.User",
+                ],
+                &["types.EventQuery", "types.LoginError"],
+            ),
+            (
+                rejecting,
+                &["operations.auth.login", "operations.events.watch"],
+                &[
+                    "types.EventQuery",
+                    "types.LoginError",
+                    "types.LoginRequest",
+                    "types.User",
+                ],
+            ),
+        ];
+
+        for (document, opaque, exact) in cases {
+            let canonical = pons_ir::canonical_coverage(&document, false).unwrap();
+            let emitted = super::emit_with_mode(&document, super::EmitMode::Strict).unwrap();
+            let reported: BTreeMap<String, pons_ir::CoverageLevel> =
+                emitted.coverage.levels().collect();
+
+            assert_eq!(
+                reported.keys().collect::<Vec<_>>(),
+                canonical.keys().collect::<Vec<_>>()
+            );
+            for (subject, level) in &canonical {
+                assert!(
+                    reported[subject] >= *level,
+                    "the emitter reports {subject} as {} where canonical coverage is {}",
+                    reported[subject].as_str(),
+                    level.as_str()
+                );
+            }
+            assert_eq!(emitted.warnings, Vec::<String>::new());
+            assert_eq!(
+                emitted.coverage.opaque,
+                opaque.iter().map(|s| (*s).to_owned()).collect()
+            );
+            assert_eq!(
+                emitted.coverage.exact,
+                exact.iter().map(|s| (*s).to_owned()).collect()
+            );
+        }
+    }
+
+    #[test]
+    fn strict_mode_rejects_narrowed_coverage_but_carries_opaque_coverage() {
+        for (coverage, expected) in [
+            (
+                Coverage {
+                    lossy: ["types.User".into()].into_iter().collect(),
+                    ..Coverage::default()
+                },
+                "lossy coverage",
+            ),
+            (
+                Coverage {
+                    unsupported: ["types.User".into()].into_iter().collect(),
+                    ..Coverage::default()
+                },
+                "unsupported coverage",
+            ),
+        ] {
+            let error = super::coverage_warnings(super::EmitMode::Strict, &coverage)
                 .unwrap_err()
-                .0
-                .contains("lossy coverage")
-        );
-        let unsupported = Coverage {
-            unsupported: ["types.User".into()].into_iter().collect(),
-            ..Coverage::default()
-        };
-        assert!(
-            super::coverage_warnings(super::EmitMode::Strict, &unsupported)
-                .unwrap_err()
-                .0
-                .contains("unsupported coverage")
-        );
-        let opaque = Coverage {
+                .0;
+            assert!(error.contains(expected), "{error}");
+            assert!(error.contains("types.User"), "{error}");
+            assert!(error.contains("in strict mode"), "{error}");
+            assert!(
+                !super::coverage_warnings(super::EmitMode::Lossy, &coverage)
+                    .unwrap()
+                    .is_empty()
+            );
+        }
+
+        let carried = Coverage {
             opaque: ["types.User".into()].into_iter().collect(),
             ..Coverage::default()
         };
-        assert!(super::coverage_warnings(super::EmitMode::Strict, &opaque).is_ok());
+        assert!(super::coverage_warnings(super::EmitMode::Strict, &carried).is_ok());
     }
 
     #[test]
@@ -866,7 +797,7 @@ mod tests {
                     kind: OAuthFlowKind::AuthorizationCode,
                     authorization_url: Some("https://auth.test/authorize".into()),
                     token_url: Some("https://auth.test/token".into()),
-                    scopes: BTreeMap::new(),
+                    scopes: BTreeMap::from([("events:read".into(), "Read events".into())]),
                     ext: Default::default(),
                 }],
             },

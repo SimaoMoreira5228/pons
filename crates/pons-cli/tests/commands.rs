@@ -185,14 +185,20 @@ fn emit_writes_a_typed_typescript_client() {
     assert!(client.contains("EventsWatchEvent"));
 }
 
-#[test]
-fn emit_writes_requested_coverage() {
+const PRESERVED_SUBJECTS: [&str; 4] = [
+    "operations.auth.login",
+    "operations.events.watch",
+    "types.LoginRequest",
+    "types.User",
+];
+
+fn coverage_for(target: &str) -> Value {
     let directory = tempfile::tempdir().unwrap();
     let output_dir = directory.path().join("generated");
     let input_path = directory.path().join("api.json");
     fs::write(&input_path, FIXTURE).unwrap();
     let output = pons()
-        .args(["emit", "--target", "ts"])
+        .args(["emit", "--target", target])
         .arg(&input_path)
         .arg(&output_dir)
         .args(["--coverage", "coverage.json"])
@@ -201,20 +207,27 @@ fn emit_writes_requested_coverage() {
 
     assert!(
         output.status.success(),
-        "{}",
+        "{target}: {}",
         String::from_utf8_lossy(&output.stderr)
     );
-    let coverage: Value =
-        serde_json::from_str(&fs::read_to_string(output_dir.join("coverage.json")).unwrap())
-            .unwrap();
-    assert!(
-        coverage["exact"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .any(|subject| subject == "operations.auth.login")
+    serde_json::from_str(&fs::read_to_string(output_dir.join("coverage.json")).unwrap()).unwrap()
+}
+
+#[test]
+fn emit_writes_requested_coverage() {
+    let coverage = coverage_for("ts");
+    assert_eq!(coverage["opaque"], serde_json::json!(PRESERVED_SUBJECTS));
+    assert_eq!(
+        coverage["exact"],
+        serde_json::json!(["types.EventQuery", "types.LoginError"])
     );
-    assert!(coverage["opaque"].as_array().unwrap().is_empty());
+    assert!(coverage["lossy"].as_array().unwrap().is_empty());
+    assert!(coverage["unsupported"].as_array().unwrap().is_empty());
+}
+
+#[test]
+fn every_target_classifies_the_fixture_the_same_way() {
+    assert_eq!(coverage_for("openapi"), coverage_for("ts"));
 }
 
 #[test]
@@ -360,7 +373,7 @@ fn emit_lossy_openapi_reports_non_exact_coverage() {
 
 #[cfg(target_os = "linux")]
 #[test]
-fn emit_runs_an_external_target_and_writes_its_files() {
+fn emit_strict_rejects_a_target_that_cannot_carry_preserved_objects() {
     use std::os::unix::fs::PermissionsExt;
 
     let directory = tempfile::tempdir().unwrap();
@@ -373,6 +386,84 @@ fn emit_runs_an_external_target_and_writes_its_files() {
 if [ "$1" = describe ]; then
   printf '%s' '{"name":"fixture","version":"1.0.0","protocol":{"min":"2.0","max":"2.0"},"ir_version":{"min":"0.2","max":"0.2"},"capabilities":{"streaming":["sse"],"enum_reprs":["string","external","internal","adjacent","untagged"],"direction_split":true,"provides":true,"flattened":true,"object_openness":["reject","preserve_typed","preserve_opaque"]}}'
 elif [ "$1" = emit ]; then
+  request=$(cat)
+  printf '%s' "$request" > "$PONS_REQUEST"
+  printf '%s' '{"protocol":2,"files":[{"path":"nested/client.ts","content":"generated"}],"coverage":{"exact":["types.EventQuery","types.LoginError"],"opaque":["operations.auth.login","operations.events.watch","types.LoginRequest","types.User"],"lossy":[],"unsupported":[]}}'
+else
+  exit 2
+fi
+"##,
+    )
+    .unwrap();
+    let mut permissions = fs::metadata(&plugin).unwrap().permissions();
+    permissions.set_mode(0o755);
+    fs::set_permissions(&plugin, permissions).unwrap();
+    let path = std::env::join_paths(std::iter::once(bin).chain(std::env::split_paths(
+        &std::env::var_os("PATH").unwrap_or_default(),
+    )))
+    .unwrap();
+
+    let input = directory.path().join("api.json");
+    fs::write(&input, FIXTURE).unwrap();
+    let request_path = directory.path().join("request.json");
+    let output_dir = directory.path().join("strict-generated");
+    let output = pons()
+        .args(["emit", "--target", "fixture"])
+        .arg(&input)
+        .arg(&output_dir)
+        .env("PATH", &path)
+        .env("PONS_REQUEST", &request_path)
+        .output()
+        .unwrap();
+
+    assert!(!output.status.success());
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("does not declare opaque value support"),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(!request_path.exists(), "emit must not run in strict mode");
+    assert!(!output_dir.exists());
+
+    let lossy_dir = directory.path().join("lossy-generated");
+    let lossy_request = directory.path().join("lossy-request.json");
+    let output = pons()
+        .args(["emit", "--target", "fixture"])
+        .arg(&input)
+        .arg(&lossy_dir)
+        .arg("--lossy")
+        .env("PATH", &path)
+        .env("PONS_REQUEST", &lossy_request)
+        .output()
+        .unwrap();
+
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("does not declare opaque value support")
+    );
+    assert!(lossy_request.exists());
+    assert!(lossy_dir.join("nested/client.ts").exists());
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn emit_runs_an_external_target_and_writes_its_files() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let directory = tempfile::tempdir().unwrap();
+    let bin = directory.path().join("bin");
+    fs::create_dir(&bin).unwrap();
+    let plugin = bin.join("pons-emit-fixture");
+    fs::write(
+        &plugin,
+        r##"#!/bin/sh
+if [ "$1" = describe ]; then
+  printf '%s' '{"name":"fixture","version":"1.0.0","protocol":{"min":"2.0","max":"2.0"},"ir_version":{"min":"0.2","max":"0.2"},"capabilities":{"streaming":["sse"],"enum_reprs":["string","external","internal","adjacent","untagged"],"direction_split":true,"provides":true,"flattened":true,"opaque":true,"object_openness":["reject","preserve_typed","preserve_opaque"]}}'
+elif [ "$1" = emit ]; then
   i=0
   while [ "$i" -lt 2000 ]; do
     printf '%*s' 1000 ''
@@ -382,7 +473,7 @@ elif [ "$1" = emit ]; then
   printf '%s' "$request" > "$PONS_REQUEST"
   printf '%s\n' 'plugin log' >&2
   case "$request" in
-    *'"target":"fixture"'*) printf '%s' '{"protocol":2,"files":[{"path":"nested/client.ts","content":"generated"}],"coverage":{"exact":["types.EventQuery","types.LoginError","types.LoginRequest","types.User","operations.auth.login","operations.events.watch"],"opaque":[],"lossy":[],"unsupported":[]}}' ;;
+    *'"target":"fixture"'*) printf '%s' '{"protocol":2,"files":[{"path":"nested/client.ts","content":"generated"}],"coverage":{"exact":["types.EventQuery","types.LoginError"],"opaque":["operations.auth.login","operations.events.watch","types.LoginRequest","types.User"],"lossy":[],"unsupported":[]}}' ;;
     *) exit 3 ;;
   esac
 else

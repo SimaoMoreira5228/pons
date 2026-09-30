@@ -4694,6 +4694,98 @@ if (stored !== 0) throw new Error(`a refused redirect stored ${stored} credentia
 }
 
 #[test]
+fn does_not_capture_a_body_credential_from_an_allowed_cross_origin_redirect() {
+    let document: pons_ir::Document =
+        serde_json::from_str(include_str!("../../../fixtures/login.json")).unwrap();
+    let files = emit_with_strategy(&document, EmitMode::Strict, ErrorStrategy::Throw)
+        .unwrap()
+        .files;
+    let harness = r#"
+import { createClient } from "./client.ts";
+
+const stored: string[] = [];
+let calls = 0;
+const client = createClient({
+  baseUrl: "https://a.test",
+  auth: {
+    session: {
+      get: async () => undefined,
+      set: async (value) => { stored.push(String(value)); },
+      clear: async () => {},
+    },
+  },
+  fetch: async (_url, init) => {
+    calls += 1;
+    if (calls === 1) {
+      return new Response(JSON.stringify({ token: "cross-origin", id: "1" }), {
+        status: 303,
+        headers: { "content-type": "application/json", location: "https://b.test/auth/login" },
+      });
+    }
+    if (new Headers(init?.headers).has("authorization")) throw new Error("the redirect was authenticated");
+    return new Response(JSON.stringify({ id: "1" }), {
+      status: 200,
+      headers: { "content-type": "application/json" },
+    });
+  },
+});
+const user = await client.auth.login({ body: { email: "person@example.test" } });
+if (calls !== 2) throw new Error(`the allowed redirect was not followed: ${calls}`);
+if (stored.length !== 0) throw new Error(`a cross-origin redirect stored ${JSON.stringify(stored)}`);
+if (user.id !== "1") throw new Error(`unexpected login result ${JSON.stringify(user)}`);
+"#;
+    run_bun(&files, harness);
+}
+
+#[test]
+fn does_not_capture_a_set_cookie_credential_from_an_allowed_cross_origin_redirect() {
+    let mut document: pons_ir::Document =
+        serde_json::from_str(include_str!("../../../fixtures/login.json")).unwrap();
+    document.operations[0].provides = Some(pons_ir::CredentialProvision {
+        scheme: "session".into(),
+        value: CredentialLocator::SetCookie { name: "sid".into() },
+        expires_at: None,
+        ext: BTreeMap::new(),
+    });
+    let files = emit_with_strategy(&document, EmitMode::Strict, ErrorStrategy::Throw)
+        .unwrap()
+        .files;
+    let harness = r#"
+import { createClient } from "./client.ts";
+
+const stored: string[] = [];
+let calls = 0;
+const client = createClient({
+  baseUrl: "https://a.test",
+  auth: {
+    session: {
+      get: async () => undefined,
+      set: async (value) => { stored.push(String(value)); },
+      clear: async () => {},
+    },
+  },
+  fetch: async () => {
+    calls += 1;
+    if (calls === 1) {
+      return new Response(null, {
+        status: 303,
+        headers: { "set-cookie": "sid=from-cross-origin; Path=/", location: "https://b.test/auth/login" },
+      });
+    }
+    return new Response(JSON.stringify({ id: "1" }), {
+      status: 200,
+      headers: { "content-type": "application/json" },
+    });
+  },
+});
+await client.auth.login({ body: { email: "person@example.test" } });
+if (calls !== 2) throw new Error(`the allowed redirect was not followed: ${calls}`);
+if (stored.length !== 0) throw new Error(`a cross-origin redirect stored ${JSON.stringify(stored)}`);
+"#;
+    run_bun(&files, harness);
+}
+
+#[test]
 fn reports_a_body_credential_locator_on_a_stream_as_an_auth_source_failure() {
     let mut document: pons_ir::Document =
         serde_json::from_str(include_str!("../../../fixtures/login.json")).unwrap();
@@ -4769,4 +4861,77 @@ fn rejects_request_headers_the_runtime_overwrites() {
         "{}",
         rejection
     );
+}
+
+#[test]
+fn rejects_request_headers_a_header_credential_overwrites() {
+    let mut document: pons_ir::Document =
+        serde_json::from_str(include_str!("../../../fixtures/login.json")).unwrap();
+    let mut header = document.operations[1].headers[0].clone();
+    header.wire = "X-Tenant".into();
+    header.ident = vec!["tenant".into()];
+    document.operations[1].headers = vec![header];
+    for mode in [EmitMode::Strict, EmitMode::Lossy] {
+        let rejection = emit_with_strategy(&document, mode, ErrorStrategy::Throw)
+            .expect_err("a request header the credential overwrites must be rejected");
+        assert!(
+            rejection.0.contains("X-Tenant")
+                && rejection.0.contains("operations[1].headers")
+                && rejection.0.contains("tenant")
+                && rejection.0.contains("overwrites"),
+            "{}",
+            rejection
+        );
+    }
+
+    let mut cookie_document: pons_ir::Document =
+        serde_json::from_str(include_str!("../../../fixtures/login.json")).unwrap();
+    let mut cookie_name = cookie_document.operations[1].headers[0].clone();
+    cookie_name.wire = "X-Cookie-Key".into();
+    cookie_name.ident = vec!["cookie".into(), "key".into()];
+    cookie_document.auth_schemes.insert(
+        "cookiekey".into(),
+        pons_ir::AuthScheme::ApiKey {
+            location: ApiKeyLocation::Cookie,
+            name: "X-Cookie-Key".into(),
+        },
+    );
+    cookie_document.operations[1].auth.alternatives = vec![vec!["cookiekey".into()]];
+    cookie_document.operations[1].headers = vec![cookie_name];
+    assert!(
+        emit_with_strategy(&cookie_document, EmitMode::Strict, ErrorStrategy::Throw).is_ok(),
+        "a cookie credential merges into the cookie header instead of discarding the declared one"
+    );
+}
+
+#[test]
+fn keeps_a_content_type_header_on_a_bodyless_operation() {
+    let mut document: pons_ir::Document =
+        serde_json::from_str(include_str!("../../../fixtures/login.json")).unwrap();
+    let mut header = document.operations[1].headers[0].clone();
+    header.wire = "Content-Type".into();
+    header.ident = vec!["content".into(), "type".into()];
+    document.operations[1].headers = vec![header];
+    let files = emit_with_strategy(&document, EmitMode::Strict, ErrorStrategy::Throw)
+        .expect("a bodyless operation keeps its content type header")
+        .files;
+    let harness = r#"
+import { createClient } from "./client.ts";
+
+let seen: string | null = null;
+const client = createClient({
+  baseUrl: "https://a.test",
+  auth: { tenant: { get: async () => ({ value: "tenant" }), set: async () => {}, clear: async () => {} } },
+  fetch: async (_url, init) => {
+    seen = new Headers(init?.headers).get("content-type");
+    return new Response(new ReadableStream({ start(controller) { controller.close(); } }), {
+      status: 200,
+      headers: { "content-type": "text/event-stream", "X-Trace-ID": "trace" },
+    });
+  },
+});
+await client.events.watch({ path: { cursor: "cursor" }, query: {}, headers: { "Content-Type": "application/vnd.declared" } });
+if (seen !== "application/vnd.declared") throw new Error(`the declared content type was lost: ${seen}`);
+"#;
+    run_bun(&files, harness);
 }

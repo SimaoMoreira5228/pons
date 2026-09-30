@@ -124,12 +124,13 @@ impl<'a> Builder<'a> {
                     object["additionalProperties"] = additional;
                     Ok(object)
                 } else {
-                    object["unevaluatedProperties"] = additional;
                     let mut all_of = vec![object];
                     for ty in flattened {
                         self.flattened_schema(ty, &mut Vec::new(), &mut all_of)?;
                     }
-                    Ok(json!({"allOf":all_of}))
+                    let mut wrapper = json!({"allOf":all_of});
+                    wrapper["unevaluatedProperties"] = additional;
+                    Ok(wrapper)
                 }
             }
             TypeKind::Enum { repr, variants } => self.enum_schema(repr, variants),
@@ -144,23 +145,23 @@ impl<'a> Builder<'a> {
         all_of: &mut Vec<Value>,
     ) -> Result<(), EmitError> {
         let TypeRef::Named(named) = ty else {
-            all_of.push(self.type_schema(ty)?);
-            return Ok(());
+            return Err(not_a_struct_member(ty));
         };
-        if named.variant.is_some() || visiting.contains(&named.id) {
-            all_of.push(self.type_schema(ty)?);
-            return Ok(());
+        if named.variant.is_some() {
+            return Err(not_a_struct_member(ty));
+        }
+        if visiting.contains(&named.id) {
+            return Err(EmitError(format!(
+                "the type {} cannot be inlined because flattened members form a cycle",
+                named.id
+            )));
         }
         let Some(definition) = self.document.types.get(&named.id) else {
-            all_of.push(self.type_schema(ty)?);
-            return Ok(());
+            return Err(EmitError(format!("unknown type {}", named.id)));
         };
         match &definition.definition {
             TypeKind::Newtype { inner } => self.flattened_schema(inner, visiting, all_of),
-            TypeKind::Enum { .. } => {
-                all_of.push(self.type_schema(ty)?);
-                Ok(())
-            }
+            TypeKind::Enum { .. } => Err(not_a_struct_member(ty)),
             TypeKind::Struct {
                 fields, flattened, ..
             } => {
@@ -450,6 +451,20 @@ impl<'a> Builder<'a> {
     }
 }
 
+fn not_a_struct_member(ty: &TypeRef) -> EmitError {
+    let name = match ty {
+        TypeRef::Named(named) => match named.variant.as_deref() {
+            Some(variant) => format!("the {variant} variant of the type {}", named.id),
+            None => format!("the type {}", named.id),
+        },
+        TypeRef::Inline(InlineType::Map { .. }) => "an inline map".into(),
+        TypeRef::Inline(_) => "an inline type".into(),
+    };
+    EmitError(format!(
+        "{name} cannot be inlined into a struct because only struct members are representable"
+    ))
+}
+
 fn openness_value<'a>(ty: &'a TypeRef, document: &'a Document) -> &'a TypeRef {
     let mut current = ty;
     let mut visited = Vec::new();
@@ -501,8 +516,8 @@ fn fields_schema_with(
 #[cfg(test)]
 mod tests {
     use pons_ir::{
-        Direction, Field, InlineType, IntegerWire, NamedRef, ObjectOpenness, Presence, TypeDef,
-        TypeKind, TypeRef,
+        Direction, EnumRepr, Field, InlineType, IntegerWire, NamedRef, ObjectOpenness, Presence,
+        TypeDef, TypeKind, TypeRef, Variant, VariantPayload,
     };
     use serde_json::{Value, json};
 
@@ -551,14 +566,19 @@ mod tests {
         }
     }
 
-    fn struct_type(name: &str, fields: Vec<Field>, flattened: Vec<TypeRef>) -> TypeDef {
+    fn struct_type(
+        name: &str,
+        fields: Vec<Field>,
+        flattened: Vec<TypeRef>,
+        openness: ObjectOpenness,
+    ) -> TypeDef {
         TypeDef {
             name: vec![name.into()],
             direction: Direction::Both,
             definition: TypeKind::Struct {
                 fields,
                 flattened,
-                openness: ObjectOpenness::Reject,
+                openness,
             },
             origin: None,
             doc: None,
@@ -567,16 +587,49 @@ mod tests {
         }
     }
 
+    fn closed(name: &str, fields: Vec<Field>, flattened: Vec<TypeRef>) -> TypeDef {
+        struct_type(name, fields, flattened, ObjectOpenness::Reject)
+    }
+
+    fn enum_type(name: &str) -> TypeDef {
+        TypeDef {
+            name: vec![name.into()],
+            direction: Direction::Both,
+            definition: TypeKind::Enum {
+                repr: EnumRepr::External,
+                variants: vec![Variant {
+                    wire: "x".into(),
+                    ident: vec!["x".into()],
+                    payload: VariantPayload::Unit,
+                    doc: None,
+                    diagnostics: Vec::new(),
+                    ext: Default::default(),
+                }],
+            },
+            origin: None,
+            doc: None,
+            diagnostics: Vec::new(),
+            ext: Default::default(),
+        }
+    }
+
+    fn map() -> TypeRef {
+        TypeRef::Inline(InlineType::Map {
+            key: Box::new(string()),
+            value: Box::new(string()),
+        })
+    }
+
     #[test]
     fn flattened_members_inline_their_properties() {
         let mut document = fixture();
         document.types.insert(
             "Inner".into(),
-            struct_type("inner", vec![field("b", integer(16, false))], Vec::new()),
+            closed("inner", vec![field("b", integer(16, false))], Vec::new()),
         );
         document.types.insert(
             "Outer".into(),
-            struct_type("outer", vec![field("a", string())], vec![named("Inner")]),
+            closed("outer", vec![field("a", string())], vec![named("Inner")]),
         );
         let output: Value = serde_json::from_str(&crate::emit(&document).unwrap()).unwrap();
 
@@ -584,10 +637,11 @@ mod tests {
             output["components"]["schemas"]["Inner"]["additionalProperties"],
             json!(false)
         );
-        let all_of = output["components"]["schemas"]["Outer"]["allOf"]
-            .as_array()
-            .unwrap();
-        assert_eq!(all_of[0]["unevaluatedProperties"], json!(false));
+        let outer = &output["components"]["schemas"]["Outer"];
+        assert_eq!(outer["unevaluatedProperties"], json!(false));
+        assert!(outer.get("additionalProperties").is_none(), "{outer:#}");
+        let all_of = outer["allOf"].as_array().unwrap();
+        assert!(all_of[0].get("unevaluatedProperties").is_none());
         assert_eq!(all_of[0]["properties"]["a"]["type"], "string");
         assert_eq!(all_of[1]["properties"]["b"]["type"], "integer");
         assert_eq!(all_of[1]["required"], json!(["b"]));
@@ -609,11 +663,11 @@ mod tests {
         let mut document = fixture();
         document.types.insert(
             "Leaf".into(),
-            struct_type("leaf", vec![field("c", integer(16, false))], Vec::new()),
+            closed("leaf", vec![field("c", integer(16, false))], Vec::new()),
         );
         document.types.insert(
             "Inner".into(),
-            struct_type(
+            closed(
                 "inner",
                 vec![field("b", integer(16, false))],
                 vec![named("Leaf")],
@@ -621,13 +675,12 @@ mod tests {
         );
         document.types.insert(
             "Outer".into(),
-            struct_type("outer", Vec::new(), vec![named("Inner")]),
+            closed("outer", Vec::new(), vec![named("Inner")]),
         );
         let output: Value = serde_json::from_str(&crate::emit(&document).unwrap()).unwrap();
-        let all_of = output["components"]["schemas"]["Outer"]["allOf"]
-            .as_array()
-            .unwrap();
-        assert_eq!(all_of[0]["unevaluatedProperties"], json!(false));
+        let outer = &output["components"]["schemas"]["Outer"];
+        assert_eq!(outer["unevaluatedProperties"], json!(false));
+        let all_of = outer["allOf"].as_array().unwrap();
         assert_eq!(all_of[1]["properties"]["b"]["type"], "integer");
         assert_eq!(all_of[2]["properties"]["c"]["type"], "integer");
         for entry in all_of.iter().skip(1) {
@@ -635,12 +688,114 @@ mod tests {
         }
     }
 
+    fn validates(document: &pons_ir::Document, name: &str, instance: Value) -> bool {
+        let output: Value = serde_json::from_str(&crate::emit(document).unwrap()).unwrap();
+        let mut schema = json!({"$ref":format!("#/components/schemas/{name}")});
+        schema["components"] = output["components"].clone();
+        jsonschema::Validator::new(&schema)
+            .expect("the emitted schema must be a valid JSON Schema")
+            .is_valid(&instance)
+    }
+
+    #[test]
+    fn a_flattened_struct_validates_the_payloads_the_typescript_type_accepts() {
+        let mut document = fixture();
+        document.types.insert(
+            "Inner".into(),
+            closed("inner", vec![field("b", integer(16, false))], Vec::new()),
+        );
+        document.types.insert(
+            "Outer".into(),
+            closed("outer", vec![field("a", string())], vec![named("Inner")]),
+        );
+
+        assert!(validates(&document, "Outer", json!({"a":"x","b":2})));
+        assert!(!validates(&document, "Outer", json!({"a":"x","b":2,"c":3})));
+        assert!(!validates(&document, "Outer", json!({"a":"x"})));
+    }
+
+    #[test]
+    fn a_flattened_struct_keeps_typing_the_extra_keys_of_a_typed_openness() {
+        let mut document = fixture();
+        document.types.insert(
+            "Inner".into(),
+            closed("inner", vec![field("b", integer(16, false))], Vec::new()),
+        );
+        document.types.insert(
+            "Outer".into(),
+            struct_type(
+                "outer",
+                vec![field("a", string())],
+                vec![named("Inner")],
+                ObjectOpenness::PreserveTyped { value: string() },
+            ),
+        );
+
+        assert!(validates(&document, "Outer", json!({"a":"x","b":2})));
+        assert!(validates(
+            &document,
+            "Outer",
+            json!({"a":"x","b":2,"c":"extra"})
+        ));
+        assert!(!validates(&document, "Outer", json!({"a":"x","b":2,"c":3})));
+    }
+
+    #[test]
+    fn rejects_a_flattened_map() {
+        let mut document = fixture();
+        document.types.insert(
+            "Outer".into(),
+            closed("outer", vec![field("a", string())], vec![map()]),
+        );
+        assert!(
+            crate::emit(&document)
+                .unwrap_err()
+                .0
+                .contains("an inline map cannot be inlined into a struct")
+        );
+    }
+
+    #[test]
+    fn rejects_a_flattened_enum() {
+        let mut document = fixture();
+        document.types.insert("Choice".into(), enum_type("choice"));
+        document.types.insert(
+            "Outer".into(),
+            closed("outer", vec![field("a", string())], vec![named("Choice")]),
+        );
+        assert!(
+            crate::emit(&document)
+                .unwrap_err()
+                .0
+                .contains("the type Choice cannot be inlined into a struct")
+        );
+    }
+
+    #[test]
+    fn rejects_a_cyclic_flatten() {
+        let mut document = fixture();
+        document.types.insert(
+            "Outer".into(),
+            closed("outer", vec![field("a", string())], vec![named("Inner")]),
+        );
+        document.types.insert(
+            "Inner".into(),
+            closed("inner", vec![field("b", string())], vec![named("Outer")]),
+        );
+        assert!(
+            crate::emit(&document)
+                .unwrap_err()
+                .0
+                .contains("flattened members form a cycle")
+        );
+    }
+
     #[test]
     fn emits_exact_bounds_for_128_bit_integers() {
         let mut document = fixture();
         document.types.insert(
             "Wide".into(),
-            struct_type(
+            closed(
                 "wide",
                 vec![
                     field("unsigned", integer(128, false)),

@@ -48,17 +48,22 @@ impl Builder<'_> {
             .map(|group| {
                 let mut requirement = Map::new();
                 for scheme in group {
-                    if !self.document.auth_schemes.contains_key(scheme) {
+                    let Some(definition) = self.document.auth_schemes.get(scheme) else {
                         return Err(EmitError(format!("unknown auth scheme {scheme}")));
-                    }
-
-                    let scopes = match self.document.auth_schemes[scheme] {
-                        AuthScheme::OAuth2 { .. } => operation
-                            .auth
-                            .scopes
-                            .get(scheme)
-                            .cloned()
-                            .unwrap_or_default(),
+                    };
+                    let scopes = match definition {
+                        AuthScheme::OAuth2 { flows } => {
+                            let scopes =
+                                operation.auth.scopes.get(scheme).cloned().unwrap_or_default();
+                            for scope in &scopes {
+                                if !flows.iter().any(|flow| flow.scopes.contains_key(scope)) {
+                                    return Err(EmitError(format!(
+                                        "the OAuth2 scheme {scheme} does not declare the {scope} scope"
+                                    )));
+                                }
+                            }
+                            scopes
+                        }
                         _ => Vec::new(),
                     };
                     requirement.insert(self.security_names[scheme].clone(), json!(scopes));
@@ -186,6 +191,8 @@ fn flow_name(kind: OAuthFlowKind) -> &'static str {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeMap;
+
     use pons_ir::{AuthScheme, OAuthFlow, OAuthFlowKind};
     use serde_json::{Value, json};
 
@@ -203,7 +210,7 @@ mod tests {
                     kind: OAuthFlowKind::ClientCredentials,
                     authorization_url: None,
                     token_url: Some("https://auth.example.test/token".into()),
-                    scopes: Default::default(),
+                    scopes: BTreeMap::from([("events:read".into(), "Read events".into())]),
                     ext: Default::default(),
                 }],
             },
@@ -242,5 +249,32 @@ mod tests {
         assert_eq!(scopes("Session"), json!([]));
         assert_eq!(scopes("Tenant"), json!([]));
         assert_eq!(scopes("Oauth"), json!(["events:read"]));
+    }
+
+    #[test]
+    fn rejects_an_oauth2_scope_that_no_flow_declares() {
+        let mut document = fixture();
+        document.auth_schemes.insert(
+            "oauth".into(),
+            AuthScheme::OAuth2 {
+                flows: vec![OAuthFlow {
+                    kind: OAuthFlowKind::ClientCredentials,
+                    authorization_url: None,
+                    token_url: Some("https://auth.example.test/token".into()),
+                    scopes: BTreeMap::from([("events:read".into(), "Read events".into())]),
+                    ext: Default::default(),
+                }],
+            },
+        );
+        let events = &mut document.operations[1];
+        events.auth.alternatives = vec![vec!["oauth".into()]];
+        events
+            .auth
+            .scopes
+            .insert("oauth".into(), vec!["events:write".into()]);
+        assert_eq!(
+            crate::emit(&document).unwrap_err().0,
+            "the OAuth2 scheme oauth does not declare the events:write scope"
+        );
     }
 }

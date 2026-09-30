@@ -1,10 +1,13 @@
-use std::collections::{BTreeMap, BTreeSet, VecDeque};
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Component, Path};
 
-use pons_ir::{AuthScheme, ContentKind, Document, EnumRepr, ObjectOpenness, StreamKind, TypeKind};
+use pons_ir::{
+    AuthScheme, ContentKind, CoverageLevel, Document, EnumRepr, ObjectOpenness, StreamKind,
+    TypeKind,
+};
 use serde::de::{self, Deserializer};
 use serde::{Deserialize, Serialize};
-use serde_json::{Map, Value};
+use serde_json::Value;
 
 pub const PROTOCOL_VERSION: u32 = 2;
 
@@ -59,6 +62,19 @@ pub struct Coverage {
     pub opaque: BTreeSet<String>,
     pub lossy: BTreeSet<String>,
     pub unsupported: BTreeSet<String>,
+}
+
+impl Coverage {
+    pub fn levels(&self) -> impl Iterator<Item = (String, CoverageLevel)> {
+        [
+            (&self.exact, CoverageLevel::Exact),
+            (&self.opaque, CoverageLevel::Opaque),
+            (&self.lossy, CoverageLevel::Lossy),
+            (&self.unsupported, CoverageLevel::Unsupported),
+        ]
+        .into_iter()
+        .flat_map(|(subjects, level)| subjects.iter().map(move |subject| (subject.clone(), level)))
+    }
 }
 
 impl<'de> Deserialize<'de> for Coverage {
@@ -303,30 +319,26 @@ impl EmitterManifest {
 }
 
 fn stream_kinds(operation: &pons_ir::Operation) -> Vec<&'static str> {
+    let mut kinds = Vec::new();
     if operation
         .body
         .as_ref()
         .is_some_and(|body| body.content == ContentKind::Stream)
     {
-        return vec!["bytes"];
+        kinds.push("bytes");
     }
-    let Some(stream) = &operation.stream else {
-        return if operation
-            .responses
-            .iter()
-            .any(|response| matches!(response.content, ContentKind::Stream | ContentKind::Bytes))
-        {
-            vec!["bytes"]
-        } else {
-            Vec::new()
+    if let Some(stream) = &operation.stream {
+        let kind = match stream.kind {
+            StreamKind::Sse { .. } => "sse",
+            StreamKind::Ndjson { .. } => "ndjson",
+            StreamKind::Bytes { .. } => "bytes",
+            StreamKind::Websocket { .. } => "websocket",
         };
-    };
-    vec![match stream.kind {
-        StreamKind::Sse { .. } => "sse",
-        StreamKind::Ndjson { .. } => "ndjson",
-        StreamKind::Bytes { .. } => "bytes",
-        StreamKind::Websocket { .. } => "websocket",
-    }]
+        if !kinds.contains(&kind) {
+            kinds.push(kind);
+        }
+    }
+    kinds
 }
 
 pub fn validate_response(response: &EmitResponse) -> Result<(), String> {
@@ -380,7 +392,7 @@ pub(crate) fn validate_response_for_document(
     let Some(coverage) = &response.coverage else {
         return Err("emitter response is missing coverage".into());
     };
-    let expected = coverage_subjects(document);
+    let expected = pons_ir::coverage_subjects(document);
     let mut seen = BTreeSet::new();
     for (level, subjects) in [
         ("exact", &coverage.exact),
@@ -403,246 +415,32 @@ pub(crate) fn validate_response_for_document(
         let missing = expected.difference(&seen).cloned().collect::<Vec<_>>();
         return Err(format!("emitter coverage is missing subjects {missing:?}"));
     }
-    if mode == EmitMode::Strict && !coverage.unsupported.is_empty() {
-        return Err("emitter reported unsupported coverage in strict mode".into());
-    }
-    if mode == EmitMode::Strict && !coverage.lossy.is_empty() {
-        return Err("emitter reported lossy coverage in strict mode".into());
-    }
     if mode == EmitMode::Strict && !opaque_supported && !coverage.opaque.is_empty() {
         return Err("emitter reported opaque coverage without declaring opaque support".into());
     }
+    if mode == EmitMode::Strict
+        && let Some((level, _)) = pons_ir::strict_violations(coverage.levels(), true).first()
+    {
+        return Err(format!("emitter reported {level} coverage in strict mode"));
+    }
     Ok(())
-}
-
-fn coverage_subjects(document: &Document) -> BTreeSet<String> {
-    document
-        .types
-        .keys()
-        .map(|id| format!("types.{id}"))
-        .chain(
-            document
-                .operations
-                .iter()
-                .map(|operation| format!("operations.{}", operation_subject(operation))),
-        )
-        .collect()
-}
-
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord)]
-enum CoverageLevel {
-    #[default]
-    Exact,
-    Opaque,
-    Lossy,
-}
-
-#[derive(Default)]
-struct CoverageNode {
-    level: CoverageLevel,
-    dependents: Vec<usize>,
-}
-
-struct CoverageGraph<'a> {
-    types: &'a Map<String, Value>,
-    lossy_wide_integers: bool,
-    nodes: Vec<CoverageNode>,
-    indices: BTreeMap<usize, usize>,
-    pending: Vec<(usize, &'a Value)>,
-}
-
-impl<'a> CoverageGraph<'a> {
-    fn index(&mut self, value: &'a Value) -> usize {
-        let key = value as *const Value as usize;
-        if let Some(index) = self.indices.get(&key) {
-            return *index;
-        }
-        let index = self.nodes.len();
-        self.indices.insert(key, index);
-        self.nodes.push(CoverageNode::default());
-        self.pending.push((index, value));
-        index
-    }
-
-    fn add_edge(&mut self, source: usize, target: &'a Value) {
-        let target = self.index(target);
-        self.nodes[target].dependents.push(source);
-    }
-
-    fn build(&mut self) {
-        while let Some((index, value)) = self.pending.pop() {
-            match value {
-                Value::Object(fields) => {
-                    let mut level = CoverageLevel::Exact;
-                    if fields.get("kind").and_then(Value::as_str) == Some("opaque") {
-                        level = CoverageLevel::Opaque;
-                    }
-                    if self.lossy_wide_integers
-                        && fields.get("kind").and_then(Value::as_str) == Some("int")
-                        && fields.get("wire").and_then(Value::as_str) == Some("number")
-                        && fields
-                            .get("bits")
-                            .and_then(Value::as_u64)
-                            .is_some_and(|bits| bits > 53)
-                    {
-                        level = CoverageLevel::Lossy;
-                    }
-                    if let Some(referenced) = referenced_value(fields, self.types) {
-                        self.add_edge(index, referenced);
-                    }
-                    for (key, child) in fields {
-                        match key.as_str() {
-                            "ext" | "default" => continue,
-                            "pagination" if !child.is_null() => {
-                                level = level.max(CoverageLevel::Opaque);
-                            }
-                            "pagination" => {}
-                            _ => self.add_edge(index, child),
-                        }
-                    }
-                    self.nodes[index].level = level;
-                }
-                Value::Array(values) => {
-                    for child in values {
-                        self.add_edge(index, child);
-                    }
-                }
-                _ => {}
-            }
-        }
-    }
-
-    fn propagate(&mut self) {
-        let mut pending = self
-            .nodes
-            .iter()
-            .enumerate()
-            .filter_map(|(index, node)| (node.level != CoverageLevel::Exact).then_some(index))
-            .collect::<VecDeque<_>>();
-        while let Some(source) = pending.pop_front() {
-            let level = self.nodes[source].level;
-            for edge in 0..self.nodes[source].dependents.len() {
-                let target = self.nodes[source].dependents[edge];
-                if self.nodes[target].level < level {
-                    self.nodes[target].level = level;
-                    pending.push_back(target);
-                }
-            }
-        }
-    }
-
-    fn level(&self, value: &Value) -> CoverageLevel {
-        self.nodes[self.indices[&(value as *const Value as usize)]].level
-    }
 }
 
 pub fn coverage_for_document(
     document: &Document,
     lossy_wide_integers: bool,
 ) -> Result<Coverage, String> {
-    let value = serde_json::to_value(document)
-        .map_err(|error| format!("cannot analyze emitter coverage: {error}"))?;
-    let types = value
-        .get("types")
-        .and_then(Value::as_object)
-        .ok_or_else(|| "cannot analyze emitter coverage: document types are missing".to_owned())?;
-    let operations = value
-        .get("operations")
-        .and_then(Value::as_array)
-        .ok_or_else(|| {
-            "cannot analyze emitter coverage: document operations are missing".to_owned()
-        })?;
-    let mut graph = CoverageGraph {
-        types,
-        lossy_wide_integers,
-        nodes: Vec::new(),
-        indices: BTreeMap::new(),
-        pending: Vec::new(),
-    };
-    for definition in types.values() {
-        graph.index(definition);
-    }
-    for operation in operations {
-        graph.index(operation);
-    }
-    if document
-        .operations
-        .iter()
-        .any(|operation| operation.errors_inherit)
-        && let Some(common_errors) = value.get("common_errors")
-    {
-        graph.index(common_errors);
-    }
-    graph.build();
-    graph.propagate();
-
     let mut coverage = Coverage::default();
-    for (id, definition) in types {
-        insert_coverage(
-            &mut coverage,
-            format!("types.{id}"),
-            graph.level(definition),
-        );
-    }
-    for (index, operation) in operations.iter().enumerate() {
-        let Some(document_operation) = document.operations.get(index) else {
-            return Err("cannot analyze emitter coverage: operation count mismatch".into());
+    for (subject, level) in pons_ir::canonical_coverage(document, lossy_wide_integers)? {
+        let subjects = match level {
+            CoverageLevel::Exact => &mut coverage.exact,
+            CoverageLevel::Opaque => &mut coverage.opaque,
+            CoverageLevel::Lossy => &mut coverage.lossy,
+            CoverageLevel::Unsupported => &mut coverage.unsupported,
         };
-        let mut level = graph.level(operation);
-        if document_operation.errors_inherit {
-            level = level.max(
-                value
-                    .get("common_errors")
-                    .map_or(CoverageLevel::Exact, |errors| graph.level(errors)),
-            );
-        }
-        insert_coverage(
-            &mut coverage,
-            format!("operations.{}", operation_subject(document_operation)),
-            level,
-        );
+        subjects.insert(subject);
     }
     Ok(coverage)
-}
-
-fn insert_coverage(coverage: &mut Coverage, subject: String, level: CoverageLevel) {
-    match level {
-        CoverageLevel::Exact => {
-            coverage.exact.insert(subject);
-        }
-        CoverageLevel::Opaque => {
-            coverage.opaque.insert(subject);
-        }
-        CoverageLevel::Lossy => {
-            coverage.lossy.insert(subject);
-        }
-    }
-}
-
-fn referenced_value<'a>(
-    fields: &Map<String, Value>,
-    types: &'a Map<String, Value>,
-) -> Option<&'a Value> {
-    let reference = fields.get("ref").and_then(Value::as_str)?;
-    if !fields
-        .keys()
-        .all(|key| matches!(key.as_str(), "ref" | "variant"))
-    {
-        return None;
-    }
-    let definition = types.get(reference)?;
-    match fields.get("variant").and_then(Value::as_str) {
-        Some(variant) => definition
-            .get("variants")
-            .and_then(Value::as_array)
-            .and_then(|variants| {
-                variants
-                    .iter()
-                    .find(|entry| entry.get("wire").and_then(Value::as_str) == Some(variant))
-            })
-            .and_then(|entry| entry.get("payload")),
-        None => Some(definition),
-    }
 }
 
 fn validate_output_path(path: &str) -> Result<(), String> {
@@ -819,24 +617,81 @@ mod tests {
             vec!["fixture does not declare support for bytes streams in auth.login"]
         );
 
-        let mut unframed: serde_json::Value =
-            serde_json::from_str(include_str!("../../../fixtures/login.json")).unwrap();
-        unframed["operations"][1]
-            .as_object_mut()
-            .unwrap()
-            .remove("stream");
-        unframed["operations"][1]["responses"][0]["content"] = serde_json::json!("stream");
-        let unframed: Document = serde_json::from_value(unframed).unwrap();
+        let mut bytes_only = manifest();
+        bytes_only.capabilities.streaming = vec!["bytes".into()];
         assert_eq!(
-            stream_warnings(&sse, &unframed),
-            vec!["fixture does not declare support for bytes streams in events.watch"]
+            stream_warnings(&bytes_only, &document),
+            vec!["fixture does not declare support for sse streams in events.watch"]
         );
 
         let mut framed = sse.clone();
         framed.capabilities.streaming = vec!["sse".into(), "bytes".into()];
         assert!(stream_warnings(&framed, &streaming_body).is_empty());
-        assert!(stream_warnings(&framed, &unframed).is_empty());
         assert!(stream_warnings(&framed, &document).is_empty());
+
+        let mut duplex: serde_json::Value =
+            serde_json::from_str(include_str!("../../../fixtures/login.json")).unwrap();
+        duplex["operations"][0]["body"]["content"] = serde_json::json!("stream");
+        duplex["operations"][0]["responses"] =
+            serde_json::json!([{ "status": 200, "content": "stream" }]);
+        duplex["operations"][0]["stream"] = serde_json::json!({
+            "kind": "sse",
+            "events": [{ "event": "user", "data": { "ref": "User" } }]
+        });
+        let duplex: Document = serde_json::from_value(duplex).unwrap();
+        duplex.validate().unwrap();
+        assert_eq!(
+            stream_warnings(&bytes_only, &duplex),
+            vec![
+                "fixture does not declare support for sse streams in auth.login",
+                "fixture does not declare support for sse streams in events.watch",
+            ],
+            "a streaming request body must not hide the response stream"
+        );
+        assert_eq!(
+            stream_warnings(&sse, &duplex),
+            vec!["fixture does not declare support for bytes streams in auth.login"]
+        );
+        assert!(stream_warnings(&framed, &duplex).is_empty());
+
+        let mut byte_stream: serde_json::Value =
+            serde_json::from_str(include_str!("../../../fixtures/login.json")).unwrap();
+        byte_stream["operations"][1]["stream"] = serde_json::json!({
+            "kind": "bytes",
+            "content_type": "application/octet-stream"
+        });
+        let byte_stream: Document = serde_json::from_value(byte_stream).unwrap();
+        byte_stream.validate().unwrap();
+        assert_eq!(
+            stream_warnings(&sse, &byte_stream),
+            vec!["fixture does not declare support for bytes streams in events.watch"]
+        );
+        assert!(stream_warnings(&framed, &byte_stream).is_empty());
+    }
+
+    #[test]
+    fn byte_responses_need_no_streaming_capability() {
+        let mut value: serde_json::Value =
+            serde_json::from_str(include_str!("../../../fixtures/login.json")).unwrap();
+        value["operations"][1]
+            .as_object_mut()
+            .unwrap()
+            .remove("stream");
+        value["operations"][1]["responses"] = serde_json::json!([{
+            "status": 200,
+            "content": "bytes",
+            "body": { "kind": "bytes", "encoding": "base64" }
+        }]);
+        let document: Document = serde_json::from_value(value).unwrap();
+        document.validate().unwrap();
+
+        let mut manifest = manifest();
+        manifest.capabilities.streaming = vec!["sse".into(), "ndjson".into()];
+        assert!(
+            stream_warnings(&manifest, &document).is_empty(),
+            "a byte response is not a streaming contract: {:?}",
+            stream_warnings(&manifest, &document)
+        );
     }
 
     fn stream_warnings(manifest: &EmitterManifest, document: &Document) -> Vec<String> {
@@ -959,7 +814,7 @@ mod tests {
     fn coverage_must_cover_every_subject_once_and_respect_mode() {
         let document: Document =
             serde_json::from_str(include_str!("../../../fixtures/login.json")).unwrap();
-        let exact = coverage_subjects(&document);
+        let exact = pons_ir::coverage_subjects(&document);
         let response = EmitResponse {
             protocol: PROTOCOL_VERSION,
             files: Vec::new(),
@@ -1033,6 +888,80 @@ mod tests {
     }
 
     #[test]
+    fn plugin_validation_follows_the_canonical_coverage_of_the_fixture() {
+        let document: Document =
+            serde_json::from_str(include_str!("../../../fixtures/login.json")).unwrap();
+        let mut manifest = manifest();
+        assert!(
+            manifest
+                .unsupported_features(&document)
+                .iter()
+                .any(|warning| warning.0.contains("opaque value support")),
+            "preserving openness is canonical opaque coverage"
+        );
+        manifest.capabilities.opaque = true;
+        assert!(
+            !manifest
+                .unsupported_features(&document)
+                .iter()
+                .any(|warning| warning.0.contains("opaque value support"))
+        );
+
+        let coverage = coverage_for_document(&document, false).unwrap();
+        let response = EmitResponse {
+            protocol: PROTOCOL_VERSION,
+            files: Vec::new(),
+            diagnostics: Vec::new(),
+            coverage: Some(coverage.clone()),
+            error: None,
+        };
+        assert!(
+            validate_response_for_document(&response, &document, EmitMode::Strict, true).is_ok()
+        );
+        assert!(
+            validate_response_for_document(&response, &document, EmitMode::Lossy, false).is_ok()
+        );
+        assert_eq!(
+            validate_response_for_document(&response, &document, EmitMode::Strict, false)
+                .unwrap_err(),
+            "emitter reported opaque coverage without declaring opaque support"
+        );
+
+        for (level, error) in [
+            ("lossy", "emitter reported lossy coverage in strict mode"),
+            (
+                "unsupported",
+                "emitter reported unsupported coverage in strict mode",
+            ),
+        ] {
+            let mut coverage = coverage.clone();
+            coverage.exact.remove("types.EventQuery");
+            let target = match level {
+                "lossy" => &mut coverage.lossy,
+                _ => &mut coverage.unsupported,
+            };
+            target.insert("types.EventQuery".into());
+            let narrowed = EmitResponse {
+                protocol: PROTOCOL_VERSION,
+                files: Vec::new(),
+                diagnostics: Vec::new(),
+                coverage: Some(coverage),
+                error: None,
+            };
+            assert_eq!(
+                validate_response_for_document(&narrowed, &document, EmitMode::Strict, true)
+                    .unwrap_err(),
+                error,
+                "{level}"
+            );
+            assert!(
+                validate_response_for_document(&narrowed, &document, EmitMode::Lossy, true).is_ok(),
+                "{level}"
+            );
+        }
+    }
+
+    #[test]
     fn document_coverage_propagates_opaque_and_lossy_features() {
         let mut opaque: Document =
             serde_json::from_str(include_str!("../../../fixtures/login.json")).unwrap();
@@ -1065,18 +994,25 @@ mod tests {
         assert!(coverage.lossy.contains("operations.events.watch"));
     }
 
-    #[test]
-    fn coverage_ignores_extensions_and_unselected_enum_variants() {
+    fn exactly_representable_fixture() -> serde_json::Value {
         let mut raw: serde_json::Value =
             serde_json::from_str(include_str!("../../../fixtures/login.json")).unwrap();
+        for id in ["User", "LoginRequest"] {
+            raw["types"][id]["openness"] = serde_json::json!("reject");
+        }
+        raw
+    }
+
+    #[test]
+    fn coverage_ignores_extensions_and_unselected_enum_variants() {
+        let mut raw = exactly_representable_fixture();
         raw["types"]["User"]["fields"][1]["default"] = serde_json::json!({ "kind": "opaque" });
         let defaults: Document = serde_json::from_value(raw).unwrap();
         let coverage = coverage_for_document(&defaults, false).unwrap();
         assert!(coverage.exact.contains("types.User"));
         assert!(!coverage.opaque.contains("types.User"));
 
-        let mut paginated: serde_json::Value =
-            serde_json::from_str(include_str!("../../../fixtures/login.json")).unwrap();
+        let mut paginated = exactly_representable_fixture();
         paginated["operations"][1]["semantics"]["pagination"] =
             serde_json::json!({ "kind": "opaque" });
         let paginated: Document = serde_json::from_value(paginated).unwrap();
@@ -1085,7 +1021,7 @@ mod tests {
         assert!(!coverage.exact.contains("operations.events.watch"));
 
         let mut document: Document =
-            serde_json::from_str(include_str!("../../../fixtures/login.json")).unwrap();
+            serde_json::from_value(exactly_representable_fixture()).unwrap();
         document
             .types
             .get_mut("User")
@@ -1224,7 +1160,7 @@ mod tests {
 
         let document: Document =
             serde_json::from_str(include_str!("../../../fixtures/login.json")).unwrap();
-        let subjects: Vec<String> = coverage_subjects(&document).into_iter().collect();
+        let subjects: Vec<String> = pons_ir::coverage_subjects(&document).into_iter().collect();
         let response: EmitResponse = serde_json::from_value(serde_json::json!({
             "protocol": PROTOCOL_VERSION,
             "coverage": { "exact": subjects }

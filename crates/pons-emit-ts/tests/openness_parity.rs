@@ -170,9 +170,13 @@ fn a_flattened_typed_openness_unwraps_the_map_value_like_a_direct_one() {
     let document: Document = serde_json::from_value(raw).unwrap();
     let openapi: Value =
         serde_json::from_str(&pons_emit_openapi::emit(&document).unwrap()).unwrap();
-    assert_eq!(
-        openapi["components"]["schemas"]["Metadata"]["allOf"][0]["unevaluatedProperties"],
-        count_schema()
+    let metadata = &openapi["components"]["schemas"]["Metadata"];
+    assert_eq!(metadata["unevaluatedProperties"], count_schema());
+    assert!(
+        metadata["allOf"].as_array().unwrap()[0]
+            .get("unevaluatedProperties")
+            .is_none(),
+        "the openness keyword must sit beside the allOf to see its annotations"
     );
     let types = pons_emit_ts::emit(&document)
         .unwrap()
@@ -183,6 +187,33 @@ fn a_flattened_typed_openness_unwraps_the_map_value_like_a_direct_one() {
     assert!(
         types.contains("export type Metadata = { [key: string]: number } & Extras;"),
         "{types}"
+    );
+}
+
+#[test]
+fn a_flattened_map_is_rejected_by_both() {
+    let mut raw: Value =
+        serde_json::from_str(include_str!("../../../fixtures/login.json")).unwrap();
+    raw["types"]["Metadata"] = json!({
+        "kind": "struct",
+        "name": ["metadata"],
+        "direction": "both",
+        "openness": {"preserve_typed": {"value": map(count())}},
+        "fields": [],
+        "flattened": [map(string())],
+    });
+    let document: Document = serde_json::from_value(raw).unwrap();
+    assert!(
+        pons_emit_openapi::emit(&document)
+            .unwrap_err()
+            .0
+            .contains("an inline map cannot be inlined into a struct")
+    );
+    assert!(
+        pons_emit_ts::emit(&document)
+            .unwrap_err()
+            .0
+            .contains("cannot flatten maps into structs")
     );
 }
 
