@@ -37,6 +37,12 @@ pub struct Operation {
     pub headers: Vec<HeaderParameter>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub body: Option<Body>,
+    #[schemars(extend("not" = {
+        "allOf": [
+            {"contains": {"properties": {"status": {"const": "default"}}}},
+            {"contains": {"properties": {"status": {"const": "unknown"}}}}
+        ]
+    }))]
     #[serde(default)]
     pub responses: Vec<Response>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]

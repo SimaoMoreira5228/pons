@@ -406,6 +406,13 @@ impl Document {
                             .into(),
                     });
                 }
+                if body.content == ContentKind::Form && !self.is_flat_form_body(&body.ty) {
+                    errors.push(ValidationError::InvalidValue {
+                        path: owner.clone(),
+                        message: "form bodies must be a flat record of scalars and arrays of scalars, because a urlencoded form cannot carry nested objects"
+                            .into(),
+                    });
+                }
             }
             self.visit_operation_refs(&owner, operation, &mut errors);
             if let Some(stream) = &operation.stream
@@ -836,6 +843,51 @@ impl Document {
         }
     }
 
+    fn is_flat_form_body(&self, ty: &TypeRef) -> bool {
+        self.is_form_value(ty, true, &mut BTreeSet::new())
+    }
+
+    fn is_form_value(&self, ty: &TypeRef, top: bool, visiting: &mut BTreeSet<String>) -> bool {
+        match ty {
+            TypeRef::Named(named) => {
+                if !visiting.insert(named.id.clone()) {
+                    return false;
+                }
+                let result = match self
+                    .types
+                    .get(&named.id)
+                    .map(|definition| &definition.definition)
+                {
+                    None => true,
+                    Some(TypeKind::Newtype { inner }) => self.is_form_value(inner, top, visiting),
+                    Some(TypeKind::Struct { fields, .. }) if top => fields
+                        .iter()
+                        .all(|field| self.is_form_value(&field.ty, false, visiting)),
+                    Some(TypeKind::Enum { .. }) => {
+                        crate::query::is_scalar_field(self, ty, &mut Vec::new())
+                    }
+                    Some(TypeKind::Struct { .. }) => false,
+                };
+                visiting.remove(&named.id);
+                result
+            }
+            TypeRef::Inline(InlineType::Nullable { inner }) => {
+                self.is_form_value(inner, top, visiting)
+            }
+            TypeRef::Inline(InlineType::Array { item, .. }) if top => {
+                self.is_form_value(item, false, visiting)
+            }
+            TypeRef::Inline(InlineType::Map { value, .. }) if top => {
+                self.is_form_value(value, false, visiting)
+            }
+            TypeRef::Inline(_) if top => true,
+            TypeRef::Inline(InlineType::Array { item, .. }) => {
+                crate::query::is_scalar_field(self, item, &mut Vec::new())
+            }
+            TypeRef::Inline(_) => crate::query::is_scalar_field(self, ty, &mut Vec::new()),
+        }
+    }
+
     fn validate_fields(&self, owner: &str, fields: &[Field], errors: &mut Vec<ValidationError>) {
         let mut names = BTreeSet::new();
         for field in fields {
@@ -904,11 +956,20 @@ impl Document {
                     ("maximum", maximum),
                     ("multiple_of", multiple_of),
                 ] {
-                    if value.as_ref().is_some_and(|value| !value.is_number()) {
-                        errors.push(ValidationError::InvalidValue {
-                            path: owner.into(),
-                            message: format!("integer {name} must be a number"),
-                        });
+                    if let Some(value) = value {
+                        if !value.is_number() {
+                            errors.push(ValidationError::InvalidValue {
+                                path: owner.into(),
+                                message: format!("integer {name} must be a number"),
+                            });
+                        } else if !integral_number(value) {
+                            errors.push(ValidationError::InvalidValue {
+                                path: owner.into(),
+                                message: format!(
+                                    "integer {name} must be an integral value, got {value}"
+                                ),
+                            });
+                        }
                     }
                 }
                 for (name, value) in [("minimum", minimum), ("maximum", maximum)] {
@@ -1210,6 +1271,10 @@ fn positive_number(value: &Value) -> bool {
         return !negative && magnitude != 0;
     }
     value.as_f64().is_some_and(|number| number > 0.0)
+}
+
+fn integral_number(value: &Value) -> bool {
+    value.as_f64().is_some_and(|number| number.fract() == 0.0)
 }
 
 fn integer_minimum_exceeds_maximum(minimum: &Value, maximum: &Value) -> bool {
@@ -1946,6 +2011,192 @@ mod tests {
         document.operations[0].body.as_mut().unwrap().ty =
             newtype(&mut document, "Loop", named("Loop"));
         rejects(&document, REQUEST);
+    }
+
+    fn string() -> TypeRef {
+        TypeRef::Inline(InlineType::String {
+            format: None,
+            min_length: None,
+            max_length: None,
+            pattern: None,
+        })
+    }
+
+    fn array(item: TypeRef) -> TypeRef {
+        TypeRef::Inline(InlineType::Array {
+            item: Box::new(item),
+            unique: None,
+        })
+    }
+
+    fn nullable(inner: TypeRef) -> TypeRef {
+        TypeRef::Inline(InlineType::Nullable {
+            inner: Box::new(inner),
+        })
+    }
+
+    fn map(value: TypeRef) -> TypeRef {
+        TypeRef::Inline(InlineType::Map {
+            key: Box::new(string()),
+            value: Box::new(value),
+        })
+    }
+
+    fn named(id: &str) -> TypeRef {
+        TypeRef::Named(crate::NamedRef {
+            id: id.into(),
+            variant: None,
+        })
+    }
+
+    fn named_type(id: &'static str, definition: TypeKind) -> (&'static str, TypeDef) {
+        (
+            id,
+            TypeDef {
+                name: vec![id.into()],
+                direction: Direction::Both,
+                definition,
+                origin: None,
+                doc: None,
+                diagnostics: Vec::new(),
+                ext: BTreeMap::new(),
+            },
+        )
+    }
+
+    fn profile() -> (&'static str, TypeDef) {
+        named_type(
+            "Profile",
+            TypeKind::Struct {
+                fields: Vec::new(),
+                flattened: Vec::new(),
+                openness: ObjectOpenness::Reject,
+            },
+        )
+    }
+
+    fn form_document(fields: Vec<(&str, TypeRef)>, extra: Vec<(&str, TypeDef)>) -> Document {
+        let mut document: Document =
+            serde_json::from_str(include_str!("../../../fixtures/login.json")).unwrap();
+        for (id, definition) in extra {
+            document.types.insert(id.into(), definition);
+        }
+        document.types.insert(
+            "FormBody".into(),
+            TypeDef {
+                name: vec!["form".into(), "body".into()],
+                direction: Direction::Input,
+                definition: TypeKind::Struct {
+                    fields: fields
+                        .into_iter()
+                        .map(|(wire, ty)| Field {
+                            wire: wire.into(),
+                            ident: vec![wire.into()],
+                            ty,
+                            presence: Presence::Required,
+                            default: crate::FieldDefault::Unspecified,
+                            access: None,
+                            doc: None,
+                            diagnostics: Vec::new(),
+                            ext: BTreeMap::new(),
+                        })
+                        .collect(),
+                    flattened: Vec::new(),
+                    openness: ObjectOpenness::Reject,
+                },
+                origin: None,
+                doc: None,
+                diagnostics: Vec::new(),
+                ext: BTreeMap::new(),
+            },
+        );
+        let body = document.operations[0].body.as_mut().unwrap();
+        body.content = ContentKind::Form;
+        body.ty = named("FormBody");
+        document
+    }
+
+    fn rejects_nested_form_values(document: &Document) {
+        let errors = document
+            .validate()
+            .unwrap_err()
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>();
+        assert!(
+            errors
+                .iter()
+                .any(|error| error.contains("form bodies must be a flat record")),
+            "a nested form value must be rejected: {errors:?}"
+        );
+    }
+
+    #[test]
+    fn form_bodies_reuse_the_query_scalar_rule_and_reject_nested_objects() {
+        for (fields, extra, body) in [
+            (vec![("email", string())], vec![], None),
+            (vec![("email", nullable(string()))], vec![], None),
+            (
+                vec![("email", string())],
+                vec![named_type(
+                    "Wrapped",
+                    TypeKind::Newtype {
+                        inner: named("FormBody"),
+                    },
+                )],
+                Some(named("Wrapped")),
+            ),
+            (
+                vec![],
+                vec![],
+                Some(TypeRef::Inline(InlineType::Opaque {
+                    codec: "axum.form".into(),
+                    wire: OpaqueWire::Unknown,
+                })),
+            ),
+        ] {
+            let mut document = form_document(fields, extra);
+            if let Some(body) = body {
+                document.operations[0].body.as_mut().unwrap().ty = body;
+            }
+            document.validate().unwrap();
+        }
+
+        for (fields, extra) in [
+            (vec![("profile", named("Profile"))], vec![profile()]),
+            (vec![("profile", map(string()))], vec![]),
+            (
+                vec![("profile", named("WrappedProfile"))],
+                vec![
+                    profile(),
+                    named_type(
+                        "WrappedProfile",
+                        TypeKind::Newtype {
+                            inner: named("Profile"),
+                        },
+                    ),
+                ],
+            ),
+        ] {
+            rejects_nested_form_values(&form_document(fields, extra));
+        }
+    }
+
+    #[test]
+    fn form_bodies_add_one_array_level_to_the_query_scalar_rule() {
+        for document in [
+            form_document(vec![("tags", array(string()))], vec![]),
+            form_document(vec![("tags", nullable(array(string())))], vec![]),
+        ] {
+            document.validate().unwrap();
+        }
+
+        for (fields, extra) in [
+            (vec![("matrix", array(array(string())))], vec![]),
+            (vec![("profiles", array(named("Profile")))], vec![profile()]),
+        ] {
+            rejects_nested_form_values(&form_document(fields, extra));
+        }
     }
 
     #[test]

@@ -1415,10 +1415,6 @@ function transformStruct(value: any, definition: any, mode: "encode" | "decode",
   const known = new Set(declaredFields.map((field: any) => field.wire));
   const openness = definition.openness ?? "preserve_opaque";
   const policy = typeof openness === "string" ? openness : Object.keys(openness)[0];
-  if (policy === "reject") {
-    const unknown = Object.keys(current).find((key) => !known.has(key));
-    if (unknown !== undefined) throw new WirePolicyError(`unknown property ${unknown}`);
-  }
   const output: Record<string, unknown> = Object.create(null);
   for (const key of Object.keys(current)) {
     if (!known.has(key)) output[key] = current[key];
@@ -1577,8 +1573,12 @@ function decodeBytes(value: string | number[], encoding: string): Uint8Array {
   if (encoding === "array") return new Uint8Array(value as number[]);
   if (encoding === "hex") return new Uint8Array((value as string).match(/.{1,2}/g)?.map((byte) => parseInt(byte, 16)) ?? []);
   let base64 = value as string;
-  if (encoding === "base64url") base64 = base64.replaceAll("-", "+").replaceAll("_", "/");
-  base64 += "=".repeat((4 - base64.length % 4) % 4);
+  if (encoding === "base64url") {
+    base64 = base64.replaceAll("-", "+").replaceAll("_", "/");
+    base64 += "=".repeat((4 - base64.length % 4) % 4);
+  } else if (base64.length % 4 !== 0) {
+    throw new WirePolicyError("invalid base64 bytes");
+  }
   return Uint8Array.from(atob(base64), (byte) => byte.charCodeAt(0));
 }
 

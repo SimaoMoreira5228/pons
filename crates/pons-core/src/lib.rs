@@ -171,6 +171,8 @@ integer_schema!(u16, 16, false);
 integer_schema!(u32, 32, false);
 integer_schema!(u64, 64, false);
 integer_schema!(u128, 128, false);
+integer_schema!(usize, 64, false);
+integer_schema!(isize, 64, true);
 
 impl Schema for bool {
     fn schema(_: &mut TypeCx, _: Direction) -> TypeRef {

@@ -144,3 +144,11 @@ fn is_query_field(
         Err(QueryRejection::NonScalarField)
     }
 }
+
+pub(crate) fn is_scalar_field(
+    document: &Document,
+    ty: &TypeRef,
+    visited: &mut Vec<String>,
+) -> bool {
+    is_query_field(document, ty, visited).is_ok()
+}

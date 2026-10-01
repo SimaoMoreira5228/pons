@@ -262,6 +262,7 @@ impl TypeRef {
 pub enum InlineType {
     Bool,
     Int {
+        #[schemars(extend("enum" = [8, 16, 32, 64, 128]))]
         bits: u16,
         signed: bool,
         wire: IntegerWire,
@@ -273,6 +274,7 @@ pub enum InlineType {
         multiple_of: Option<Value>,
     },
     Float {
+        #[schemars(extend("enum" = [32, 64]))]
         bits: u8,
     },
     Decimal {

@@ -23,7 +23,7 @@ fn numeric_values_round_trip_without_precision_loss() {
                         "wire": "number",
                         "minimum": 340282366920938463463374607431768211455,
                         "maximum": 340282366920938463463374607431768211455,
-                        "multiple_of": 1.2300
+                        "multiple_of": 2.0000
                     },
                     "presence": "required",
                     "default": 123456789012345678901234567890.1200

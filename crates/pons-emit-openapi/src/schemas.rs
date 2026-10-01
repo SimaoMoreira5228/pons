@@ -277,12 +277,24 @@ impl<'a> Builder<'a> {
                 }
             }
             InlineType::Float { bits } => {
-                json!({"type":"number","format":if *bits == 32 {"float"} else {"double"}})
+                let mut schema =
+                    json!({"type":"number","format":if *bits == 32 {"float"} else {"double"}});
+                if *bits == 32 {
+                    schema["minimum"] = json!(-(f32::MAX as f64));
+                    schema["maximum"] = json!(f32::MAX as f64);
+                }
+                schema
             }
-            InlineType::Decimal { wire } => json!({
-                "type":if *wire == DecimalWire::String {"string"} else {"number"},
-                "x-pons-decimal-wire":wire,
-            }),
+            InlineType::Decimal { wire } => {
+                let mut schema = json!({
+                    "type":if *wire == DecimalWire::String {"string"} else {"number"},
+                });
+                if *wire == DecimalWire::String {
+                    schema["pattern"] = json!(r"^-?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?$");
+                }
+                schema["x-pons-decimal-wire"] = json!(wire);
+                schema
+            }
             InlineType::String {
                 format,
                 min_length,
@@ -547,8 +559,8 @@ fn fields_schema_with(
 #[cfg(test)]
 mod tests {
     use pons_ir::{
-        Direction, EnumRepr, Field, InlineType, IntegerWire, NamedRef, ObjectOpenness, Presence,
-        TypeDef, TypeKind, TypeRef, Variant, VariantPayload,
+        DecimalWire, Direction, EnumRepr, Field, InlineType, IntegerWire, NamedRef, ObjectOpenness,
+        Presence, TypeDef, TypeKind, TypeRef, Variant, VariantPayload,
     };
     use serde_json::{Value, json};
 
@@ -661,6 +673,135 @@ mod tests {
             key: Box::new(string()),
             value: Box::new(string()),
         })
+    }
+
+    #[test]
+    fn states_the_decimal_string_grammar_the_client_enforces() {
+        let mut document = fixture();
+        document.types.insert(
+            "Prices".into(),
+            struct_type(
+                "prices",
+                vec![
+                    field("text", decimal(DecimalWire::String)),
+                    field("number", decimal(DecimalWire::Number)),
+                ],
+                Vec::new(),
+                ObjectOpenness::Reject,
+            ),
+        );
+        let output: Value = serde_json::from_str(&crate::emit(&document).unwrap()).unwrap();
+        let properties = &output["components"]["schemas"]["Prices"]["properties"];
+
+        assert_eq!(properties["text"]["type"], "string");
+        assert_eq!(
+            properties["text"]["pattern"],
+            json!(r"^-?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?$")
+        );
+        assert_eq!(properties["text"]["x-pons-decimal-wire"], json!("string"));
+        assert_eq!(properties["number"]["type"], "number");
+        assert!(
+            properties["number"].get("pattern").is_none(),
+            "{:#}",
+            properties["number"]
+        );
+
+        for value in [
+            "0", "-0", "1", "-1", "1.5", "-1.5", "1.", ".5", "-.5", "1e10", "1E+10", "1e-10",
+            "0.0", "007",
+        ] {
+            assert!(
+                validates(&document, "Prices", json!({ "text": value, "number": 1.5 })),
+                "the document rejects {value}"
+            );
+        }
+        for value in [
+            "", "-", ".", "abc", "1.2.3", "e5", "+1", " 1", "1 ", "1\n", "1,5", "Infinity", "NaN",
+            "1e", "--1", "1e+", "0x10",
+        ] {
+            assert!(
+                !validates(&document, "Prices", json!({ "text": value, "number": 1.5 })),
+                "the document accepts {value}"
+            );
+        }
+        assert!(validates(
+            &document,
+            "Prices",
+            json!({ "text": "1.5", "number": 1.5 })
+        ));
+        assert!(!validates(
+            &document,
+            "Prices",
+            json!({ "text": "1.5", "number": "1.5" })
+        ));
+    }
+
+    #[test]
+    fn states_the_binary32_range_the_client_range_checks() {
+        let mut document = fixture();
+        document.types.insert(
+            "Samples".into(),
+            struct_type(
+                "samples",
+                vec![field("single", float(32)), field("wide", float(64))],
+                Vec::new(),
+                ObjectOpenness::Reject,
+            ),
+        );
+        let output: Value = serde_json::from_str(&crate::emit(&document).unwrap()).unwrap();
+        let properties = &output["components"]["schemas"]["Samples"]["properties"];
+
+        assert_eq!(properties["single"]["type"], "number");
+        assert_eq!(properties["single"]["format"], json!("float"));
+        assert_eq!(properties["single"]["minimum"], json!(-(f32::MAX as f64)));
+        assert_eq!(properties["single"]["maximum"], json!(f32::MAX as f64));
+        assert!(validates(
+            &document,
+            "Samples",
+            json!({ "single": 0.0, "wide": 1.0 })
+        ));
+        assert!(validates(
+            &document,
+            "Samples",
+            json!({ "single": f32::MAX as f64, "wide": 1.0 })
+        ));
+        assert!(validates(
+            &document,
+            "Samples",
+            json!({ "single": -(f32::MAX as f64), "wide": 1.0 })
+        ));
+        assert!(!validates(
+            &document,
+            "Samples",
+            json!({ "single": 3.5e38, "wide": 1.0 })
+        ));
+        assert!(!validates(
+            &document,
+            "Samples",
+            json!({ "single": -3.5e38, "wide": 1.0 })
+        ));
+
+        assert_eq!(properties["wide"]["format"], json!("double"));
+        for keyword in ["minimum", "maximum"] {
+            assert!(
+                properties["wide"].get(keyword).is_none(),
+                "a 64-bit float has no range the client checks: {:#}",
+                properties["wide"]
+            );
+        }
+        assert!(validates(
+            &document,
+            "Samples",
+            json!({ "single": 1.0, "wide": 1e308 })
+        ));
+    }
+
+    fn decimal(wire: DecimalWire) -> TypeRef {
+        TypeRef::Inline(InlineType::Decimal { wire })
+    }
+
+    fn float(bits: u8) -> TypeRef {
+        TypeRef::Inline(InlineType::Float { bits })
     }
 
     #[test]

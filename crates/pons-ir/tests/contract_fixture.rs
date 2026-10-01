@@ -852,7 +852,8 @@ fn validation_checks_integer_bounds_in_both_directions() {
                       bits: u16,
                       signed: bool,
                       minimum: Option<serde_json::Value>,
-                      maximum: Option<serde_json::Value>| {
+                      maximum: Option<serde_json::Value>,
+                      multiple_of: Option<serde_json::Value>| {
         let definition = document.types.get_mut("User").unwrap();
         let TypeKind::Struct { fields, .. } = &mut definition.definition else {
             panic!()
@@ -862,6 +863,7 @@ fn validation_checks_integer_bounds_in_both_directions() {
             signed: field_signed,
             minimum: field_minimum,
             maximum: field_maximum,
+            multiple_of: field_multiple_of,
             ..
         }) = &mut fields[0].ty
         else {
@@ -871,12 +873,14 @@ fn validation_checks_integer_bounds_in_both_directions() {
         *field_signed = signed;
         *field_minimum = minimum;
         *field_maximum = maximum;
+        *field_multiple_of = multiple_of;
     };
-    for (bits, signed, minimum, maximum, message) in [
+    for (bits, signed, minimum, maximum, multiple_of, message) in [
         (
             32,
             true,
             Some(serde_json::json!(2_147_483_648_i64)),
+            None,
             None,
             "minimum is above its native range",
         ),
@@ -885,12 +889,14 @@ fn validation_checks_integer_bounds_in_both_directions() {
             true,
             None,
             Some(serde_json::json!(-2_147_483_649_i64)),
+            None,
             "maximum is below its native range",
         ),
         (
             32,
             false,
             Some(serde_json::json!(4_294_967_296_u64)),
+            None,
             None,
             "minimum is above its native range",
         ),
@@ -899,6 +905,7 @@ fn validation_checks_integer_bounds_in_both_directions() {
             false,
             None,
             Some(serde_json::json!(-1)),
+            None,
             "maximum is below its native range",
         ),
         (
@@ -908,6 +915,7 @@ fn validation_checks_integer_bounds_in_both_directions() {
             Some(serde_json::json!(
                 170_141_183_460_469_231_731_687_303_715_884_105_728.0_f64
             )),
+            None,
             "maximum is above its native range",
         ),
         (
@@ -917,18 +925,70 @@ fn validation_checks_integer_bounds_in_both_directions() {
             Some(serde_json::json!(
                 340_282_366_920_938_463_463_374_607_431_768_211_456.0_f64
             )),
+            None,
             "maximum is above its native range",
+        ),
+        (
+            8,
+            false,
+            Some(serde_json::json!(1.5)),
+            None,
+            None,
+            "minimum must be an integral value",
+        ),
+        (
+            8,
+            false,
+            None,
+            Some(serde_json::json!(255.5)),
+            None,
+            "maximum must be an integral value",
+        ),
+        (
+            8,
+            false,
+            Some(serde_json::json!(0)),
+            Some(serde_json::json!(255)),
+            Some(serde_json::json!(0.5)),
+            "multiple_of must be an integral value",
         ),
     ] {
         let mut document = base.clone();
-        set_bounds(&mut document, bits, signed, minimum, maximum);
+        set_bounds(&mut document, bits, signed, minimum, maximum, multiple_of);
+        let errors = document
+            .validate()
+            .unwrap_err()
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>();
         assert!(
-            document
-                .validate()
-                .unwrap_err()
-                .iter()
-                .any(|error| error.to_string().contains(message))
+            errors.iter().any(|error| error.contains(message)),
+            "{message:?} missing from {errors:?}"
         );
+    }
+
+    for (minimum, maximum, multiple_of) in [
+        (
+            serde_json::json!(1.0),
+            serde_json::json!(10.0),
+            serde_json::json!(2.0),
+        ),
+        (
+            serde_json::json!(0),
+            serde_json::json!(255),
+            serde_json::json!(1),
+        ),
+    ] {
+        let mut document = base.clone();
+        set_bounds(
+            &mut document,
+            8,
+            false,
+            Some(minimum),
+            Some(maximum),
+            Some(multiple_of),
+        );
+        assert!(document.validate().is_ok());
     }
 }
 

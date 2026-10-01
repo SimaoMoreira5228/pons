@@ -20,14 +20,8 @@ pub(super) fn expand(container: &ast::Container<'_>) -> TokenStream {
     let name = words(&ident.to_string());
     let doc = doc_value(&container.original.attrs);
     let base_definition = match &container.data {
-        ast::Data::Struct(style, fields) => struct_definition(
-            *style,
-            fields,
-            container.attrs.transparent(),
-            container.attrs.deny_unknown_fields(),
-            !container.attrs.default().is_none(),
-        ),
-        ast::Data::Enum(variants) => enum_definition(variants, container.attrs.tag()),
+        ast::Data::Struct(style, fields) => struct_definition(*style, fields, &container.attrs),
+        ast::Data::Enum(variants) => enum_definition(variants, &container.attrs),
     };
     let input_type = container
         .attrs
@@ -99,26 +93,45 @@ fn converted_definition(
 fn struct_definition(
     style: ast::Style,
     fields: &[ast::Field<'_>],
-    transparent: bool,
-    deny_unknown_fields: bool,
-    container_default: bool,
+    attrs: &attr::Container,
 ) -> TokenStream {
-    if transparent || matches!(style, ast::Style::Newtype) {
-        let field = fields.first().expect("newtype structs have a field");
-        let ty = field_type_expression(field);
-        return quote!(::pons_core::ir::TypeKind::Newtype {
-            inner: #ty,
-        });
+    let mut refusals = Vec::new();
+    if let attr::TagType::Internal { tag } = attrs.tag() {
+        refusals.push(refuse(format!(
+            "serde tag \"{tag}\" is written on every value of this struct, but InlineType has no literal type, so the tag field cannot be described"
+        )));
     }
-    if matches!(style, ast::Style::Tuple) {
+    let shape = if attrs.transparent() {
+        transparent_shape(fields, &mut refusals)
+    } else if matches!(style, ast::Style::Newtype) {
+        newtype_shape(&fields[0])
+    } else if matches!(style, ast::Style::Tuple) {
+        if !attrs.default().is_none() || fields.iter().any(|f| has_default(&f.attrs)) {
+            refusals.push(refuse(
+                "serde default fills missing items of a tuple struct, but InlineType::Tuple has no per-item presence".to_owned(),
+            ));
+        }
         let items = fields.iter().map(field_type_expression);
-        return quote!(::pons_core::ir::TypeKind::Newtype {
+        quote!(::pons_core::ir::TypeKind::Newtype {
             inner: ::pons_core::ir::TypeRef::Inline(::pons_core::ir::InlineType::Tuple {
                 items: vec![#(#items),*],
             }),
-        });
-    }
+        })
+    } else {
+        named_struct_shape(
+            fields,
+            attrs.deny_unknown_fields(),
+            !attrs.default().is_none(),
+        )
+    };
+    quote!({ #( #refusals )* #shape })
+}
 
+fn named_struct_shape(
+    fields: &[ast::Field<'_>],
+    deny_unknown_fields: bool,
+    container_default: bool,
+) -> TokenStream {
     let field_builders = fields
         .iter()
         .map(|field| field_expression(field, true, container_default));
@@ -135,7 +148,49 @@ fn struct_definition(
     }
 }
 
-fn enum_definition(variants: &[ast::Variant<'_>], tag: &attr::TagType) -> TokenStream {
+fn transparent_shape(fields: &[ast::Field<'_>], refusals: &mut Vec<TokenStream>) -> TokenStream {
+    let marked: Vec<&ast::Field<'_>> = fields
+        .iter()
+        .filter(|field| field.attrs.transparent())
+        .collect();
+    let [field] = marked.as_slice() else {
+        refusals.push(refuse(format!(
+            "serde #[serde(transparent)] selects no single field in the derive context pons reads (marked: {}), so the transparent field is ambiguous",
+            names(marked.iter().map(|field| &field.member))
+        )));
+        return quote!(::pons_core::ir::TypeKind::Newtype {
+            inner: ::pons_core::ir::TypeRef::Inline(::pons_core::ir::InlineType::Any),
+        });
+    };
+    if field.attrs.skip_deserializing() || has_default(&field.attrs) {
+        refusals.push(refuse(format!(
+            "serde #[serde(transparent)] marks {} for Serialize, but the Deserialize derive picks another field, and TypeKind::Newtype has one inner slot",
+            field.member.to_token_stream()
+        )));
+    }
+    newtype_shape(field)
+}
+
+fn newtype_shape(field: &ast::Field<'_>) -> TokenStream {
+    let ty = field_type_expression(field);
+    quote!(::pons_core::ir::TypeKind::Newtype {
+        inner: #ty,
+    })
+}
+
+fn refuse(message: String) -> TokenStream {
+    quote!(cx.push_error("PONS-E101", #message);)
+}
+
+fn names<T: ToTokens>(members: impl Iterator<Item = T>) -> String {
+    members
+        .map(|member| member.to_token_stream().to_string())
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+fn enum_definition(variants: &[ast::Variant<'_>], attrs: &attr::Container) -> TokenStream {
+    let refusals = enum_refusals(variants, attrs);
     let variant_builders = variants.iter().map(|variant| {
         let payload = payload_expression(variant.style, &variant.fields);
         let wire_in = variant.attrs.name().deserialize_name();
@@ -190,12 +245,49 @@ fn enum_definition(variants: &[ast::Variant<'_>], tag: &attr::TagType) -> TokenS
             }
         }
     });
-    let representation = enum_representation(tag, variants);
-    quote! {
+    let representation = enum_representation(attrs.tag(), variants);
+    quote!({
+        #( #refusals )*
         let mut variants = Vec::new();
         #(#variant_builders)*
         ::pons_core::ir::TypeKind::Enum { repr: #representation, variants }
+    })
+}
+
+fn enum_refusals(variants: &[ast::Variant<'_>], attrs: &attr::Container) -> Vec<TokenStream> {
+    let mut refusals = Vec::new();
+    if attrs.deny_unknown_fields()
+        && variants
+            .iter()
+            .any(|variant| matches!(variant.style, ast::Style::Struct))
+    {
+        refusals.push(refuse(
+            "serde #[serde(deny_unknown_fields)] on an enum rejects unknown keys inside struct variant payloads, but VariantPayload::Struct has no openness field".to_owned(),
+        ));
     }
+    match attrs.tag() {
+        attr::TagType::None => {
+            let payloads: Vec<&ast::Variant<'_>> = variants
+                .iter()
+                .filter(|variant| !matches!(variant.style, ast::Style::Unit))
+                .collect();
+            if payloads.len() > 1 {
+                refusals.push(refuse(format!(
+                    "serde untagged enum writes no discriminator, and variants {} carry payloads, so EnumRepr::Untagged cannot tell them apart",
+                    names(payloads.iter().map(|variant| &variant.ident))
+                )));
+            }
+        }
+        _ => {
+            for variant in variants.iter().filter(|v| v.attrs.untagged()) {
+                refusals.push(refuse(format!(
+                    "serde #[serde(untagged)] variant {} writes no tag, but EnumRepr is per enum, so a mixed tagged and untagged enum cannot be described",
+                    variant.ident
+                )));
+            }
+        }
+    }
+    refusals
 }
 
 fn enum_representation(tag: &attr::TagType, variants: &[ast::Variant<'_>]) -> TokenStream {
@@ -330,7 +422,7 @@ fn field_body(
     let wire_in = field.attrs.name().deserialize_name();
     let wire_out = field.attrs.name().serialize_name();
     let ident = words(&field.member.to_token_stream().to_string());
-    let optional_on_input = container_default || has_default(&field.attrs) || is_option(field.ty);
+    let optional_on_input = container_default || has_default(&field.attrs);
     let optional_on_output = field.attrs.skip_serializing_if().is_some();
     let doc = doc_value(&field.original.attrs);
     let presence = quote! {
@@ -509,14 +601,6 @@ fn label(codec: Option<String>) -> TokenStream {
 
 fn has_default(attrs: &attr::Field) -> bool {
     !attrs.default().is_none()
-}
-
-fn is_option(ty: &Type) -> bool {
-    let Type::Path(path) = ty else { return false };
-    path.path
-        .segments
-        .last()
-        .is_some_and(|segment| segment.ident == "Option")
 }
 
 pub(super) fn doc_value(attrs: &[syn::Attribute]) -> TokenStream {

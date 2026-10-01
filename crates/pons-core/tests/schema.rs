@@ -166,7 +166,17 @@ enum RequiredPayloads {
     Struct {
         value: String,
         notes: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        tag: Option<String>,
     },
+}
+
+#[derive(pons_core::Schema)]
+#[allow(dead_code)]
+struct DefaultedOptions {
+    #[serde(default)]
+    nickname: Option<String>,
+    email: Option<String>,
 }
 
 #[derive(pons_core::Schema)]
@@ -249,6 +259,77 @@ enum StatusError {
     Client,
     #[pons(status = "default")]
     Fallback,
+}
+
+#[derive(pons_core::Schema)]
+#[serde(tag = "kind", deny_unknown_fields)]
+#[allow(dead_code)]
+struct TaggedStruct {
+    value: String,
+}
+
+#[derive(pons_core::Schema)]
+#[serde(tag = "kind")]
+#[allow(dead_code)]
+enum MixedTaggedVariants {
+    Ready,
+    #[serde(untagged)]
+    Loose {
+        value: u32,
+    },
+}
+
+#[derive(pons_core::Schema)]
+#[serde(untagged)]
+#[allow(dead_code)]
+enum UntaggedOverlap {
+    Number { amount: u32 },
+    Text { body: String },
+}
+
+#[derive(pons_core::Schema)]
+#[serde(untagged)]
+#[allow(dead_code)]
+enum UntaggedSingle {
+    Only(u32),
+}
+
+#[derive(pons_core::Schema)]
+#[serde(transparent)]
+#[allow(dead_code)]
+struct TransparentMarked {
+    #[serde(skip_serializing, skip_deserializing)]
+    ignored: (),
+    value: String,
+}
+
+#[derive(pons_core::Schema)]
+#[serde(transparent)]
+#[allow(dead_code)]
+struct TransparentSplit {
+    #[serde(default)]
+    preferred: String,
+    #[serde(skip_serializing)]
+    fallback: u32,
+}
+
+#[derive(pons_core::Schema)]
+#[serde(deny_unknown_fields)]
+#[allow(dead_code)]
+enum ClosedEnum {
+    Closed { value: u32 },
+}
+
+#[derive(pons_core::Schema)]
+#[serde(default)]
+#[allow(dead_code)]
+struct TupleDefaults(String, u32);
+
+#[derive(pons_core::Schema)]
+#[allow(dead_code)]
+struct PlatformSizedIntegers {
+    count: usize,
+    offset: isize,
 }
 
 fn document(
@@ -353,7 +434,7 @@ fn derives_directional_struct_fields_from_serde_attributes() {
     assert_eq!(fields[0].wire, "email");
     assert_eq!(fields[0].presence, pons_ir::Presence::Required);
     assert_eq!(fields[1].wire, "nickname");
-    assert_eq!(fields[1].presence, pons_ir::Presence::Optional);
+    assert_eq!(fields[1].presence, pons_ir::Presence::Required);
     assert!(matches!(
         fields[1].ty,
         TypeRef::Inline(InlineType::Nullable { .. })
@@ -1022,15 +1103,27 @@ fn enum_payload_presence_stays_direction_specific_without_a_container_default() 
     for (reference, expected) in [
         (
             input,
-            [pons_ir::Presence::Required, pons_ir::Presence::Optional],
+            [
+                pons_ir::Presence::Required,
+                pons_ir::Presence::Required,
+                pons_ir::Presence::Required,
+            ],
         ),
         (
             output,
-            [pons_ir::Presence::Required, pons_ir::Presence::Required],
+            [
+                pons_ir::Presence::Required,
+                pons_ir::Presence::Required,
+                pons_ir::Presence::Optional,
+            ],
         ),
         (
             both,
-            [pons_ir::Presence::Required, pons_ir::Presence::Optional],
+            [
+                pons_ir::Presence::Required,
+                pons_ir::Presence::Required,
+                pons_ir::Presence::Optional,
+            ],
         ),
     ] {
         let fields = struct_payload_fields(&cx, &reference);
@@ -1039,7 +1132,7 @@ fn enum_payload_presence_stays_direction_specific_without_a_container_default() 
                 .iter()
                 .map(|field| field.wire.as_str())
                 .collect::<Vec<_>>(),
-            ["value", "notes"]
+            ["value", "notes", "tag"]
         );
         assert_eq!(
             fields
@@ -1154,6 +1247,175 @@ fn one_sided_codec_with_flatten_only_opaques_the_codec_direction() {
         diagnostic.code == "PONS-W101" && diagnostic.message.contains("flatten")
     }));
 
+    let (types, diagnostics) = cx.into_parts();
+    assert!(document(types, diagnostics).validate().is_ok());
+}
+
+fn error_diagnostic<'a>(cx: &'a TypeCx, needle: &str) -> &'a pons_ir::Diagnostic {
+    cx.diagnostics()
+        .iter()
+        .find(|diagnostic| {
+            diagnostic.code == "PONS-E101"
+                && diagnostic.severity == DiagnosticSeverity::Error
+                && diagnostic.message.contains(needle)
+        })
+        .unwrap_or_else(|| panic!("PONS-E101 mentioning {needle} in {:?}", cx.diagnostics()))
+}
+
+#[test]
+fn serde_tag_on_a_struct_is_refused_instead_of_dropped() {
+    let mut cx = TypeCx::new();
+    let reference = TaggedStruct::schema(&mut cx, Direction::Output);
+    let TypeRef::Named(named) = reference else {
+        panic!()
+    };
+    let TypeKind::Struct { openness, .. } = &cx.definitions()[&named.id].definition else {
+        panic!()
+    };
+    assert_eq!(openness, &pons_ir::ObjectOpenness::Reject);
+
+    let diagnostic = error_diagnostic(&cx, "kind");
+    assert!(diagnostic.message.contains("no literal type"));
+    let (types, diagnostics) = cx.into_parts();
+    assert!(document(types, diagnostics).validate().is_err());
+}
+
+#[test]
+fn an_untagged_variant_under_a_tagged_container_is_refused() {
+    let mut cx = TypeCx::new();
+    let _ = MixedTaggedVariants::schema(&mut cx, Direction::Output);
+    let diagnostic = error_diagnostic(&cx, "Loose");
+    assert!(diagnostic.message.contains("untagged"));
+    assert!(diagnostic.message.contains("EnumRepr"));
+    let (types, diagnostics) = cx.into_parts();
+    assert!(document(types, diagnostics).validate().is_err());
+}
+
+#[test]
+fn an_untagged_container_with_several_payload_variants_is_refused() {
+    let mut cx = TypeCx::new();
+    let _ = UntaggedOverlap::schema(&mut cx, Direction::Output);
+    let diagnostic = error_diagnostic(&cx, "Number, Text");
+    assert!(diagnostic.message.contains("no discriminator"));
+    let (types, diagnostics) = cx.into_parts();
+    assert!(document(types, diagnostics).validate().is_err());
+}
+
+#[test]
+fn a_single_payload_untagged_enum_stays_describable() {
+    let mut cx = TypeCx::new();
+    let reference = UntaggedSingle::schema(&mut cx, Direction::Output);
+    let TypeRef::Named(named) = reference else {
+        panic!()
+    };
+    let TypeKind::Enum { repr, variants } = &cx.definitions()[&named.id].definition else {
+        panic!()
+    };
+    assert_eq!(repr, &EnumRepr::Untagged);
+    assert_eq!(variants.len(), 1);
+    assert!(cx.diagnostics().is_empty());
+    let (types, diagnostics) = cx.into_parts();
+    assert!(document(types, diagnostics).validate().is_ok());
+}
+
+#[test]
+fn transparent_uses_the_field_serde_marks_instead_of_the_first() {
+    let mut cx = TypeCx::new();
+    let reference = TransparentMarked::schema(&mut cx, Direction::Both);
+    let TypeRef::Named(named) = reference else {
+        panic!()
+    };
+    let TypeKind::Newtype { inner } = &cx.definitions()[&named.id].definition else {
+        panic!()
+    };
+    assert!(matches!(inner, TypeRef::Inline(InlineType::String { .. })));
+    assert!(cx.diagnostics().is_empty());
+    let (types, diagnostics) = cx.into_parts();
+    assert!(document(types, diagnostics).validate().is_ok());
+}
+
+#[test]
+fn a_transparent_field_that_derives_disagree_on_is_refused() {
+    let mut cx = TypeCx::new();
+    let _ = TransparentSplit::schema(&mut cx, Direction::Input);
+    let diagnostic = error_diagnostic(&cx, "preferred");
+    assert!(diagnostic.message.contains("Deserialize"));
+    let (types, diagnostics) = cx.into_parts();
+    assert!(document(types, diagnostics).validate().is_err());
+}
+
+#[test]
+fn deny_unknown_fields_on_an_enum_is_refused() {
+    let mut cx = TypeCx::new();
+    let _ = ClosedEnum::schema(&mut cx, Direction::Input);
+    let diagnostic = error_diagnostic(&cx, "deny_unknown_fields");
+    assert!(diagnostic.message.contains("VariantPayload::Struct"));
+    let (types, diagnostics) = cx.into_parts();
+    assert!(document(types, diagnostics).validate().is_err());
+}
+
+#[test]
+fn serde_default_on_a_tuple_struct_is_refused() {
+    let mut cx = TypeCx::new();
+    let _ = TupleDefaults::schema(&mut cx, Direction::Input);
+    let diagnostic = error_diagnostic(&cx, "tuple struct");
+    assert!(diagnostic.message.contains("InlineType::Tuple"));
+    let (types, diagnostics) = cx.into_parts();
+    assert!(document(types, diagnostics).validate().is_err());
+}
+
+#[test]
+fn an_option_field_is_only_optional_on_input_with_a_default() {
+    let mut cx = TypeCx::new();
+    let input = DefaultedOptions::schema(&mut cx, Direction::Input);
+    let output = DefaultedOptions::schema(&mut cx, Direction::Output);
+    let (input, _) = struct_shape(&cx, &input);
+    let (output, _) = struct_shape(&cx, &output);
+
+    assert_eq!(input[0].wire, "nickname");
+    assert_eq!(input[0].presence, pons_ir::Presence::Optional);
+    assert_eq!(input[1].wire, "email");
+    assert_eq!(input[1].presence, pons_ir::Presence::Required);
+    assert!(
+        output
+            .iter()
+            .all(|field| field.presence == pons_ir::Presence::Required)
+    );
+    assert!(
+        input
+            .iter()
+            .all(|field| matches!(field.ty, TypeRef::Inline(InlineType::Nullable { .. })))
+    );
+    assert!(cx.diagnostics().is_empty());
+
+    let (types, diagnostics) = cx.into_parts();
+    assert!(document(types, diagnostics).validate().is_ok());
+}
+
+#[test]
+fn platform_sized_integers_describe_as_64_bit_numbers() {
+    let mut cx = TypeCx::new();
+    assert!(matches!(
+        usize::schema(&mut cx, Direction::Input),
+        TypeRef::Inline(InlineType::Int {
+            bits: 64,
+            signed: false,
+            ..
+        })
+    ));
+    assert!(matches!(
+        isize::schema(&mut cx, Direction::Input),
+        TypeRef::Inline(InlineType::Int {
+            bits: 64,
+            signed: true,
+            ..
+        })
+    ));
+
+    let reference = PlatformSizedIntegers::schema(&mut cx, Direction::Input);
+    let (fields, _) = struct_shape(&cx, &reference);
+    assert_eq!(fields.len(), 2);
+    assert!(cx.diagnostics().is_empty());
     let (types, diagnostics) = cx.into_parts();
     assert!(document(types, diagnostics).validate().is_ok());
 }

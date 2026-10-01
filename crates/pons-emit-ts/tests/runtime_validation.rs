@@ -1073,8 +1073,11 @@ fn rejects_fractional_integer_constraints() {
         multiple_of: Some(serde_json::json!(0.5)),
     });
     let error = emit_with_strategy(&document, EmitMode::Strict, ErrorStrategy::Throw).unwrap_err();
-    assert!(error.0.contains("fractional integer constraint"));
-    assert!(error.0.contains("types.User.fields[0].ty.multiple_of"));
+    assert!(
+        error
+            .0
+            .contains("integer multiple_of must be an integral value")
+    );
 }
 
 #[test]
@@ -5140,4 +5143,363 @@ if (failure.status !== 201) throw new Error(`the error status was lost: ${JSON.s
 if (failure.body?.code !== "invalid") throw new Error(`the typed error body was lost: ${JSON.stringify(failure)}`);
 "#;
     run_bun(&files, harness);
+}
+
+fn string_wire_integer_document() -> pons_ir::Document {
+    let mut raw: serde_json::Value =
+        serde_json::from_str(include_str!("../../../fixtures/login.json")).unwrap();
+    raw["types"]["LoginRequest"]["fields"] = serde_json::json!([
+        {"wire": "email", "ident": ["email"], "ty": {"kind": "string"}, "presence": "required"},
+        {"wire": "count", "ident": ["count"], "ty": {"kind": "int", "bits": 32, "signed": false, "wire": "string"}, "presence": "required"},
+        {"wire": "offset", "ident": ["offset"], "ty": {"kind": "int", "bits": 32, "signed": true, "wire": "string"}, "presence": "required"}
+    ]);
+    raw["types"]["User"]["fields"] = serde_json::json!([
+        {"wire": "id", "ident": ["id"], "ty": {"kind": "int", "bits": 64, "signed": false, "wire": "string"}, "presence": "required"},
+        {"wire": "offset", "ident": ["offset"], "ty": {"kind": "int", "bits": 32, "signed": true, "wire": "string"}, "presence": "required"}
+    ]);
+    raw["operations"][0]["provides"] = serde_json::Value::Null;
+    serde_json::from_value(raw).unwrap()
+}
+
+#[test]
+fn string_wire_integers_reject_every_form_the_published_pattern_rejects() {
+    let files = emit_with_strategy(
+        &string_wire_integer_document(),
+        EmitMode::Strict,
+        ErrorStrategy::Throw,
+    )
+    .unwrap()
+    .files;
+    let harness = r#"
+import { createClient } from "./client.ts";
+
+let reply: any = { id: "0", offset: "-0" };
+let sent = "";
+const client = createClient({
+  baseUrl: "https://example.test",
+  fetch: async (_url, init) => {
+    sent = String(init?.body);
+    return new Response(JSON.stringify(reply), { status: 200, headers: { "content-type": "application/json" } });
+  },
+});
+const login = async (body: any) => {
+  let failure: any;
+  let value: any;
+  try { value = await client.auth.login({ body }); } catch (cause) { failure = cause; }
+  return { failure, value };
+};
+const rejects = (result: any, where: string) => {
+  if (result.failure?.kind !== "protocol") throw new Error(`${where} was accepted: ${JSON.stringify(result)}`);
+  if (!String(result.failure.message).includes("expected integer string")) {
+    throw new Error(`${where} failed with ${JSON.stringify(result.failure)}`);
+  }
+};
+
+for (const count of ["007", "00", "-0", "+0", " 7", "7 "]) {
+  rejects(await login({ email: "person@example.test", count, offset: "0" }), `request count ${count}`);
+}
+for (const offset of ["007", "00", "-00"]) {
+  rejects(await login({ email: "person@example.test", count: "7", offset }), `request offset ${offset}`);
+}
+
+const sent_ok = await login({ email: "person@example.test", count: "70", offset: "-0" });
+if (sent_ok.failure) throw new Error(`a canonical request was rejected: ${JSON.stringify(sent_ok.failure)}`);
+if (!sent.includes(`"count":"70"`) || !sent.includes(`"offset":"-0"`)) {
+  throw new Error(`the request lost its integers: ${sent}`);
+}
+if (sent_ok.value.id !== "0") throw new Error(`the response was not returned: ${JSON.stringify(sent_ok.value)}`);
+
+for (const id of ["007", "00", "-0"]) {
+  reply = { id, offset: "0" };
+  rejects(await login({ email: "person@example.test", count: "7", offset: "0" }), `response id ${id}`);
+}
+for (const offset of ["007", "00", "-00"]) {
+  reply = { id: "7", offset };
+  rejects(await login({ email: "person@example.test", count: "7", offset: "0" }), `response offset ${offset}`);
+}
+reply = { id: "0", offset: "-0" };
+const received = await login({ email: "person@example.test", count: "7", offset: "0" });
+if (received.failure) throw new Error(`a canonical response was rejected: ${JSON.stringify(received.failure)}`);
+if (received.value.id !== "0" || received.value.offset !== "-0") {
+  throw new Error(`the canonical response was lost: ${JSON.stringify(received.value)}`);
+}
+"#;
+    run_bun(&files, harness);
+}
+
+fn base64_document() -> pons_ir::Document {
+    let mut raw: serde_json::Value =
+        serde_json::from_str(include_str!("../../../fixtures/login.json")).unwrap();
+    raw["types"]["LoginRequest"]["fields"] = serde_json::json!([
+        {"wire": "email", "ident": ["email"], "ty": {"kind": "string"}, "presence": "required"},
+        {"wire": "blob", "ident": ["blob"], "ty": {"kind": "bytes", "encoding": "base64"}, "presence": "required"},
+        {"wire": "url", "ident": ["url"], "ty": {"kind": "bytes", "encoding": "base64url"}, "presence": "required"}
+    ]);
+    raw["types"]["User"]["fields"] = serde_json::json!([
+        {"wire": "id", "ident": ["id"], "ty": {"kind": "int", "bits": 64, "signed": false, "wire": "string"}, "presence": "required"},
+        {"wire": "blob", "ident": ["blob"], "ty": {"kind": "bytes", "encoding": "base64"}, "presence": "optional"},
+        {"wire": "url", "ident": ["url"], "ty": {"kind": "bytes", "encoding": "base64url"}, "presence": "optional"}
+    ]);
+    raw["operations"][0]["provides"] = serde_json::Value::Null;
+    serde_json::from_value(raw).unwrap()
+}
+
+#[test]
+fn base64_padding_follows_one_rule_per_encoding() {
+    let files = emit_with_strategy(&base64_document(), EmitMode::Strict, ErrorStrategy::Throw)
+        .unwrap()
+        .files;
+    let harness = r#"
+import { createClient } from "./client.ts";
+
+let reply: any = { id: "0" };
+let sent = "";
+const client = createClient({
+  baseUrl: "https://example.test",
+  fetch: async (_url, init) => {
+    sent = String(init?.body);
+    return new Response(JSON.stringify(reply), { status: 200, headers: { "content-type": "application/json" } });
+  },
+});
+const login = async (body: any) => {
+  let failure: any;
+  let value: any;
+  try { value = await client.auth.login({ body }); } catch (cause) { failure = cause; }
+  return { failure, value };
+};
+const rejects = (result: any, where: string, message: string) => {
+  if (result.failure?.kind !== "protocol") throw new Error(`${where} was accepted: ${JSON.stringify(result)}`);
+  if (!String(result.failure.message).includes(message)) {
+    throw new Error(`${where} failed with ${JSON.stringify(result.failure)}`);
+  }
+};
+
+const byte = new Uint8Array([65]);
+const sent_ok = await login({ email: "person@example.test", blob: byte, url: byte });
+if (sent_ok.failure) throw new Error(`a byte request was rejected: ${JSON.stringify(sent_ok.failure)}`);
+if (!sent.includes(`"blob":"QQ=="`) || !sent.includes(`"url":"QQ"`)) {
+  throw new Error(`the request did not use one rule per encoding: ${sent}`);
+}
+
+reply = { id: "0", blob: "QQ==" };
+if ((await login({ email: "person@example.test", blob: byte, url: byte })).failure) {
+  throw new Error("padded base64 was rejected");
+}
+reply = { id: "0", url: "QQ" };
+if ((await login({ email: "person@example.test", blob: byte, url: byte })).failure) {
+  throw new Error("unpadded base64url was rejected");
+}
+reply = { id: "0", url: "QQ==" };
+if ((await login({ email: "person@example.test", blob: byte, url: byte })).failure) {
+  throw new Error("padded base64url was rejected");
+}
+const body = { email: "person@example.test", blob: byte, url: byte };
+reply = { id: "0", blob: "QQ" };
+rejects(await login(body), "unpadded base64", "invalid base64 bytes");
+reply = { id: "0", url: "Q" };
+rejects(await login(body), "a short base64url", "invalid base64url bytes");
+reply = { id: "0", url: "QQ=" };
+rejects(await login(body), "a broken base64url", "invalid base64url bytes");
+reply = { id: "0", blob: "QUJD", url: "QUJD" };
+const decoded = await login(body);
+if (decoded.failure) throw new Error(`a legal reply was rejected: ${JSON.stringify(decoded.failure)}`);
+if (decoded.value.blob.length !== 3 || decoded.value.url.length !== 3) {
+  throw new Error(`the reply was not decoded: ${JSON.stringify(decoded.value)}`);
+}
+"#;
+    run_bun(&files, harness);
+}
+
+#[test]
+fn a_text_body_rejects_the_unknown_properties_a_json_body_rejects() {
+    let mut raw: serde_json::Value =
+        serde_json::from_str(include_str!("../../../fixtures/login.json")).unwrap();
+    raw["types"]["LoginRequest"]["direction"] = serde_json::json!("both");
+    raw["types"]["LoginRequest"]["openness"] = serde_json::json!("reject");
+    raw["operations"][0]["body"]["content"] = serde_json::json!("text");
+    raw["operations"][0]["responses"][0]["body"] = serde_json::json!({"ref": "LoginRequest"});
+    raw["operations"][0]["provides"] = serde_json::Value::Null;
+    let document: pons_ir::Document = serde_json::from_value(raw).unwrap();
+    let files = emit_with_strategy(&document, EmitMode::Strict, ErrorStrategy::Throw)
+        .unwrap()
+        .files;
+    let harness = r#"
+import { createClient } from "./client.ts";
+
+let reply: any = { email: "person@example.test" };
+const client = createClient({
+  baseUrl: "https://example.test",
+  fetch: async () => new Response(JSON.stringify(reply), { status: 200, headers: { "content-type": "application/json" } }),
+});
+const login = async (body: any) => {
+  let failure: any;
+  let value: any;
+  try { value = await client.auth.login({ body }); } catch (cause) { failure = cause; }
+  return { failure, value };
+};
+const rejects = (result: any, where: string) => {
+  if (result.failure?.kind !== "protocol") throw new Error(`${where} was accepted: ${JSON.stringify(result)}`);
+  if (!String(result.failure.message).includes("unknown property extra")) {
+    throw new Error(`${where} failed with ${JSON.stringify(result.failure)}`);
+  }
+};
+
+rejects(await login({ email: "person@example.test", extra: 1 }), "an unknown text body property");
+reply = { email: "person@example.test", extra: 1 };
+rejects(await login({ email: "person@example.test" }), "an unknown response property");
+reply = { email: "person@example.test" };
+const sent = await login({ email: "person@example.test" });
+if (sent.failure) throw new Error(`a closed body was rejected: ${JSON.stringify(sent.failure)}`);
+if (sent.value.email !== "person@example.test") throw new Error("the body was not returned");
+"#;
+    run_bun(&files, harness);
+}
+
+fn keyed_openness_document() -> pons_ir::Document {
+    let mut raw: serde_json::Value =
+        serde_json::from_str(include_str!("../../../fixtures/login.json")).unwrap();
+    raw["types"]["Metadata"] = serde_json::json!({
+        "kind": "struct",
+        "name": ["metadata"],
+        "direction": "both",
+        "openness": {"preserve_typed": {"value": {
+            "kind": "map",
+            "key": {"kind": "string", "pattern": "^[a-z][a-z0-9]*$"},
+            "value": {"kind": "int", "bits": 16, "signed": false, "wire": "number"}
+        }}},
+        "fields": []
+    });
+    raw["operations"][0]["body"] = serde_json::json!({
+        "ty": {"ref": "Metadata"},
+        "content": "json",
+        "required": true
+    });
+    raw["operations"][0]["responses"][0]["body"] = serde_json::json!({"ref": "Metadata"});
+    raw["operations"][0]["provides"] = serde_json::Value::Null;
+    serde_json::from_value(raw).unwrap()
+}
+
+#[test]
+fn a_typed_openness_checks_the_keys_it_preserves() {
+    let files = emit_with_strategy(
+        &keyed_openness_document(),
+        EmitMode::Strict,
+        ErrorStrategy::Throw,
+    )
+    .unwrap()
+    .files;
+    let harness = r#"
+import { createClient } from "./client.ts";
+
+let reply: any = { good: 1 };
+const client = createClient({
+  baseUrl: "https://example.test",
+  fetch: async () => new Response(JSON.stringify(reply), { status: 200, headers: { "content-type": "application/json" } }),
+});
+const login = async (body: any) => {
+  let failure: any;
+  let value: any;
+  try { value = await client.auth.login({ body }); } catch (cause) { failure = cause; }
+  return { failure, value };
+};
+const rejects = (result: any, where: string, expected: string) => {
+  if (result.failure?.kind !== "protocol") throw new Error(`${where} was accepted: ${JSON.stringify(result)}`);
+  if (!String(result.failure.message).includes(expected)) {
+    throw new Error(`${where} failed with ${JSON.stringify(result.failure)}`);
+  }
+};
+
+for (const [body, where, expected] of [
+  [{ Bad: 1 }, "an unknown request key", "string does not match the contract"],
+  [{ good: "x" }, "an unknown request value", "expected an exact integer"],
+] as Array<[any, string, string]>) {
+  const result = await login(body);
+  rejects(result, where, expected);
+}
+for (const [body, where, expected] of [
+  [{ Bad: 1 }, "an unknown response key", "string does not match the contract"],
+  [{ good: "x" }, "an unknown response value", "expected an exact integer"],
+] as Array<[any, string, string]>) {
+  reply = body;
+  rejects(await login({ good: 1 }), where, expected);
+}
+reply = { good: 1, other: 2 };
+const sent = await login({ good: 1, other: 2 });
+if (sent.failure) throw new Error(`the map keys of the contract were rejected: ${JSON.stringify(sent.failure)}`);
+if (sent.value.good !== 1 || sent.value.other !== 2) throw new Error(`the extras were lost: ${JSON.stringify(sent.value)}`);
+"#;
+    run_bun(&files, harness);
+}
+
+#[test]
+fn an_invalid_pattern_becomes_a_policy_failure_on_both_directions() {
+    let fixture: pons_ir::Document =
+        serde_json::from_str(include_str!("../../../fixtures/login.json")).unwrap();
+    let harness = r#"
+import { createClient } from "./client.ts";
+
+let reply: any = { id: "1", nickname: "nick" };
+const client = createClient({
+  baseUrl: "https://example.test",
+  fetch: async () => new Response(JSON.stringify(reply), { status: 200, headers: { "content-type": "application/json" } }),
+});
+const login = async (body: any) => {
+  let failure: any;
+  try { await client.auth.login({ body }); } catch (cause) { failure = cause; }
+  return failure;
+};
+const rejects = (failure: any, pattern: string) => {
+  if (failure?.kind !== "protocol") throw new Error(`an invalid pattern escaped as ${JSON.stringify(failure)}`);
+  if (!String(failure.message).includes(pattern)) {
+    throw new Error(`the failure did not name the pattern: ${JSON.stringify(failure)}`);
+  }
+};
+"#;
+
+    let mut request: pons_ir::Document = fixture.clone();
+    let TypeKind::Struct { fields, .. } =
+        &mut request.types.get_mut("LoginRequest").unwrap().definition
+    else {
+        unreachable!()
+    };
+    fields[0].ty = TypeRef::Inline(InlineType::String {
+        format: None,
+        min_length: None,
+        max_length: None,
+        pattern: Some("[a-".into()),
+    });
+    request.operations[0].provides = None;
+    let files = emit_with_strategy(&request, EmitMode::Strict, ErrorStrategy::Throw)
+        .unwrap()
+        .files;
+    let mut both = harness.to_string();
+    both.push_str(
+        r#"
+rejects(await login({ email: "person@example.test" }), "[a-");
+"#,
+    );
+    run_bun(&files, &both);
+
+    let mut response = fixture;
+    let TypeKind::Struct { fields, .. } = &mut response.types.get_mut("User").unwrap().definition
+    else {
+        unreachable!()
+    };
+    fields[1].ty = TypeRef::Inline(InlineType::String {
+        format: None,
+        min_length: None,
+        max_length: None,
+        pattern: Some("(?<unclosed".into()),
+    });
+    response.operations[0].provides = None;
+    let files = emit_with_strategy(&response, EmitMode::Strict, ErrorStrategy::Throw)
+        .unwrap()
+        .files;
+    let mut both = harness.to_string();
+    both.push_str(
+        r#"
+rejects(await login({ email: "person@example.test" }), "(?<unclosed");
+"#,
+    );
+    run_bun(&files, &both);
 }

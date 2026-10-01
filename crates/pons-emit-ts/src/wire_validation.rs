@@ -1,5 +1,10 @@
 pub(super) fn render() -> &'static str {
-    r#"function validateWire(value: any, schema: any, mode: "encode" | "decode", allowUnsafeWideIntegers = false): any {
+    r#"const CANONICAL_INTEGER = /^(0|[1-9][0-9]*)$/;
+const CANONICAL_SIGNED_INTEGER = /^-?(0|[1-9][0-9]*)$/;
+const BASE64 = /^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/;
+const BASE64URL = /^(?:[A-Za-z0-9_-]{4})*(?:[A-Za-z0-9_-]{2}(?:==)?|[A-Za-z0-9_-]{3}=?)?$/;
+
+function validateWire(value: any, schema: any, mode: "encode" | "decode", allowUnsafeWideIntegers = false): any {
   if (schema == null) return;
   if (value === undefined) throw new WirePolicyError("missing value");
   if (schema.ref) {
@@ -71,7 +76,7 @@ pub(super) fn render() -> &'static str {
         throw new WirePolicyError("string is longer than the contract");
       }
     }
-    if (schema.pattern !== undefined && !new RegExp(schema.pattern).test(value)) {
+    if (schema.pattern !== undefined && !matchesPattern(schema.pattern, value)) {
       throw new WirePolicyError("string does not match the contract");
     }
     return;
@@ -92,9 +97,9 @@ pub(super) fn render() -> &'static str {
       throw new WirePolicyError("expected encoded bytes");
     } else if (schema.encoding === "hex" && !/^(?:[0-9a-fA-F]{2})*$/.test(value)) {
       throw new WirePolicyError("invalid hexadecimal bytes");
-    } else if (schema.encoding === "base64" && !/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/.test(value)) {
+    } else if (schema.encoding === "base64" && !BASE64.test(value)) {
       throw new WirePolicyError("invalid base64 bytes");
-    } else if (schema.encoding === "base64url" && (!/^[A-Za-z0-9_-]*$/.test(value) || value.length % 4 === 1)) {
+    } else if (schema.encoding === "base64url" && !BASE64URL.test(value)) {
       throw new WirePolicyError("invalid base64url bytes");
     }
     return;
@@ -134,10 +139,19 @@ function stableValue(value: any): string {
   return JSON.stringify(value);
 }
 
+function matchesPattern(pattern: string, value: string): boolean {
+  try {
+    return new RegExp(pattern).test(value);
+  } catch {
+    throw new WirePolicyError(`invalid contract pattern ${pattern}`);
+  }
+}
+
 function validateInteger(value: any, schema: any, mode: "encode" | "decode", allowUnsafeWideIntegers: boolean): void {
   let integer: bigint;
   if (schema.wire === "string") {
-    if (typeof value !== "string" || !/^-?\d+$/.test(value)) {
+    const canonical = schema.signed ? CANONICAL_SIGNED_INTEGER : CANONICAL_INTEGER;
+    if (typeof value !== "string" || !canonical.test(value)) {
       throw new WirePolicyError("expected integer string");
     }
     integer = BigInt(value);
@@ -184,6 +198,16 @@ function integerConstraint(value: any): bigint {
 
 function validateStruct(value: any, definition: any, mode: "encode" | "decode", allowUnsafeWideIntegers: boolean): void {
   if (!isRecord(value)) throw new WirePolicyError("expected object");
+  const openness = definition.openness ?? "preserve_opaque";
+  const key = opennessKey(openness.preserve_typed?.value);
+  if (openness === "reject" || key !== undefined) {
+    const known = new Set(collectFields(definition).map((field: any) => field.wire));
+    for (const name of Object.keys(value)) {
+      if (known.has(name)) continue;
+      if (key === undefined) throw new WirePolicyError(`unknown property ${name}`);
+      validateWire(name, key, mode, allowUnsafeWideIntegers);
+    }
+  }
   const flattenedOpaque = (definition.flattened ?? []).some((item: any) => isFlattenedOpaque(item));
   for (const field of collectFields(definition, mode)) {
     if (flattenedOpaque && !hasOpaque(field.ty)) continue;
@@ -196,6 +220,15 @@ function validateStruct(value: any, definition: any, mode: "encode" | "decode", 
     }
     validateWire(value[field.wire], field.ty, mode, allowUnsafeWideIntegers);
   }
+}
+
+function opennessKey(schema: any, seen = new Set<string>()): any {
+  if (schema?.kind === "map") return schema.key;
+  if (!schema?.ref || seen.has(schema.ref)) return undefined;
+  const definition = typeDefinitions[schema.ref];
+  if (definition?.kind !== "newtype") return undefined;
+  seen.add(schema.ref);
+  return opennessKey(definition.inner, seen);
 }
 
 function validateEnum(value: any, definition: any, expected: any, mode: "encode" | "decode", allowUnsafeWideIntegers: boolean): any {
