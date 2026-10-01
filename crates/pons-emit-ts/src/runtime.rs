@@ -335,8 +335,9 @@ async function request<T, E>(
       }
     }
     const responseContent = response.headers.get("content-type") ?? "";
-    const declaredSuccess = findSuccess(responses, response.status);
-    const declaredError = declaredSuccess === undefined ? findDeclared(errors, response.status) : undefined;
+    const matched = matchResponse(responses, errors, response.status);
+    const declaredSuccess = matched.success;
+    const declaredError = matched.error;
     if (declaredSuccess === undefined && declaredError === undefined && response.status >= 200 && response.status < 300) {
       return err({ kind: "protocol", message: `undeclared success response ${response.status}` });
     }
@@ -455,7 +456,7 @@ async function fetchWithRetry(
       attempt += 1;
       continue;
     }
-    const declaredError = response.status >= 400 ? findDeclared(errors, response.status) : undefined;
+    const declaredError = response.status >= 400 ? findError(errors, response.status) : undefined;
     const retryableStatus = declaredError?.retryable ?? (response.status === 502 || response.status === 503 || response.status === 504);
     if (!retryableStatus || attempt + 1 >= attempts) return response;
     try {
@@ -827,23 +828,33 @@ function preflightBody(value: unknown, schema: unknown, content: string | undefi
 }
 
 function declaresStatus<T extends { status: number | string }>(entries: T[], actual: number): boolean {
-  return entries.some(
-    (entry) => entry.status === actual
-      || (typeof entry.status === "string" && entry.status === `${Math.floor(actual / 100)}xx`),
-  );
+  return findSpecific(entries, actual) !== undefined;
 }
 
-function findDeclared<T extends { status: number | string }>(entries: T[], actual: number): T | undefined {
+function findSpecific<T extends { status: number | string }>(entries: T[], actual: number): T | undefined {
   return entries.find((entry) => entry.status === actual)
-    ?? entries.find((entry) => typeof entry.status === "string" && entry.status === `${Math.floor(actual / 100)}xx`)
+    ?? entries.find((entry) => typeof entry.status === "string" && entry.status === `${Math.floor(actual / 100)}xx`);
+}
+
+function findCatchAll<T extends { status: number | string }>(entries: T[]): T | undefined {
+  return entries.find((entry) => entry.status === "unknown")
     ?? entries.find((entry) => entry.status === "default");
 }
 
-function findSuccess<T extends { status: number | string }>(entries: T[], actual: number): T | undefined {
-  return entries.find((entry) => entry.status === actual)
-    ?? entries.find((entry) => typeof entry.status === "string" && entry.status === `${Math.floor(actual / 100)}xx`)
-    ?? entries.find((entry) => entry.status === "unknown")
-    ?? entries.find((entry) => entry.status === "default");
+function findError<E extends { status: number | string }>(entries: E[], actual: number): E | undefined {
+  return findSpecific(entries, actual) ?? findCatchAll(entries);
+}
+
+function matchResponse<T extends { status: number | string }, E extends { status: number | string }>(
+  responses: T[],
+  errors: E[],
+  actual: number,
+): { success: T | undefined; error: E | undefined } {
+  const success = findSpecific(responses, actual);
+  if (success !== undefined) return { success, error: undefined };
+  const error = findError(errors, actual);
+  if (error !== undefined) return { success: undefined, error };
+  return { success: findCatchAll(responses), error: undefined };
 }
 
 function withSuccessStatus(

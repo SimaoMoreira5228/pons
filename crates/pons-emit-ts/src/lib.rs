@@ -694,7 +694,7 @@ mod tests {
         );
         assert!(missing_header_branch.contains("kind: \"protocol\""));
         assert!(client.contains("undeclared success response"));
-        assert!(client.contains("findDeclared"));
+        assert!(client.contains("matchResponse"));
         assert!(!client.contains("response.ok"));
         let declared_success = client.find("const declaredSuccess").unwrap();
         let declared_error = client.find("const declaredError").unwrap();
@@ -1081,14 +1081,19 @@ mod tests {
         assert!(
             client
                 .content
-                .contains("const declaredSuccess = findSuccess")
+                .contains("const matched = matchResponse(responses, errors, response.status)")
         );
         assert!(
             client
                 .content
-                .contains("const declaredError = declaredSuccess === undefined")
+                .contains("const declaredSuccess = matched.success")
         );
-        assert!(client.content.contains("findDeclared"));
+        assert!(
+            client
+                .content
+                .contains("const declaredError = matched.error")
+        );
+        assert!(!client.content.contains("findSuccess"));
 
         document.operations[0].responses[0].status = ResponseStatus::Default;
         let output = super::emit(&document).unwrap();

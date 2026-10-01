@@ -733,6 +733,37 @@ fn validation_rejects_overlapping_response_error_status_dispatch() {
 }
 
 #[test]
+fn validation_rejects_two_catch_all_success_responses() {
+    let base: Document =
+        serde_json::from_str(include_str!("../../../fixtures/login.json")).unwrap();
+    let with_catch_alls = |first: ResponseStatus, second: ResponseStatus| {
+        let mut document = base.clone();
+        document.operations[0].responses[0].status = first;
+        let mut other = document.operations[0].responses[0].clone();
+        other.status = second;
+        document.operations[0].responses.push(other);
+        document
+    };
+
+    for document in [
+        with_catch_alls(ResponseStatus::Default, ResponseStatus::Unknown),
+        with_catch_alls(ResponseStatus::Unknown, ResponseStatus::Default),
+    ] {
+        assert!(document.validate().unwrap_err().iter().any(|error| {
+            error
+                .to_string()
+                .contains("duplicate response status default")
+        }));
+    }
+
+    for status in [ResponseStatus::Default, ResponseStatus::Unknown] {
+        let mut document = base.clone();
+        document.operations[0].responses[0].status = status;
+        document.validate().unwrap();
+    }
+}
+
+#[test]
 fn validation_checks_64_bit_integer_bounds_exactly() {
     let base: Document =
         serde_json::from_str(include_str!("../../../fixtures/login.json")).unwrap();

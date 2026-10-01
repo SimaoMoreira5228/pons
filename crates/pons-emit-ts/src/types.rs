@@ -172,13 +172,13 @@ fn collect_flattened_field_types(
         .types
         .get(&named.id)
         .ok_or_else(|| EmitError(format!("unknown type {}", named.id)))?;
+    visiting.push(named.id.clone());
     match &definition.definition {
         TypeKind::Struct {
             fields,
             flattened,
             openness,
         } => {
-            visiting.push(named.id.clone());
             for field in fields
                 .iter()
                 .filter(|field| field_is_visible(field, definition.direction))
@@ -198,13 +198,13 @@ fn collect_flattened_field_types(
                     flattened, document, names, mode, visited, visiting, result,
                 )?;
             }
-            visiting.pop();
         }
         TypeKind::Newtype { inner } => {
             collect_flattened_field_types(inner, document, names, mode, visited, visiting, result)?
         }
         TypeKind::Enum { .. } => return Err(not_a_struct_member(reference)),
     }
+    visiting.pop();
     Ok(())
 }
 

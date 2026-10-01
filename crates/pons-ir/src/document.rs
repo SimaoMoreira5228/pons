@@ -613,6 +613,14 @@ impl Document {
                     );
                 }
             }
+            if response_statuses.contains(&ResponseStatus::Default)
+                && response_statuses.contains(&ResponseStatus::Unknown)
+            {
+                errors.push(ValidationError::InvalidValue {
+                    path: owner.clone(),
+                    message: format!("duplicate response status {}", ResponseStatus::Default),
+                });
+            }
             let stream_descriptions = usize::from(operation.stream.is_some());
             if stream_responses != stream_descriptions {
                 errors.push(ValidationError::InvalidValue {

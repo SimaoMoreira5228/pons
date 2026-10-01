@@ -19,6 +19,13 @@ impl HeaderSpec for RetryAfter {
     const NAME: &'static str = "Retry-After";
 }
 
+struct TraceId;
+
+impl HeaderSpec for TraceId {
+    type Value = String;
+    const NAME: &'static str = "X-Trace-ID";
+}
+
 #[derive(Debug, Serialize, Schema, pons_core::ApiError)]
 enum UserError {
     #[pons(status = 429)]
@@ -63,6 +70,37 @@ enum OverloadedError {
 impl IntoResponse for OverloadedError {
     fn into_response(self) -> axum::response::Response {
         StatusCode::SERVICE_UNAVAILABLE.into_response()
+    }
+}
+
+#[derive(Debug, Serialize, Schema, pons_core::ApiError)]
+enum TwinError {
+    #[pons(status = 429)]
+    Limited,
+    #[pons(status = 409)]
+    Conflict,
+}
+
+impl IntoResponse for TwinError {
+    fn into_response(self) -> axum::response::Response {
+        StatusCode::SERVICE_UNAVAILABLE.into_response()
+    }
+}
+
+#[derive(Debug, Serialize, Schema, pons_core::ApiError)]
+enum RedirectError {
+    #[pons(status = "default")]
+    Moved,
+}
+
+impl IntoResponse for RedirectError {
+    fn into_response(self) -> axum::response::Response {
+        let mut response = StatusCode::FOUND.into_response();
+        response.headers_mut().insert(
+            pons_axum::http::header::LOCATION,
+            "/elsewhere".parse().unwrap(),
+        );
+        response
     }
 }
 
@@ -133,13 +171,13 @@ fn error_header_wrapper_preserves_runtime_and_contract_metadata() {
 }
 
 #[test]
-fn the_declared_error_status_owns_the_served_status() {
+fn served_error_status_must_be_one_the_error_type_declares() {
     let declared = WithErrorHeader::<RetryAfter, _>::new(SlotError::Missing, 1).into_response();
     assert_eq!(declared.status(), StatusCode::CONFLICT);
     assert!(!declared.headers().contains_key("content-type"));
 
-    let undeclared = WithErrorHeader::<RetryAfter, _>::new(SlotError::Conflict, 1).into_response();
-    assert_eq!(undeclared.status(), StatusCode::INTERNAL_SERVER_ERROR);
+    let by_default = WithErrorHeader::<RetryAfter, _>::new(SlotError::Conflict, 1).into_response();
+    assert_eq!(by_default.status(), StatusCode::OK);
 
     let declared = WithErrorHeader::<RetryAfter, _>::new(SlotError::Throttled, 1).into_response();
     assert_eq!(declared.status(), StatusCode::TOO_MANY_REQUESTS);
@@ -151,4 +189,26 @@ fn the_declared_error_status_owns_the_served_status() {
     assert_eq!(single.status(), StatusCode::TOO_MANY_REQUESTS);
     assert_eq!(single.headers()["Retry-After"], "1");
     assert!(!single.headers().contains_key("content-type"));
+
+    let none = WithErrorHeader::<RetryAfter, _>::new(TwinError::Limited, 1).into_response();
+    assert_eq!(none.status(), StatusCode::INTERNAL_SERVER_ERROR);
+
+    let none = WithErrorHeader::<RetryAfter, _>::new(TwinError::Conflict, 1).into_response();
+    assert_eq!(none.status(), StatusCode::INTERNAL_SERVER_ERROR);
+}
+
+#[test]
+fn the_default_error_status_declares_every_status() {
+    let response = WithErrorHeader::<RetryAfter, _>::new(RedirectError::Moved, 1).into_response();
+    assert_eq!(response.status(), StatusCode::FOUND);
+    assert_eq!(response.headers()["location"], "/elsewhere");
+    assert_eq!(response.headers()["Retry-After"], "1");
+}
+
+#[test]
+fn a_nested_invalid_error_header_is_not_laundered_into_a_typed_error() {
+    let inner = WithErrorHeader::<TraceId, _>::new(UserError::Limited, "bad\nvalue".into());
+    let response = WithErrorHeader::<RetryAfter, _>::new(inner, 1).into_response();
+    assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+    assert!(!response.headers().contains_key("Retry-After"));
 }

@@ -4976,6 +4976,7 @@ if (value.value.id !== "1") throw new Error(`the body was not decoded: ${JSON.st
     }
 }
 
+#[test]
 fn a_catch_all_success_status_matches_any_status_a_fixed_one_does_not() {
     let base: pons_ir::Document =
         serde_json::from_str(include_str!("../../../fixtures/login.json")).unwrap();
@@ -5027,6 +5028,116 @@ try {
     throw new Error(`unhelpful failure ${JSON.stringify(cause)}`);
   }
 }
+"#;
+    run_bun(&files, harness);
+}
+
+fn catch_all_success_document() -> pons_ir::Document {
+    let mut document: pons_ir::Document =
+        serde_json::from_str(include_str!("../../../fixtures/login.json")).unwrap();
+    document.operations[0].responses[0].status = pons_ir::ResponseStatus::Unknown;
+    document
+}
+
+#[test]
+fn a_declared_error_status_wins_over_a_catch_all_success() {
+    let files = emit_with_strategy(
+        &catch_all_success_document(),
+        EmitMode::Strict,
+        ErrorStrategy::Throw,
+    )
+    .unwrap()
+    .files;
+    let harness = r#"
+import { createClient } from "./client.ts";
+
+const missing = createClient({
+  baseUrl: "https://example.test",
+  fetch: async () => new Response(JSON.stringify({ id: "1", code: "invalid" }), {
+    status: 404,
+    headers: { "content-type": "application/json" },
+  }),
+});
+const failure: any = await missing.auth.login({ body: { email: "person@example.test" } })
+  .then(() => undefined, (cause) => cause);
+if (failure?.kind !== "http") throw new Error(`a declared 4xx produced a success: ${JSON.stringify(failure)}`);
+if (failure.status !== 404) throw new Error(`the error status was lost: ${JSON.stringify(failure)}`);
+if (failure.body?.code !== "invalid") throw new Error(`the typed error body was lost: ${JSON.stringify(failure)}`);
+"#;
+    run_bun(&files, harness);
+}
+
+#[test]
+fn a_catch_all_success_still_matches_a_status_no_error_declares() {
+    let files = emit_with_strategy(
+        &catch_all_success_document(),
+        EmitMode::Strict,
+        ErrorStrategy::Throw,
+    )
+    .unwrap()
+    .files;
+    let harness = r#"
+import { createClient } from "./client.ts";
+
+const unavailable = createClient({
+  baseUrl: "https://example.test",
+  fetch: async () => new Response(JSON.stringify({ id: "1" }), {
+    status: 503,
+    headers: { "content-type": "application/json" },
+  }),
+});
+const value = await unavailable.auth.login({ body: { email: "person@example.test" } });
+if (value.status !== 503) throw new Error(`the catch-all did not match: ${JSON.stringify(value)}`);
+if (value.value.id !== "1") throw new Error(`the body was not decoded: ${JSON.stringify(value)}`);
+"#;
+    run_bun(&files, harness);
+}
+
+#[test]
+fn a_default_error_takes_every_status_no_success_declares() {
+    // NOTE: a range success stands in for the catch-all success here because the IR rejects a
+
+    let mut document: pons_ir::Document =
+        serde_json::from_str(include_str!("../../../fixtures/login.json")).unwrap();
+    let mut unavailable = document.operations[0].responses[0].clone();
+    unavailable.status = pons_ir::ResponseStatus::Class(5);
+    document.operations[0].responses.push(unavailable);
+    document.operations[0].errors[0].status = pons_ir::ErrorStatus::Default;
+    let files = emit_with_strategy(&document, EmitMode::Strict, ErrorStrategy::Throw)
+        .unwrap()
+        .files;
+    let harness = r#"
+import { createClient } from "./client.ts";
+
+const answering = async (status: number) => createClient({
+  baseUrl: "https://example.test",
+  fetch: async () => new Response(JSON.stringify({ id: "1" }), {
+    status,
+    headers: { "content-type": "application/json" },
+  }),
+});
+const created = await answering(200);
+const value = await created.auth.login({ body: { email: "person@example.test" } });
+if (value.id !== "1" || value.status !== undefined) {
+  throw new Error(`the specific 2xx success lost to the default error: ${JSON.stringify(value)}`);
+}
+
+const unavailable = await answering(503);
+const body = await unavailable.auth.login({ body: { email: "person@example.test" } });
+if (body.id !== "1") throw new Error(`the 5xx success lost to the default error: ${JSON.stringify(body)}`);
+
+const undeclared = createClient({
+  baseUrl: "https://example.test",
+  fetch: async () => new Response(JSON.stringify({ code: "invalid" }), {
+    status: 201,
+    headers: { "content-type": "application/json" },
+  }),
+});
+const failure: any = await undeclared.auth.login({ body: { email: "person@example.test" } })
+  .then(() => undefined, (cause) => cause);
+if (failure?.kind !== "http") throw new Error(`an undeclared 2xx was not the default error: ${JSON.stringify(failure)}`);
+if (failure.status !== 201) throw new Error(`the error status was lost: ${JSON.stringify(failure)}`);
+if (failure.body?.code !== "invalid") throw new Error(`the typed error body was lost: ${JSON.stringify(failure)}`);
 "#;
     run_bun(&files, harness);
 }

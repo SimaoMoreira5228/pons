@@ -2,7 +2,9 @@ use axum::response::{IntoResponse, Response};
 use pons_core::{ErrorSpec, Schema, TypeCx};
 use pons_ir::{Direction, ErrorResponse, ErrorStatus, Presence, ResponseHeader};
 
-use crate::describe::{HeaderSpec, insert_response_header, invalid_response_header};
+use crate::describe::{
+    HeaderSpec, insert_response_header, invalid_response_header, is_invalid_response_header,
+};
 
 pub struct WithErrorHeader<S: HeaderSpec, E>(pub E, pub <S as HeaderSpec>::Value);
 
@@ -79,6 +81,9 @@ where
     E: ErrorSpec + IntoResponse,
 {
     let mut response = error.into_response();
+    if is_invalid_response_header(&response) {
+        return response;
+    }
     if !serves_declared_status::<E>(&mut response) {
         return invalid_response_header();
     }
@@ -114,7 +119,7 @@ fn declares(status: &ErrorStatus, produced: axum::http::StatusCode) -> bool {
     match status {
         ErrorStatus::Exact(status) => *status == produced.as_u16(),
         ErrorStatus::Class(class) => produced.as_u16() / 100 == u16::from(*class),
-        ErrorStatus::Default => produced.is_client_error() || produced.is_server_error(),
+        ErrorStatus::Default => true,
     }
 }
 
