@@ -14,6 +14,13 @@ pub(super) fn emit(
 ) -> Result<String, EmitError> {
     let mut output = String::new();
     for (id, definition) in &document.types {
+        if let TypeKind::Newtype { inner } = &definition.definition
+            && newtype_cycle(id, inner, document)
+        {
+            return Err(EmitError(format!(
+                "the type {id} cannot be resolved because newtypes form a cycle"
+            )));
+        }
         let name = &names[id];
         output.push_str(&format!(
             "export type {name} = {};\n\n",
@@ -21,6 +28,28 @@ pub(super) fn emit(
         ));
     }
     Ok(output)
+}
+
+fn newtype_cycle(id: &str, inner: &TypeRef, document: &Document) -> bool {
+    let mut current = inner;
+    let mut visited = BTreeSet::new();
+    while let TypeRef::Named(named) = current {
+        if named.id == id {
+            return true;
+        }
+        if !visited.insert(named.id.clone()) {
+            return false;
+        }
+        let Some(TypeKind::Newtype { inner }) = document
+            .types
+            .get(&named.id)
+            .map(|definition| &definition.definition)
+        else {
+            return false;
+        };
+        current = inner;
+    }
+    false
 }
 
 fn definition_type(
@@ -450,5 +479,62 @@ fn type_ref_with_namespace(
                     .join(", ")
             )),
         },
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use serde_json::{Value, json};
+
+    fn document(types: Value) -> pons_ir::Document {
+        let mut raw: Value =
+            serde_json::from_str(include_str!("../../../fixtures/login.json")).unwrap();
+        for (id, definition) in types.as_object().unwrap() {
+            raw["types"][id] = definition.clone();
+        }
+        serde_json::from_value(raw).unwrap()
+    }
+
+    fn newtype(name: &str, inner: &str) -> Value {
+        json!({"kind":"newtype","name":[name],"direction":"both","inner":{"ref":inner}})
+    }
+
+    #[test]
+    fn rejects_a_self_referential_newtype() {
+        let document = document(json!({"Loop": newtype("loop", "Loop")}));
+        let error = crate::emit(&document).unwrap_err();
+        assert!(
+            error
+                .0
+                .contains("the type Loop cannot be resolved because newtypes form a cycle"),
+            "{}",
+            error.0
+        );
+    }
+
+    #[test]
+    fn rejects_a_cycle_of_newtypes() {
+        let document = document(json!({"A": newtype("a", "B"), "B": newtype("b", "A")}));
+        let error = crate::emit(&document).unwrap_err();
+        for member in ["A", "B"] {
+            let expected =
+                format!("the type {member} cannot be resolved because newtypes form a cycle");
+            if error.0.contains(&expected) {
+                return;
+            }
+        }
+        panic!("{}", error.0);
+    }
+
+    #[test]
+    fn emits_a_newtype_that_resolves_to_a_struct() {
+        let document = document(json!({"Alias": newtype("alias", "User")}));
+        let types = crate::emit(&document)
+            .unwrap()
+            .into_iter()
+            .find(|file| file.path == "types.ts")
+            .unwrap()
+            .content;
+        assert!(types.contains("export type Alias = User;"), "{types}");
     }
 }

@@ -89,6 +89,13 @@ impl<'a> Builder<'a> {
     pub(super) fn schemas(&self) -> Result<Map<String, Value>, EmitError> {
         let mut schemas = Map::new();
         for (id, definition) in &self.document.types {
+            if let TypeKind::Newtype { inner } = &definition.definition
+                && newtype_cycle(id, inner, self.document)
+            {
+                return Err(EmitError(format!(
+                    "the type {id} cannot be resolved because newtypes form a cycle"
+                )));
+            }
             let mut schema = self.definition_schema(definition)?;
             add_doc(&mut schema, definition.doc.as_ref());
             let openness = match &definition.definition {
@@ -159,21 +166,22 @@ impl<'a> Builder<'a> {
         let Some(definition) = self.document.types.get(&named.id) else {
             return Err(EmitError(format!("unknown type {}", named.id)));
         };
-        match &definition.definition {
+        visiting.push(named.id.clone());
+        let result = match &definition.definition {
             TypeKind::Newtype { inner } => self.flattened_schema(inner, visiting, all_of),
             TypeKind::Enum { .. } => Err(not_a_struct_member(ty)),
             TypeKind::Struct {
                 fields, flattened, ..
             } => {
-                visiting.push(named.id.clone());
                 all_of.push(fields_schema_with(self, fields)?);
                 for member in flattened {
                     self.flattened_schema(member, visiting, all_of)?;
                 }
-                visiting.pop();
                 Ok(())
             }
-        }
+        };
+        visiting.pop();
+        result
     }
 
     pub(super) fn type_schema(&self, ty: &TypeRef) -> Result<Value, EmitError> {
@@ -451,6 +459,29 @@ impl<'a> Builder<'a> {
     }
 }
 
+fn newtype_cycle(id: &str, inner: &TypeRef, document: &Document) -> bool {
+    let mut current = inner;
+    let mut visited = Vec::new();
+    while let TypeRef::Named(named) = current {
+        if named.id == id {
+            return true;
+        }
+        if visited.contains(&named.id) {
+            return false;
+        }
+        let Some(TypeKind::Newtype { inner }) = document
+            .types
+            .get(&named.id)
+            .map(|definition| &definition.definition)
+        else {
+            return false;
+        };
+        visited.push(named.id.clone());
+        current = inner;
+    }
+    false
+}
+
 fn not_a_struct_member(ty: &TypeRef) -> EmitError {
     let name = match ty {
         TypeRef::Named(named) => match named.variant.as_deref() {
@@ -589,6 +620,18 @@ mod tests {
 
     fn closed(name: &str, fields: Vec<Field>, flattened: Vec<TypeRef>) -> TypeDef {
         struct_type(name, fields, flattened, ObjectOpenness::Reject)
+    }
+
+    fn newtype(name: &str, inner: TypeRef) -> TypeDef {
+        TypeDef {
+            name: vec![name.into()],
+            direction: Direction::Both,
+            definition: TypeKind::Newtype { inner },
+            origin: None,
+            doc: None,
+            diagnostics: Vec::new(),
+            ext: Default::default(),
+        }
     }
 
     fn enum_type(name: &str) -> TypeDef {
@@ -787,6 +830,71 @@ mod tests {
                 .unwrap_err()
                 .0
                 .contains("flattened members form a cycle")
+        );
+    }
+
+    #[test]
+    fn rejects_a_cyclic_flatten_through_a_newtype() {
+        let mut document = fixture();
+        document
+            .types
+            .insert("Alias".into(), newtype("alias", named("Inner")));
+        document.types.insert(
+            "Outer".into(),
+            closed("outer", vec![field("a", string())], vec![named("Alias")]),
+        );
+        document.types.insert(
+            "Inner".into(),
+            closed("inner", vec![field("b", string())], vec![named("Alias")]),
+        );
+        assert!(
+            crate::emit(&document)
+                .unwrap_err()
+                .0
+                .contains("cannot be inlined because flattened members form a cycle")
+        );
+    }
+
+    #[test]
+    fn rejects_a_self_referential_newtype() {
+        let mut document = fixture();
+        document
+            .types
+            .insert("Loop".into(), newtype("loop", named("Loop")));
+        assert!(
+            crate::emit(&document)
+                .unwrap_err()
+                .0
+                .contains("the type Loop cannot be resolved because newtypes form a cycle")
+        );
+    }
+
+    #[test]
+    fn rejects_a_cycle_of_newtypes() {
+        let mut document = fixture();
+        document.types.insert("A".into(), newtype("a", named("B")));
+        document.types.insert("B".into(), newtype("b", named("A")));
+        let error = crate::emit(&document).unwrap_err();
+        for member in ["A", "B"] {
+            let expected =
+                format!("the type {member} cannot be resolved because newtypes form a cycle");
+            if error.0.contains(&expected) {
+                return;
+            }
+        }
+        panic!("{}", error.0);
+    }
+
+    #[test]
+    fn emits_a_newtype_that_resolves_to_a_struct() {
+        let mut document = fixture();
+        document
+            .types
+            .insert("Alias".into(), newtype("alias", named("User")));
+        let output: Value = serde_json::from_str(&crate::emit(&document).unwrap()).unwrap();
+        assert_eq!(
+            output["components"]["schemas"]["Alias"]["$ref"],
+            json!("#/components/schemas/User")
         );
     }
 

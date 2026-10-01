@@ -94,11 +94,15 @@ pub(super) fn run(
                 content: file.content,
             })
             .collect();
+        let mut warnings = result.capability_warnings;
+        if !strict {
+            warnings.extend(coverage_warnings(target, coverage.as_ref()));
+        }
         (
             files,
             coverage,
             result.response.diagnostics,
-            result.capability_warnings,
+            warnings,
             result.logs,
         )
     };
@@ -147,6 +151,26 @@ pub(super) fn run(
         });
     }
     write_files(output, files)
+}
+
+fn coverage_warnings(target: &str, coverage: Option<&pons_plugin::Coverage>) -> Vec<String> {
+    let Some(coverage) = coverage else {
+        return Vec::new();
+    };
+    [
+        ("opaque", &coverage.opaque),
+        ("lossy", &coverage.lossy),
+        ("unsupported", &coverage.unsupported),
+    ]
+    .into_iter()
+    .filter(|(_, subjects)| !subjects.is_empty())
+    .map(|(level, subjects)| {
+        format!(
+            "{target} emits {level} coverage at {}",
+            subjects.iter().cloned().collect::<Vec<_>>().join(", ")
+        )
+    })
+    .collect()
 }
 
 fn print_diagnostic(diagnostic: &PluginDiagnostic) {
@@ -249,7 +273,7 @@ fn write_file(root: &Path, file: &OutputFile) -> Result<(), CliError> {
                     CliError::Failure(format!("cannot preserve permissions: {error}"))
                 })?;
         } else {
-            set_default_permissions(temporary.as_file(), directory)?;
+            set_default_permissions(temporary.as_file())?;
         }
         temporary.persist(&parent).map_err(|error| {
             CliError::Failure(format!(
@@ -263,19 +287,39 @@ fn write_file(root: &Path, file: &OutputFile) -> Result<(), CliError> {
 }
 
 #[cfg(unix)]
-fn set_default_permissions(file: &fs::File, directory: &Path) -> Result<(), CliError> {
+fn set_default_permissions(file: &fs::File) -> Result<(), CliError> {
     use std::os::unix::fs::PermissionsExt;
 
-    let probe = directory.join(format!(".pons-mode-{}", std::process::id()));
-    let created = fs::File::create(&probe).map_err(|error| {
-        CliError::Failure(format!(
-            "cannot probe the default file mode in {}: {error}",
-            directory.display()
-        ))
-    })?;
+    let mode = probe_default_mode()?;
+    file.set_permissions(fs::Permissions::from_mode(mode))
+        .map_err(|error| CliError::Failure(format!("cannot set default permissions: {error}")))
+}
+
+#[cfg(unix)]
+fn probe_default_mode() -> Result<u32, CliError> {
+    use std::os::unix::fs::PermissionsExt;
+    use std::sync::atomic::{AtomicU32, Ordering};
+
+    static ATTEMPT: AtomicU32 = AtomicU32::new(0);
+
+    let probe = std::env::temp_dir().join(format!(
+        ".pons-mode-{}-{}",
+        std::process::id(),
+        ATTEMPT.fetch_add(1, Ordering::Relaxed)
+    ));
+    let created = fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&probe)
+        .map_err(|error| {
+            CliError::Failure(format!(
+                "cannot probe the default file mode at {}: {error}",
+                probe.display()
+            ))
+        })?;
     let mode = created
         .metadata()
-        .map_err(|error| CliError::Failure(format!("cannot inspect {probe:?}: {error}")))?
+        .map_err(|error| CliError::Failure(format!("cannot inspect {}: {error}", probe.display())))?
         .permissions()
         .mode();
     drop(created);
@@ -285,12 +329,11 @@ fn set_default_permissions(file: &fs::File, directory: &Path) -> Result<(), CliE
             probe.display()
         ))
     })?;
-    file.set_permissions(fs::Permissions::from_mode(mode))
-        .map_err(|error| CliError::Failure(format!("cannot set default permissions: {error}")))
+    Ok(mode)
 }
 
 #[cfg(not(unix))]
-fn set_default_permissions(_file: &fs::File, _directory: &Path) -> Result<(), CliError> {
+fn set_default_permissions(_file: &fs::File) -> Result<(), CliError> {
     Ok(())
 }
 
@@ -588,12 +631,30 @@ mod tests {
         )
         .unwrap();
 
-        let reference = directory.path().join("reference");
-        fs::File::create(&reference).unwrap();
         let mode = |name: &str| fs::metadata(root.join(name)).unwrap().permissions().mode() & 0o777;
-        let default = fs::metadata(reference).unwrap().permissions().mode() & 0o777;
+        let default = probe_default_mode().unwrap() & 0o777;
 
         assert_eq!(mode("fresh.ts"), default, "new files skip tempfile's 0600");
         assert_eq!(mode("kept.ts"), 0o640, "existing mode is restored");
+    }
+
+    #[test]
+    fn emit_leaves_existing_mode_probes_in_the_output_alone() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().join("output");
+        fs::create_dir(&root).unwrap();
+        let probe = root.join(format!(".pons-mode-{}", std::process::id()));
+        fs::write(&probe, "not a probe").unwrap();
+
+        write_files(
+            &root,
+            vec![OutputFile {
+                path: "client.ts".into(),
+                content: "new".into(),
+            }],
+        )
+        .unwrap();
+
+        assert_eq!(fs::read_to_string(&probe).unwrap(), "not a probe");
     }
 }
