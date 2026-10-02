@@ -39,7 +39,7 @@ impl OperationCx {
             } else {
                 ident
             },
-            ty: T::schema(&mut self.types, Direction::Input),
+            ty: crate::describe::header_schema::<T>(&mut self.types, Direction::Input, wire),
             presence,
             ext: Default::default(),
         });

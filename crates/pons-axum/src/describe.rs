@@ -2,8 +2,8 @@ use axum::response::IntoResponse;
 use pons_core::{ErrorSpec, Schema, TypeCx};
 use pons_ir::{
     AuthRequirement, Body, ContentKind, CredentialProvision, Diagnostic, Direction, ErrorResponse,
-    HeaderParameter, InlineType, OpaqueWire, Presence, Response, ResponseHeader, ResponseStatus,
-    StreamDescription, TypeRef,
+    HeaderParameter, InlineType, IntegerWire, OpaqueWire, Presence, Response, ResponseHeader,
+    ResponseStatus, StreamDescription, TypeRef,
 };
 
 #[derive(Debug, Default)]
@@ -107,10 +107,50 @@ pub(crate) fn valid_status(status: u16, wrapper: &str) -> u16 {
     status
 }
 
+pub(crate) fn header_schema<T: Schema>(
+    cx: &mut TypeCx,
+    direction: Direction,
+    name: &str,
+) -> TypeRef {
+    let ty = T::schema(cx, direction);
+    match ty {
+        TypeRef::Inline(InlineType::Int {
+            bits,
+            signed,
+            minimum,
+            maximum,
+            multiple_of,
+            ..
+        }) => TypeRef::Inline(InlineType::Int {
+            bits,
+            signed,
+            wire: IntegerWire::String,
+            minimum,
+            maximum,
+            multiple_of,
+        }),
+        TypeRef::Inline(
+            InlineType::Array { .. } | InlineType::Map { .. } | InlineType::Tuple { .. },
+        ) => {
+            cx.push_error(
+                "PONS-E102",
+                format!(
+                    "header {name} carries a JSON value; a header value is a text token, so it is described as opaque text"
+                ),
+            );
+            TypeRef::Inline(InlineType::Opaque {
+                codec: "axum.header".into(),
+                wire: OpaqueWire::Text,
+            })
+        }
+        ty => ty,
+    }
+}
+
 fn describe_response_header<S: HeaderSpec>(cx: &mut OperationCx, start: usize, presence: Presence) {
     let header = ResponseHeader {
         wire: S::NAME.to_owned(),
-        ty: S::Value::schema(&mut cx.types, Direction::Output),
+        ty: header_schema::<S::Value>(&mut cx.types, Direction::Output, S::NAME),
         presence,
         ext: Default::default(),
     };
@@ -564,6 +604,221 @@ impl Schema for ByteArray {
 mod tests {
     use super::*;
     use axum::response::IntoResponse;
+    use pons_ir::DiagnosticSeverity;
+
+    struct Retry;
+
+    impl HeaderSpec for Retry {
+        type Value = u16;
+        const NAME: &'static str = "X-Retry";
+    }
+
+    struct Offset;
+
+    impl HeaderSpec for Offset {
+        type Value = u128;
+        const NAME: &'static str = "X-Offset";
+    }
+
+    struct Debug;
+
+    impl HeaderSpec for Debug {
+        type Value = bool;
+        const NAME: &'static str = "X-Debug";
+    }
+
+    struct Retries;
+
+    impl Schema for Retries {
+        fn schema(_: &mut TypeCx, _: Direction) -> TypeRef {
+            TypeRef::Inline(InlineType::Int {
+                bits: 16,
+                signed: false,
+                wire: IntegerWire::Number,
+                minimum: Some(serde_json::json!(1)),
+                maximum: Some(serde_json::json!(5)),
+                multiple_of: Some(serde_json::json!(1)),
+            })
+        }
+    }
+
+    struct Tags;
+
+    impl Schema for Tags {
+        fn schema(cx: &mut TypeCx, direction: Direction) -> TypeRef {
+            <Vec<String> as Schema>::schema(cx, direction)
+        }
+    }
+
+    impl std::str::FromStr for Tags {
+        type Err = std::convert::Infallible;
+
+        fn from_str(_text: &str) -> Result<Self, Self::Err> {
+            Ok(Self)
+        }
+    }
+
+    async fn header_handler(Header(retry): Header<Retry>) -> WithHeader<Offset, String> {
+        WithHeader::new(retry.to_string(), u128::from(u32::MAX))
+    }
+
+    #[allow(dead_code)]
+    #[derive(serde::Serialize, pons_core::Schema, pons_core::ApiError)]
+    enum Conflict {
+        #[pons(status = 409)]
+        Conflict,
+    }
+
+    fn info() -> pons_ir::Info {
+        pons_ir::Info {
+            title: "Headers".into(),
+            version: "1".into(),
+            description: None,
+            servers: Vec::new(),
+            ext: Default::default(),
+        }
+    }
+
+    #[test]
+    fn integer_header_values_are_described_as_text_tokens() {
+        assert_eq!(
+            header_schema::<u16>(&mut TypeCx::new(), Direction::Input, Retry::NAME),
+            TypeRef::Inline(InlineType::Int {
+                bits: 16,
+                signed: false,
+                wire: IntegerWire::String,
+                minimum: None,
+                maximum: None,
+                multiple_of: None,
+            })
+        );
+        assert_eq!(
+            header_schema::<u128>(&mut TypeCx::new(), Direction::Output, Offset::NAME),
+            TypeRef::Inline(InlineType::Int {
+                bits: 128,
+                signed: false,
+                wire: IntegerWire::String,
+                minimum: None,
+                maximum: None,
+                multiple_of: None,
+            })
+        );
+        assert_eq!(
+            header_schema::<i8>(&mut TypeCx::new(), Direction::Output, "X-Delta"),
+            TypeRef::Inline(InlineType::Int {
+                bits: 8,
+                signed: true,
+                wire: IntegerWire::String,
+                minimum: None,
+                maximum: None,
+                multiple_of: None,
+            })
+        );
+        assert_eq!(
+            header_schema::<Retries>(&mut TypeCx::new(), Direction::Output, "X-Retries"),
+            TypeRef::Inline(InlineType::Int {
+                bits: 16,
+                signed: false,
+                wire: IntegerWire::String,
+                minimum: Some(serde_json::json!(1)),
+                maximum: Some(serde_json::json!(5)),
+                multiple_of: Some(serde_json::json!(1)),
+            })
+        );
+    }
+
+    #[test]
+    fn a_boolean_header_value_is_the_true_false_text_token() {
+        assert_eq!(
+            header_schema::<bool>(&mut TypeCx::new(), Direction::Input, Debug::NAME),
+            TypeRef::Inline(InlineType::Bool)
+        );
+        let mut headers = axum::http::HeaderMap::new();
+        headers.insert(Debug::NAME, axum::http::HeaderValue::from_static("true"));
+        assert_eq!(
+            parse_header::<bool>(&headers, Debug::NAME).unwrap(),
+            Some(true)
+        );
+        headers.insert(Debug::NAME, axum::http::HeaderValue::from_static("false"));
+        assert_eq!(
+            parse_header::<bool>(&headers, Debug::NAME).unwrap(),
+            Some(false)
+        );
+        headers.insert(Debug::NAME, axum::http::HeaderValue::from_static("1"));
+        assert_eq!(
+            parse_header::<bool>(&headers, Debug::NAME),
+            Err(HeaderRejection::Invalid)
+        );
+    }
+
+    #[test]
+    fn header_values_that_are_json_documents_are_refused() {
+        let mut cx = TypeCx::new();
+        assert_eq!(
+            header_schema::<Tags>(&mut cx, Direction::Input, "X-Tags"),
+            TypeRef::Inline(InlineType::Opaque {
+                codec: "axum.header".into(),
+                wire: OpaqueWire::Text,
+            })
+        );
+        assert_eq!(cx.diagnostics().len(), 1);
+        assert_eq!(cx.diagnostics()[0].code, "PONS-E102");
+        assert_eq!(cx.diagnostics()[0].severity, DiagnosticSeverity::Error);
+        assert!(cx.diagnostics()[0].message.contains("X-Tags"));
+    }
+
+    #[test]
+    fn a_router_describes_every_typed_header_as_a_text_token() {
+        let document = crate::Router::<()>::new(info())
+            .route("/headers", crate::routing::get(header_handler))
+            .into_document()
+            .unwrap();
+        let operation = &document.operations[0];
+        assert_eq!(operation.headers[0].wire, "X-Retry");
+        assert_eq!(
+            operation.headers[0].ty,
+            TypeRef::Inline(InlineType::Int {
+                bits: 16,
+                signed: false,
+                wire: IntegerWire::String,
+                minimum: None,
+                maximum: None,
+                multiple_of: None,
+            })
+        );
+        assert_eq!(operation.responses[0].headers[0].wire, "X-Offset");
+        assert_eq!(
+            operation.responses[0].headers[0].ty,
+            TypeRef::Inline(InlineType::Int {
+                bits: 128,
+                signed: false,
+                wire: IntegerWire::String,
+                minimum: None,
+                maximum: None,
+                multiple_of: None,
+            })
+        );
+    }
+
+    #[test]
+    fn error_response_headers_are_described_as_text_tokens() {
+        let mut cx = TypeCx::new();
+        let errors =
+            <crate::WithErrorHeader<Retry, Conflict> as pons_core::ErrorSpec>::errors(&mut cx);
+        assert_eq!(errors[0].headers[0].wire, "X-Retry");
+        assert_eq!(
+            errors[0].headers[0].ty,
+            TypeRef::Inline(InlineType::Int {
+                bits: 16,
+                signed: false,
+                wire: IntegerWire::String,
+                minimum: None,
+                maximum: None,
+                multiple_of: None,
+            })
+        );
+        assert!(cx.diagnostics().is_empty());
+    }
 
     #[test]
     fn parses_headers_case_insensitively_and_rejects_invalid_values() {

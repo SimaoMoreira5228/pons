@@ -1,9 +1,10 @@
 use axum::response::{IntoResponse, Response};
-use pons_core::{ErrorSpec, Schema, TypeCx};
+use pons_core::{ErrorSpec, TypeCx};
 use pons_ir::{Direction, ErrorResponse, ErrorStatus, Presence, ResponseHeader};
 
 use crate::describe::{
-    HeaderSpec, insert_response_header, invalid_response_header, is_invalid_response_header,
+    HeaderSpec, header_schema, insert_response_header, invalid_response_header,
+    is_invalid_response_header,
 };
 
 pub struct WithErrorHeader<S: HeaderSpec, E>(pub E, pub <S as HeaderSpec>::Value);
@@ -129,7 +130,7 @@ where
 {
     ResponseHeader {
         wire: S::NAME.to_owned(),
-        ty: <S::Value as Schema>::schema(cx, Direction::Output),
+        ty: header_schema::<S::Value>(cx, Direction::Output, S::NAME),
         presence,
         ext: Default::default(),
     }

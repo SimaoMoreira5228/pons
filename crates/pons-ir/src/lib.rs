@@ -3,8 +3,11 @@ mod diff;
 mod document;
 mod media;
 mod operation;
+mod pattern;
 mod query;
 mod types;
+mod value;
+mod violation;
 
 pub use coverage::{CoverageLevel, canonical_coverage, coverage_subjects, strict_violations};
 pub use diff::{Change, ChangeLevel, Diff};
@@ -22,5 +25,7 @@ pub use types::{
     Field, FieldDefault, FieldFormat, InlineType, IntegerWire, Name, NamedRef, ObjectOpenness,
     OpaqueWire, Presence, TypeDef, TypeKind, TypeRef, Variant, VariantPayload,
 };
+pub use value::validate_value;
+pub use violation::{IntegerProblem, Violation};
 
 pub const IR_VERSION: &str = "0.2";

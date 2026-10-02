@@ -1211,7 +1211,7 @@ pub struct Info {
     pub ext: BTreeMap<String, Value>,
 }
 
-fn integer_magnitude(value: &Value) -> Option<(bool, u128)> {
+pub(crate) fn integer_magnitude(value: &Value) -> Option<(bool, u128)> {
     let text = value.as_number()?.to_string();
     let (negative, unsigned) = match text.strip_prefix('-') {
         Some(unsigned) => (true, unsigned),
