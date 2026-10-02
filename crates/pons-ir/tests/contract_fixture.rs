@@ -499,6 +499,59 @@ fn validation_rejects_invalid_header_names() {
 }
 
 #[test]
+fn a_query_field_the_encoding_cannot_carry_is_refused_by_check() {
+    fn with_field(presence: &str) -> Document {
+        let mut value: serde_json::Value =
+            serde_json::from_str(include_str!("../../../fixtures/login.json")).unwrap();
+        value["types"]["EventQuery"]["fields"]
+            .as_array_mut()
+            .unwrap()
+            .push(serde_json::json!({
+                "wire": "cursor",
+                "ident": ["cursor"],
+                "ty": {"kind": "nullable", "inner": {"kind": "string"}},
+                "presence": presence
+            }));
+        serde_json::from_value(value).unwrap()
+    }
+
+    let errors = with_field("required")
+        .validate()
+        .unwrap_err()
+        .iter()
+        .map(ToString::to_string)
+        .collect::<Vec<_>>();
+    assert!(
+        errors.iter().any(|error| error.contains("\"cursor\"")
+            && error.contains("no encoding for a present null")),
+        "a required nullable query field has no encoding: {errors:?}"
+    );
+
+    with_field("optional").validate().unwrap();
+
+    let mut value: serde_json::Value =
+        serde_json::from_str(include_str!("../../../fixtures/login.json")).unwrap();
+    value["types"]["EventQuery"]["fields"]
+        .as_array_mut()
+        .unwrap()
+        .push(serde_json::json!({
+            "wire": "user",
+            "ident": ["user"],
+            "ty": {"ref": "User"},
+            "presence": "optional"
+        }));
+    let document: Document = serde_json::from_value(value).unwrap();
+    assert!(
+        document
+            .validate()
+            .unwrap_err()
+            .iter()
+            .any(|error| error.to_string().contains("unambiguous encoding")),
+        "a query field that is not a scalar still has no encoding"
+    );
+}
+
+#[test]
 fn validation_rejects_empty_query_and_cookie_names() {
     let base: Document =
         serde_json::from_str(include_str!("../../../fixtures/login.json")).unwrap();

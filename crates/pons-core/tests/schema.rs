@@ -332,6 +332,35 @@ struct PlatformSizedIntegers {
     offset: isize,
 }
 
+mod user_named_option {
+    pub mod bare {
+        #[derive(pons_core::Schema)]
+        #[allow(dead_code)]
+        pub struct Option {
+            pub value: String,
+        }
+    }
+
+    pub mod pair {
+        #[derive(pons_core::Schema)]
+        #[allow(dead_code)]
+        pub struct Option<T, U> {
+            pub value: T,
+            pub other: U,
+        }
+    }
+
+    #[derive(pons_core::Schema)]
+    #[allow(dead_code)]
+    pub struct Shapes {
+        pub plain: Option<u8>,
+        pub qualified: std::option::Option<u8>,
+        pub core: core::option::Option<u8>,
+        pub bare: bare::Option,
+        pub pair: pair::Option<u8, String>,
+    }
+}
+
 fn document(
     types: BTreeMap<String, pons_ir::TypeDef>,
     diagnostics: Vec<pons_ir::Diagnostic>,
@@ -434,7 +463,7 @@ fn derives_directional_struct_fields_from_serde_attributes() {
     assert_eq!(fields[0].wire, "email");
     assert_eq!(fields[0].presence, pons_ir::Presence::Required);
     assert_eq!(fields[1].wire, "nickname");
-    assert_eq!(fields[1].presence, pons_ir::Presence::Required);
+    assert_eq!(fields[1].presence, pons_ir::Presence::Optional);
     assert!(matches!(
         fields[1].ty,
         TypeRef::Inline(InlineType::Nullable { .. })
@@ -1105,8 +1134,8 @@ fn enum_payload_presence_stays_direction_specific_without_a_container_default() 
             input,
             [
                 pons_ir::Presence::Required,
-                pons_ir::Presence::Required,
-                pons_ir::Presence::Required,
+                pons_ir::Presence::Optional,
+                pons_ir::Presence::Optional,
             ],
         ),
         (
@@ -1121,7 +1150,7 @@ fn enum_payload_presence_stays_direction_specific_without_a_container_default() 
             both,
             [
                 pons_ir::Presence::Required,
-                pons_ir::Presence::Required,
+                pons_ir::Presence::Optional,
                 pons_ir::Presence::Optional,
             ],
         ),
@@ -1365,30 +1394,146 @@ fn serde_default_on_a_tuple_struct_is_refused() {
 }
 
 #[test]
-fn an_option_field_is_only_optional_on_input_with_a_default() {
+fn serde_accepts_a_missing_option_key_but_not_a_missing_plain_key() {
+    #[derive(serde::Deserialize, Debug, PartialEq)]
+    struct Payload {
+        value: String,
+        nickname: Option<String>,
+    }
+
+    let omitted: Payload = serde_json::from_str(r#"{"value":"a"}"#)
+        .expect("a derived visitor accepts a missing Option key");
+    assert_eq!(
+        omitted,
+        Payload {
+            value: "a".to_owned(),
+            nickname: None,
+        }
+    );
+    let present: Payload = serde_json::from_str(r#"{"value":"a","nickname":"b"}"#).unwrap();
+    assert_eq!(present.nickname.as_deref(), Some("b"));
+    assert!(
+        serde_json::from_str::<Payload>(r#"{"nickname":"b"}"#).is_err(),
+        "a non-Option field is still required, so Presence::Required is right for it"
+    );
+}
+
+#[test]
+fn an_option_field_is_optional_on_input_and_keeps_its_nullable_type() {
     let mut cx = TypeCx::new();
     let input = DefaultedOptions::schema(&mut cx, Direction::Input);
     let output = DefaultedOptions::schema(&mut cx, Direction::Output);
+    let both = DefaultedOptions::schema(&mut cx, Direction::Both);
     let (input, _) = struct_shape(&cx, &input);
     let (output, _) = struct_shape(&cx, &output);
+    let (both, _) = struct_shape(&cx, &both);
 
     assert_eq!(input[0].wire, "nickname");
     assert_eq!(input[0].presence, pons_ir::Presence::Optional);
     assert_eq!(input[1].wire, "email");
-    assert_eq!(input[1].presence, pons_ir::Presence::Required);
+    assert_eq!(input[1].presence, pons_ir::Presence::Optional);
     assert!(
         output
             .iter()
             .all(|field| field.presence == pons_ir::Presence::Required)
     );
     assert!(
-        input
-            .iter()
-            .all(|field| matches!(field.ty, TypeRef::Inline(InlineType::Nullable { .. })))
+        both.iter()
+            .all(|field| field.presence == pons_ir::Presence::Optional)
     );
+    for direction in [input, output, both] {
+        assert!(
+            direction
+                .iter()
+                .all(|field| matches!(field.ty, TypeRef::Inline(InlineType::Nullable { .. })))
+        );
+    }
     assert!(cx.diagnostics().is_empty());
 
     let (types, diagnostics) = cx.into_parts();
+    assert!(document(types, diagnostics).validate().is_ok());
+}
+
+#[test]
+fn only_a_unary_option_type_path_is_optional_on_input() {
+    let mut cx = TypeCx::new();
+    let reference = user_named_option::Shapes::schema(&mut cx, Direction::Input);
+    let (fields, _) = struct_shape(&cx, &reference);
+
+    assert_eq!(fields.len(), 5);
+    for (index, wire, presence) in [
+        (0, "plain", pons_ir::Presence::Optional),
+        (1, "qualified", pons_ir::Presence::Optional),
+        (2, "core", pons_ir::Presence::Optional),
+        (3, "bare", pons_ir::Presence::Required),
+        (4, "pair", pons_ir::Presence::Required),
+    ] {
+        assert_eq!(fields[index].wire, wire);
+        assert_eq!(fields[index].presence, presence, "presence of {wire}");
+    }
+    for field in &fields[..3] {
+        assert!(
+            matches!(field.ty, TypeRef::Inline(InlineType::Nullable { .. })),
+            "{} keeps the nullable type",
+            field.wire
+        );
+    }
+    assert!(cx.diagnostics().is_empty());
+
+    let (types, diagnostics) = cx.into_parts();
+    assert!(document(types, diagnostics).validate().is_ok());
+}
+
+#[test]
+fn register_as_publishes_one_type_under_a_caller_chosen_id() {
+    let mut cx = TypeCx::new();
+    let derived = LoginRequest::schema(&mut cx, Direction::Input);
+    let carrier = cx.register_as("carrier::login-request", |cx| {
+        LoginRequest::schema(cx, Direction::Input)
+    });
+    let again = cx.register_as("carrier::login-request", |cx| {
+        LoginRequest::schema(cx, Direction::Input)
+    });
+    let TypeRef::Named(derived) = derived else {
+        panic!()
+    };
+    let TypeRef::Named(carrier) = carrier else {
+        panic!()
+    };
+    let TypeRef::Named(again) = again else {
+        panic!()
+    };
+
+    assert_eq!(
+        derived.id,
+        format!("{}#input", std::any::type_name::<LoginRequest>()),
+        "the derived path keeps keying definitions by type_name"
+    );
+    assert_eq!(carrier.id, "carrier::login-request");
+    assert_eq!(again.id, carrier.id);
+    assert_eq!(cx.definitions().len(), 2, "one Rust type, two ids");
+
+    let (mut types, diagnostics) = cx.into_parts();
+    assert_eq!(types[&carrier.id].name, types[&derived.id].name);
+    let TypeKind::Struct { fields, .. } = &mut types.get_mut(&carrier.id).unwrap().definition
+    else {
+        panic!()
+    };
+    let nullable =
+        |field: &pons_ir::Field| matches!(field.ty, TypeRef::Inline(InlineType::Nullable { .. }));
+    assert!(nullable(&fields[1]), "the carrier starts out a copy");
+    for field in fields.iter_mut() {
+        if let TypeRef::Inline(InlineType::Nullable { inner }) = &field.ty {
+            field.ty = *inner.clone();
+        }
+    }
+    let TypeKind::Struct { fields, .. } = &types[&derived.id].definition else {
+        panic!()
+    };
+    assert!(
+        nullable(&fields[1]),
+        "a rewrite of one id leaves the other definition alone"
+    );
     assert!(document(types, diagnostics).validate().is_ok());
 }
 

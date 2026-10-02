@@ -49,6 +49,17 @@ fn with_query_field(document: Document, field: TypeRef) -> Document {
     document
 }
 
+fn with_required_query_field(document: Document, field: TypeRef) -> Document {
+    let mut document = with_query_field(document, field);
+    let TypeKind::Struct { fields, .. } =
+        &mut document.types.get_mut("EventQuery").unwrap().definition
+    else {
+        panic!("EventQuery is a struct")
+    };
+    fields[0].presence = pons_ir::Presence::Required;
+    document
+}
+
 fn rejects(name: &str, document: Document) {
     let openapi = pons_emit_openapi::emit(&document);
     let typescript = pons_emit_ts::emit(&document);
@@ -91,6 +102,13 @@ fn emitters_agree_on_query_fields_with_a_wire_encoding() {
         ),
     );
     accepts("string", with_query_field(fixture(), ty(string())));
+    accepts(
+        "optional nullable",
+        with_query_field(
+            fixture(),
+            ty(json!({ "kind": "nullable", "inner": string() })),
+        ),
+    );
     for encoding in ["base64", "base64url", "hex"] {
         accepts(
             encoding,
@@ -214,8 +232,8 @@ fn emitters_agree_on_query_fields_without_a_wire_encoding() {
         ),
     );
     rejects(
-        "nullable",
-        with_query_field(
+        "required nullable",
+        with_required_query_field(
             fixture(),
             ty(json!({ "kind": "nullable", "inner": string() })),
         ),

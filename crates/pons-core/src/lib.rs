@@ -54,12 +54,47 @@ impl TypeCx {
         build: impl FnOnce(&mut Self) -> TypeKind,
     ) -> TypeRef {
         let base = type_name::<T>().to_owned();
-        let key = (base.clone(), direction.into());
         let id = match direction {
-            Direction::Both => base,
+            Direction::Both => base.clone(),
             Direction::Input => format!("{base}#input"),
             Direction::Output => format!("{base}#output"),
         };
+        self.define((base, direction.into()), id, name, direction, doc, build)
+    }
+
+    pub fn register_as(
+        &mut self,
+        id: impl Into<String>,
+        schema: impl FnOnce(&mut Self) -> TypeRef,
+    ) -> TypeRef {
+        let id = id.into();
+        let reference = schema(self);
+        let TypeRef::Named(source) = &reference else {
+            return reference;
+        };
+        let Some(definition) = self.definitions.get(&source.id).cloned() else {
+            return reference;
+        };
+        let direction = definition.direction;
+        self.define(
+            (id.clone(), direction.into()),
+            id,
+            definition.name,
+            direction,
+            definition.doc,
+            move |_| definition.definition,
+        )
+    }
+
+    fn define(
+        &mut self,
+        key: (String, DirectionKey),
+        id: String,
+        name: Name,
+        direction: Direction,
+        doc: Option<Doc>,
+        build: impl FnOnce(&mut Self) -> TypeKind,
+    ) -> TypeRef {
         if self.registered.insert(key) {
             let definition = build(self);
             self.definitions.insert(

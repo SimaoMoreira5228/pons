@@ -1,8 +1,10 @@
+use std::collections::BTreeMap;
+
 use pons_core::Schema;
 use pons_ir::{
     Body, ContentKind, CredentialProvision, Diagnostic, DiagnosticSeverity, Direction,
-    HeaderParameter, Presence, Response, ResponseStatus, StreamDescription, StreamKind,
-    StreamMessage, TypeRef,
+    HeaderParameter, InlineType, Presence, Response, ResponseStatus, StreamDescription, StreamKind,
+    StreamMessage, TypeDef, TypeKind, TypeRef,
 };
 
 use crate::describe::OperationCx;
@@ -13,8 +15,9 @@ impl OperationCx {
     }
 
     pub fn path_type<T: Schema>(&mut self) {
-        self.path_types
-            .push(T::schema(&mut self.types, Direction::Input));
+        let ty = T::schema(&mut self.types, Direction::Input);
+        self.flat_carriers.push(ty.clone());
+        self.path_types.push(ty);
     }
 
     pub fn request_header<T: Schema>(&mut self, wire: &str, presence: Presence) {
@@ -47,6 +50,7 @@ impl OperationCx {
 
     pub fn query_type<T: Schema>(&mut self) {
         let query = T::schema(&mut self.types, Direction::Input);
+        self.flat_carriers.push(query.clone());
         if self.query.replace(query).is_some() {
             self.diagnostic(
                 "PONS-W101",
@@ -85,8 +89,12 @@ impl OperationCx {
         media_type: Option<String>,
         required: bool,
     ) {
+        let ty = T::schema(&mut self.types, Direction::Input);
+        if content == ContentKind::Form {
+            self.flat_carriers.push(ty.clone());
+        }
         let body = Body {
-            ty: T::schema(&mut self.types, Direction::Input),
+            ty,
             content,
             required,
             media_type,
@@ -200,10 +208,49 @@ impl OperationCx {
     pub fn diagnostic(&mut self, code: &str, message: impl Into<String>) {
         push_diagnostic(&mut self.diagnostics, code, message);
     }
+}
 
-    pub(crate) fn type_definitions(&self) -> &std::collections::BTreeMap<String, pons_ir::TypeDef> {
-        self.types.definitions()
+pub(crate) fn lower_flat_carriers(types: &mut BTreeMap<String, TypeDef>, carriers: &[TypeRef]) {
+    carriers
+        .iter()
+        .for_each(|carrier| lower_flat_carrier(types, carrier, &mut Vec::new()));
+}
+
+fn lower_flat_carrier(
+    types: &mut BTreeMap<String, TypeDef>,
+    carrier: &TypeRef,
+    visiting: &mut Vec<String>,
+) {
+    let TypeRef::Named(named) = carrier else {
+        return;
+    };
+    if visiting.contains(&named.id) {
+        return;
     }
+    let Some(definition) = types.get_mut(&named.id) else {
+        return;
+    };
+    visiting.push(named.id.clone());
+    let nested = match &mut definition.definition {
+        TypeKind::Newtype { inner } => vec![inner.clone()],
+        TypeKind::Struct {
+            fields, flattened, ..
+        } => {
+            fields.iter_mut().for_each(|field| {
+                if field.presence == Presence::Optional
+                    && let TypeRef::Inline(InlineType::Nullable { inner }) = &field.ty
+                {
+                    field.ty = *inner.clone();
+                }
+            });
+            flattened.clone()
+        }
+        TypeKind::Enum { .. } => Vec::new(),
+    };
+    nested
+        .iter()
+        .for_each(|ty| lower_flat_carrier(types, ty, visiting));
+    visiting.pop();
 }
 
 pub(crate) fn push_diagnostic(

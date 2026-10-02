@@ -939,7 +939,11 @@ mod tests {
             serde_json::from_str(include_str!("../../../fixtures/login.json")).unwrap();
         document.operations[1].query = Some(scalar());
         let error = super::emit(&document).unwrap_err();
-        assert!(error.0.contains("operations[1].query"), "{}", error.0);
+        assert!(
+            error.0.contains("[[\"events\"], [\"watch\"]]"),
+            "{}",
+            error.0
+        );
         assert!(error.0.contains("structs"), "{}", error.0);
 
         let mut raw: serde_json::Value =
@@ -960,7 +964,7 @@ mod tests {
             super::emit(&document)
                 .unwrap_err()
                 .0
-                .contains("operations[1].query")
+                .contains("[[\"events\"], [\"watch\"]]")
         );
 
         raw["types"]["QueryAlias"] = json!({

@@ -1,6 +1,6 @@
 use axum::response::IntoResponse;
 use pons_axum::body::Bytes;
-use pons_axum::extract::{Form, Multipart, Path, Query, State};
+use pons_axum::extract::{Multipart, State};
 use pons_axum::http::StatusCode;
 use pons_axum::routing::{delete, get, get_with, post, post_with};
 use pons_axum::{
@@ -8,10 +8,11 @@ use pons_axum::{
     OperationMeta, OptionalHeader, RawBytes, Router, SessionAuth, WithHeader, WithOptionalHeader,
     WithStatus,
 };
+use pons_axum::{Form, Path, Query};
 use pons_core::Schema;
 use pons_ir::{
     AuthScheme, ContentKind, CredentialLocator, CredentialProvision, Info, InlineType, OpaqueWire,
-    PathSegment, ResponseStatus, TypeKind, TypeRef,
+    Operation, PathSegment, ResponseStatus, TypeKind, TypeRef,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -29,7 +30,22 @@ struct FilePath {
 }
 
 #[derive(Deserialize, Schema)]
+#[serde(deny_unknown_fields)]
 struct UserQuery {
+    #[serde(default)]
+    limit: Option<u16>,
+}
+
+#[derive(Deserialize, Schema)]
+#[serde(deny_unknown_fields)]
+struct Q {
+    #[serde(default)]
+    limit: Option<u16>,
+}
+
+#[derive(Deserialize, Schema)]
+#[serde(deny_unknown_fields)]
+struct RequiredNullableQ {
     limit: Option<u16>,
 }
 
@@ -217,14 +233,14 @@ async fn typed_user() -> Result<pons_axum::extract::Json<User>, UserError> {
 }
 
 async fn create_user(
-    pons_axum::extract::Json(input): pons_axum::extract::Json<CreateUser>,
+    pons_axum::Json(input): pons_axum::Json<CreateUser>,
 ) -> WithStatus<201, pons_axum::extract::Json<User>> {
     let name = input.name;
     WithStatus::new(pons_axum::extract::Json(User { id: 1, name }))
 }
 
 async fn created_user(
-    pons_axum::extract::Json(input): pons_axum::extract::Json<CreateUser>,
+    pons_axum::Json(input): pons_axum::Json<CreateUser>,
 ) -> Result<WithStatus<201, pons_axum::extract::Json<User>>, UserError> {
     let name = input.name;
     Ok(WithStatus::new(pons_axum::extract::Json(User {
@@ -237,6 +253,40 @@ async fn form_user(Form(input): Form<CreateUser>) -> pons_axum::extract::Json<Us
     pons_axum::extract::Json(User {
         id: 1,
         name: input.name,
+    })
+}
+
+async fn query_q(Query(query): Query<Q>) -> pons_axum::extract::Json<User> {
+    let _ = query.limit;
+    pons_axum::extract::Json(User {
+        id: 1,
+        name: "Ada".into(),
+    })
+}
+
+async fn form_q(Form(form): Form<Q>) -> pons_axum::extract::Json<User> {
+    let _ = form.limit;
+    pons_axum::extract::Json(User {
+        id: 1,
+        name: "Ada".into(),
+    })
+}
+
+async fn path_q(Path(path): Path<Q>) -> pons_axum::extract::Json<User> {
+    let _ = path.limit;
+    pons_axum::extract::Json(User {
+        id: 1,
+        name: "Ada".into(),
+    })
+}
+
+async fn required_nullable_q(
+    Query(query): Query<RequiredNullableQ>,
+) -> pons_axum::extract::Json<User> {
+    let _ = query.limit;
+    pons_axum::extract::Json(User {
+        id: 1,
+        name: "Ada".into(),
     })
 }
 
@@ -258,9 +308,7 @@ enum FlattenedCreate {
 }
 
 async fn flattened_create(
-    pons_axum::extract::Json(FlattenedCreate::Simple { name, .. }): pons_axum::extract::Json<
-        FlattenedCreate,
-    >,
+    pons_axum::Json(FlattenedCreate::Simple { name, .. }): pons_axum::Json<FlattenedCreate>,
 ) -> pons_axum::extract::Json<User> {
     pons_axum::extract::Json(User { id: 1, name })
 }
@@ -388,6 +436,72 @@ fn info() -> Info {
         servers: Vec::new(),
         ext: BTreeMap::new(),
     }
+}
+
+fn operation<'a>(document: &'a pons_ir::Document, literal: &str) -> &'a Operation {
+    document
+        .operations
+        .iter()
+        .find(|operation| {
+            operation
+                .path
+                .iter()
+                .any(|segment| matches!(segment, PathSegment::Literal { lit } if lit == literal))
+        })
+        .unwrap()
+}
+
+fn optional_integer(ty: &TypeRef) -> bool {
+    matches!(ty, TypeRef::Inline(InlineType::Int { bits: 16, .. }))
+}
+
+#[test]
+fn a_flat_carrier_publishes_a_nullable_optional_field_as_an_absent_key() {
+    let document = Router::<()>::new(info())
+        .route("/query", get(query_q))
+        .route("/form-body", post(form_q))
+        .route("/segment/{limit}", get(path_q))
+        .into_document()
+        .unwrap();
+
+    let query = operation(&document, "query");
+    let fields = pons_ir::query_fields(&document, query.query.as_ref().unwrap()).unwrap();
+    assert_eq!(fields.len(), 1);
+    assert_eq!(fields[0].wire, "limit");
+    assert_eq!(fields[0].presence, pons_ir::Presence::Optional);
+    assert!(optional_integer(&fields[0].ty));
+
+    let TypeRef::Named(form) = &operation(&document, "form-body").body.as_ref().unwrap().ty else {
+        panic!();
+    };
+    let TypeKind::Struct { fields, .. } = &document.types[&form.id].definition else {
+        panic!();
+    };
+    assert_eq!(fields.len(), 1);
+    assert_eq!(fields[0].wire, "limit");
+    assert_eq!(fields[0].presence, pons_ir::Presence::Optional);
+    assert!(optional_integer(&fields[0].ty));
+
+    let PathSegment::Param { param, ty } = &operation(&document, "segment").path[1] else {
+        panic!();
+    };
+    assert_eq!(param, "limit");
+    assert!(optional_integer(ty));
+}
+
+#[test]
+fn a_required_nullable_query_field_is_refused_by_name() {
+    let errors = Router::<()>::new(info())
+        .route("/required", get(required_nullable_q))
+        .into_document()
+        .unwrap_err();
+    let errors = errors.iter().map(ToString::to_string).collect::<Vec<_>>();
+    assert!(
+        errors.iter().any(|error| {
+            error.contains("\"limit\"") && error.contains("no encoding for a present null")
+        }),
+        "an Option<T> field without a serde default is required, and a query string has no encoding for a present null: {errors:?}"
+    );
 }
 
 #[test]

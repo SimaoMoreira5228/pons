@@ -8,12 +8,16 @@ mod ndjson;
 mod operation;
 mod operation_cx;
 mod raw_bytes;
+mod request;
 mod response;
 pub mod routing;
 mod sse;
+mod validate;
 
 use std::collections::BTreeMap;
+use std::sync::Arc;
 
+use axum::Extension;
 use pons_core::{ErrorSpec, TypeCx};
 
 pub use auth::{Auth, AuthSpec, SessionAuth};
@@ -22,7 +26,7 @@ pub use describe::{
     DescribeRequest, DescribeResponse, Header, HeaderRejection, HeaderSpec, NoContent, OperationCx,
     OptionalHeader, StatusResponse, WithHeader, WithOptionalHeader, WithStatus,
 };
-pub use error::{WithErrorHeader, WithOptionalErrorHeader};
+pub use error::{Violation, ViolationReport, WithErrorHeader, WithOptionalErrorHeader};
 pub use handler::DescribeHandler;
 pub use layer::DocumentedLayer;
 pub use metadata::OperationMeta;
@@ -33,6 +37,7 @@ use pons_ir::{
     AuthRequirement, AuthScheme, Diagnostic, Document, ErrorResponse, TypeDef, ValidationError,
 };
 pub use raw_bytes::RawBytes;
+pub use request::{Form, Json, Path, Query};
 pub use response::{
     BytesResponse, JsonResponse, ProblemJsonResponse, ResponseSpec, TextResponse, WithResponse,
     WithUnknownStatus,
@@ -112,7 +117,8 @@ where
         for layer in std::mem::take(&mut self.pending_layers) {
             self.inner = self.inner.layer(layer);
         }
-        self.inner
+        let inner = std::mem::take(&mut self.inner);
+        inner.layer(Extension(Arc::new(self.into_document_value())))
     }
 
     pub fn document(&self) -> Document {

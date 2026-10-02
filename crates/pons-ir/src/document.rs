@@ -414,6 +414,14 @@ impl Document {
                     });
                 }
             }
+            if let Some(query) = &operation.query
+                && let Err(rejection) = crate::query::query_fields(self, query)
+            {
+                errors.push(ValidationError::InvalidValue {
+                    path: owner.clone(),
+                    message: rejection.message(),
+                });
+            }
             self.visit_operation_refs(&owner, operation, &mut errors);
             if let Some(stream) = &operation.stream
                 && let Err(message) = stream.kind.validate()
@@ -798,7 +806,7 @@ impl Document {
         }
     }
 
-    fn is_nullable_type(&self, ty: &TypeRef, visited: &mut BTreeSet<String>) -> bool {
+    pub(crate) fn is_nullable_type(&self, ty: &TypeRef, visited: &mut BTreeSet<String>) -> bool {
         match ty {
             TypeRef::Inline(InlineType::Nullable { .. }) => true,
             TypeRef::Named(named) => {
@@ -860,9 +868,10 @@ impl Document {
                 {
                     None => true,
                     Some(TypeKind::Newtype { inner }) => self.is_form_value(inner, top, visiting),
-                    Some(TypeKind::Struct { fields, .. }) if top => fields
-                        .iter()
-                        .all(|field| self.is_form_value(&field.ty, false, visiting)),
+                    Some(TypeKind::Struct { fields, .. }) if top => fields.iter().all(|field| {
+                        crate::query::encodes_nullable_as_absence(self, field)
+                            && self.is_form_value(&field.ty, false, visiting)
+                    }),
                     Some(TypeKind::Enum { .. }) => {
                         crate::query::is_scalar_field(self, ty, &mut Vec::new())
                     }
@@ -2076,6 +2085,14 @@ mod tests {
     }
 
     fn form_document(fields: Vec<(&str, TypeRef)>, extra: Vec<(&str, TypeDef)>) -> Document {
+        form_document_with(Presence::Required, fields, extra)
+    }
+
+    fn form_document_with(
+        presence: Presence,
+        fields: Vec<(&str, TypeRef)>,
+        extra: Vec<(&str, TypeDef)>,
+    ) -> Document {
         let mut document: Document =
             serde_json::from_str(include_str!("../../../fixtures/login.json")).unwrap();
         for (id, definition) in extra {
@@ -2093,7 +2110,7 @@ mod tests {
                             wire: wire.into(),
                             ident: vec![wire.into()],
                             ty,
-                            presence: Presence::Required,
+                            presence,
                             default: crate::FieldDefault::Unspecified,
                             access: None,
                             doc: None,
@@ -2135,7 +2152,6 @@ mod tests {
     fn form_bodies_reuse_the_query_scalar_rule_and_reject_nested_objects() {
         for (fields, extra, body) in [
             (vec![("email", string())], vec![], None),
-            (vec![("email", nullable(string()))], vec![], None),
             (
                 vec![("email", string())],
                 vec![named_type(
@@ -2165,6 +2181,7 @@ mod tests {
         for (fields, extra) in [
             (vec![("profile", named("Profile"))], vec![profile()]),
             (vec![("profile", map(string()))], vec![]),
+            (vec![("email", nullable(string()))], vec![]),
             (
                 vec![("profile", named("WrappedProfile"))],
                 vec![
@@ -2180,20 +2197,33 @@ mod tests {
         ] {
             rejects_nested_form_values(&form_document(fields, extra));
         }
+
+        form_document_with(
+            Presence::Optional,
+            vec![("email", nullable(string()))],
+            vec![],
+        )
+        .validate()
+        .unwrap();
     }
 
     #[test]
     fn form_bodies_add_one_array_level_to_the_query_scalar_rule() {
-        for document in [
-            form_document(vec![("tags", array(string()))], vec![]),
-            form_document(vec![("tags", nullable(array(string())))], vec![]),
-        ] {
-            document.validate().unwrap();
-        }
+        form_document(vec![("tags", array(string()))], vec![])
+            .validate()
+            .unwrap();
+        form_document_with(
+            Presence::Optional,
+            vec![("tags", nullable(array(string())))],
+            vec![],
+        )
+        .validate()
+        .unwrap();
 
         for (fields, extra) in [
             (vec![("matrix", array(array(string())))], vec![]),
             (vec![("profiles", array(named("Profile")))], vec![profile()]),
+            (vec![("tags", nullable(array(string())))], vec![]),
         ] {
             rejects_nested_form_values(&form_document(fields, extra));
         }

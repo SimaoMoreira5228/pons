@@ -1,9 +1,11 @@
 use std::collections::{BTreeMap, HashMap};
 
+use pons_core::ErrorSpec;
 use pons_ir::{
     Diagnostic, Method, Operation, OperationSemantics, PathSegment, TypeDef, TypeKind, TypeRef,
 };
 
+use crate::ViolationReport;
 use crate::describe::OperationCx;
 use crate::metadata::OperationMeta;
 use crate::operation_cx::push_diagnostic;
@@ -24,10 +26,13 @@ pub(crate) fn build(path: &str, description: RouteDescription) -> BuiltOperation
     let RouteDescription {
         method,
         id: inferred_id,
-        cx,
+        mut cx,
         meta,
     } = description;
     let mut diagnostics = cx.diagnostics.clone();
+    if cx.validated {
+        cx.errors.extend(ViolationReport::errors(&mut cx.types));
+    }
     if cx.path_types.len() > 1 {
         push_diagnostic(
             &mut diagnostics,
@@ -35,9 +40,10 @@ pub(crate) fn build(path: &str, description: RouteDescription) -> BuiltOperation
             "multiple Path extractors are not represented separately",
         );
     }
-    let path_types = path_types(&cx);
+    let (mut types, type_diagnostics) = cx.types.into_parts();
+    crate::operation_cx::lower_flat_carriers(&mut types, &cx.flat_carriers);
+    let path_types = path_types(&types, &cx.path_types);
     let segments = parse_path(path, &path_types, &mut diagnostics);
-    let (types, type_diagnostics) = cx.types.into_parts();
     diagnostics.extend(type_diagnostics);
     let (id, doc, provides) = match meta {
         Some(meta) => (meta.id, Some(meta.doc), meta.provides.or(cx.provides)),
@@ -72,10 +78,10 @@ pub(crate) fn build(path: &str, description: RouteDescription) -> BuiltOperation
     BuiltOperation { operation, types }
 }
 
-fn path_types(cx: &OperationCx) -> HashMap<String, TypeRef> {
+fn path_types(types: &BTreeMap<String, TypeDef>, carriers: &[TypeRef]) -> HashMap<String, TypeRef> {
     let mut result = HashMap::new();
-    for ty in &cx.path_types {
-        add_path_types(ty, cx.type_definitions(), &mut result);
+    for ty in carriers {
+        add_path_types(ty, types, &mut result);
     }
     result
 }

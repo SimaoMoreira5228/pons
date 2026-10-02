@@ -1,7 +1,7 @@
 use proc_macro2::{Span, TokenStream};
 use quote::{ToTokens, quote};
 use serde_derive_internals::{ast, attr};
-use syn::{Ident, Type, parse_quote};
+use syn::{GenericArgument, Ident, Type, parse_quote};
 
 pub(super) fn expand(container: &ast::Container<'_>) -> TokenStream {
     let ident = &container.ident;
@@ -422,7 +422,7 @@ fn field_body(
     let wire_in = field.attrs.name().deserialize_name();
     let wire_out = field.attrs.name().serialize_name();
     let ident = words(&field.member.to_token_stream().to_string());
-    let optional_on_input = container_default || has_default(&field.attrs);
+    let optional_on_input = container_default || has_default(&field.attrs) || is_option(field.ty);
     let optional_on_output = field.attrs.skip_serializing_if().is_some();
     let doc = doc_value(&field.original.attrs);
     let presence = quote! {
@@ -601,6 +601,19 @@ fn label(codec: Option<String>) -> TokenStream {
 
 fn has_default(attrs: &attr::Field) -> bool {
     !attrs.default().is_none()
+}
+
+fn is_option(ty: &Type) -> bool {
+    let Type::Path(path) = ty else { return false };
+    let Some(segment) = path.path.segments.last() else {
+        return false;
+    };
+    let syn::PathArguments::AngleBracketed(arguments) = &segment.arguments else {
+        return false;
+    };
+    segment.ident == "Option"
+        && arguments.args.len() == 1
+        && matches!(arguments.args.first(), Some(GenericArgument::Type(_)))
 }
 
 pub(super) fn doc_value(attrs: &[syn::Attribute]) -> TokenStream {

@@ -1,3 +1,5 @@
+use std::str::FromStr;
+
 use axum::response::IntoResponse;
 use pons_core::{ErrorSpec, Schema, TypeCx};
 use pons_ir::{
@@ -10,6 +12,7 @@ use pons_ir::{
 pub struct OperationCx {
     pub(crate) types: TypeCx,
     pub(crate) path_types: Vec<TypeRef>,
+    pub(crate) flat_carriers: Vec<TypeRef>,
     pub(crate) headers: Vec<HeaderParameter>,
     pub(crate) query: Option<TypeRef>,
     pub(crate) body: Option<Body>,
@@ -19,6 +22,13 @@ pub struct OperationCx {
     pub(crate) auth: AuthRequirement,
     pub(crate) provides: Option<CredentialProvision>,
     pub(crate) diagnostics: Vec<Diagnostic>,
+    pub(crate) validated: bool,
+}
+
+impl OperationCx {
+    pub(crate) fn mark_validated(&mut self) {
+        self.validated = true;
+    }
 }
 
 pub trait DescribeRequest {
@@ -31,11 +41,12 @@ pub trait DescribeResponse {
 
 pub trait StatusResponse: DescribeResponse + axum::response::IntoResponse {}
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug)]
 pub enum HeaderRejection {
     Missing,
     Repeated,
     Invalid,
+    Contract(crate::ViolationReport),
 }
 
 pub trait HeaderSpec {
@@ -237,6 +248,7 @@ impl axum::response::IntoResponse for HeaderRejection {
             Self::Missing => "required header is missing",
             Self::Repeated => "header must not be repeated",
             Self::Invalid => "header value is invalid",
+            Self::Contract(report) => return report.into_response(),
         };
         (axum::http::StatusCode::BAD_REQUEST, message).into_response()
     }
@@ -266,10 +278,10 @@ fn valid_header_name(name: &str) -> bool {
         })
 }
 
-fn parse_header<T: std::str::FromStr>(
+fn header_text(
     headers: &axum::http::HeaderMap,
     name: &str,
-) -> Result<Option<T>, HeaderRejection> {
+) -> Result<Option<String>, HeaderRejection> {
     if !valid_header_name(name) {
         return Err(HeaderRejection::Invalid);
     }
@@ -280,10 +292,29 @@ fn parse_header<T: std::str::FromStr>(
     if values.next().is_some() {
         return Err(HeaderRejection::Repeated);
     }
-    let value = value.to_str().map_err(|_| HeaderRejection::Invalid)?;
-    T::from_str(value)
-        .map(Some)
+    value
+        .to_str()
+        .map(|text| Some(text.to_owned()))
         .map_err(|_| HeaderRejection::Invalid)
+}
+
+fn header_value<T: HeaderSpec>(
+    parts: &axum::http::request::Parts,
+) -> Result<Option<<T as HeaderSpec>::Value>, HeaderRejection> {
+    let Some(text) = header_text(&parts.headers, T::NAME)? else {
+        return Ok(None);
+    };
+    let (document, _) =
+        crate::validate::request_contract::<<T as HeaderSpec>::Value>(&parts.extensions);
+    let ty =
+        header_schema::<<T as HeaderSpec>::Value>(&mut TypeCx::new(), Direction::Input, T::NAME);
+    let value = crate::validate::token_value(&document, &ty, &text);
+    if let Err(report) = crate::validate::check(&document, &ty, &value) {
+        return Err(HeaderRejection::Contract(report));
+    }
+    Ok(Some(
+        <T as HeaderSpec>::Value::from_str(&text).map_err(|_| HeaderRejection::Invalid)?,
+    ))
 }
 
 impl<S, T> axum::extract::FromRequestParts<S> for Header<T>
@@ -297,7 +328,7 @@ where
         parts: &mut axum::http::request::Parts,
         _: &S,
     ) -> Result<Self, Self::Rejection> {
-        parse_header::<T::Value>(&parts.headers, T::NAME)?
+        header_value::<T>(parts)?
             .map(Self)
             .ok_or(HeaderRejection::Missing)
     }
@@ -314,19 +345,21 @@ where
         parts: &mut axum::http::request::Parts,
         _: &S,
     ) -> Result<Self, Self::Rejection> {
-        parse_header::<T::Value>(&parts.headers, T::NAME).map(Self)
+        Ok(Self(header_value::<T>(parts)?))
     }
 }
 
 impl<T: HeaderSpec> DescribeRequest for Header<T> {
     fn describe(cx: &mut OperationCx) {
         cx.request_header::<T::Value>(T::NAME, Presence::Required);
+        cx.mark_validated();
     }
 }
 
 impl<T: HeaderSpec> DescribeRequest for OptionalHeader<T> {
     fn describe(cx: &mut OperationCx) {
         cx.request_header::<T::Value>(T::NAME, Presence::Optional);
+        cx.mark_validated();
     }
 }
 
@@ -383,18 +416,6 @@ impl DescribeResponse for NoContent {
 
 impl StatusResponse for NoContent {}
 
-impl<T: Schema> DescribeRequest for axum::Json<T> {
-    fn describe(cx: &mut OperationCx) {
-        cx.request_body::<T>(ContentKind::Json);
-    }
-}
-
-impl<T: Schema> DescribeRequest for axum::extract::Form<T> {
-    fn describe(cx: &mut OperationCx) {
-        cx.request_body::<T>(ContentKind::Form);
-    }
-}
-
 impl DescribeRequest for axum::extract::Multipart {
     fn describe(cx: &mut OperationCx) {
         cx.request_body::<OpaqueMultipart>(ContentKind::Multipart);
@@ -439,18 +460,6 @@ impl DescribeRequest for axum::extract::Request {
             "PONS-E102",
             "raw request extractors expose no request contract; use typed extractors",
         );
-    }
-}
-
-impl<T: Schema> DescribeRequest for axum::extract::Query<T> {
-    fn describe(cx: &mut OperationCx) {
-        cx.query_type::<T>();
-    }
-}
-
-impl<T: Schema> DescribeRequest for axum::extract::Path<T> {
-    fn describe(cx: &mut OperationCx) {
-        cx.path_type::<T>();
     }
 }
 
@@ -736,18 +745,8 @@ mod tests {
         let mut headers = axum::http::HeaderMap::new();
         headers.insert(Debug::NAME, axum::http::HeaderValue::from_static("true"));
         assert_eq!(
-            parse_header::<bool>(&headers, Debug::NAME).unwrap(),
-            Some(true)
-        );
-        headers.insert(Debug::NAME, axum::http::HeaderValue::from_static("false"));
-        assert_eq!(
-            parse_header::<bool>(&headers, Debug::NAME).unwrap(),
-            Some(false)
-        );
-        headers.insert(Debug::NAME, axum::http::HeaderValue::from_static("1"));
-        assert_eq!(
-            parse_header::<bool>(&headers, Debug::NAME),
-            Err(HeaderRejection::Invalid)
+            header_text(&headers, Debug::NAME).unwrap(),
+            Some("true".to_owned())
         );
     }
 
@@ -821,30 +820,25 @@ mod tests {
     }
 
     #[test]
-    fn parses_headers_case_insensitively_and_rejects_invalid_values() {
+    fn header_text_is_read_once_case_insensitively() {
         let mut headers = axum::http::HeaderMap::new();
         headers.insert("x-request-id", axum::http::HeaderValue::from_static("abc"));
         assert_eq!(
-            parse_header::<String>(&headers, "X-Request-ID").unwrap(),
+            header_text(&headers, "X-Request-ID").unwrap(),
             Some("abc".to_owned())
         );
-        assert_eq!(parse_header::<u16>(&headers, "X-Retry").unwrap(), None);
-
-        headers.insert("X-Retry", axum::http::HeaderValue::from_static("bad"));
-        assert_eq!(
-            parse_header::<u16>(&headers, "X-Retry"),
+        assert_eq!(header_text(&headers, "X-Retry").unwrap(), None);
+        assert!(matches!(
+            header_text(&headers, "X Request ID"),
             Err(HeaderRejection::Invalid)
-        );
+        ));
+
         headers.insert("X-Retry", axum::http::HeaderValue::from_static("2"));
         headers.append("X-Retry", axum::http::HeaderValue::from_static("3"));
-        assert_eq!(
-            parse_header::<u16>(&headers, "X-Retry"),
+        assert!(matches!(
+            header_text(&headers, "X-Retry"),
             Err(HeaderRejection::Repeated)
-        );
-        assert_eq!(
-            parse_header::<String>(&headers, "X Request ID"),
-            Err(HeaderRejection::Invalid)
-        );
+        ));
     }
 
     #[test]

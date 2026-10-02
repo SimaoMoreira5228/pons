@@ -1,11 +1,72 @@
 use axum::response::{IntoResponse, Response};
-use pons_core::{ErrorSpec, TypeCx};
-use pons_ir::{Direction, ErrorResponse, ErrorStatus, Presence, ResponseHeader};
+use pons_core::{ErrorSpec, Schema, TypeCx};
+use pons_ir::{Direction, Doc, ErrorContent, ErrorResponse, ErrorStatus, Presence, ResponseHeader};
 
+use crate::JsonResponse;
 use crate::describe::{
     HeaderSpec, header_schema, insert_response_header, invalid_response_header,
     is_invalid_response_header,
 };
+use crate::response::WithResponse;
+
+pub(crate) const REJECTED: u16 = 422;
+
+#[derive(Debug, serde::Serialize, pons_core::Schema)]
+#[serde(deny_unknown_fields)]
+pub struct Violation {
+    pub path: String,
+    pub reason: String,
+}
+
+#[derive(Debug, serde::Serialize, pons_core::Schema)]
+#[serde(deny_unknown_fields)]
+pub struct ViolationReport {
+    pub violations: Vec<Violation>,
+}
+
+impl ViolationReport {
+    pub(crate) fn rejected(violations: Vec<pons_ir::Violation>) -> Self {
+        Self {
+            violations: violations
+                .into_iter()
+                .map(|violation| Violation {
+                    path: violation.path().to_owned(),
+                    reason: violation.reason(),
+                })
+                .collect(),
+        }
+    }
+}
+
+impl ErrorSpec for ViolationReport {
+    fn errors(cx: &mut TypeCx) -> Vec<ErrorResponse> {
+        vec![ErrorResponse {
+            status: ErrorStatus::Exact(REJECTED),
+            name: vec!["request".to_owned(), "rejected".to_owned()],
+            content: ErrorContent::Json,
+            media_type: None,
+            body: Some(<Self as Schema>::schema(cx, Direction::Output)),
+            headers: Vec::new(),
+            retryable: Some(false),
+            doc: Some(Doc {
+                summary: Some(
+                    "The request does not satisfy the published request contract.".to_owned(),
+                ),
+                description: None,
+                deprecated: None,
+                tags: Vec::new(),
+            }),
+            ext: Default::default(),
+        }]
+    }
+}
+
+impl IntoResponse for ViolationReport {
+    fn into_response(self) -> Response {
+        WithResponse::<Self, JsonResponse<REJECTED>>::new(axum::Json(self).into_response())
+            .into_response()
+    }
+}
 
 pub struct WithErrorHeader<S: HeaderSpec, E>(pub E, pub <S as HeaderSpec>::Value);
 

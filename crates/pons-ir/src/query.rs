@@ -1,7 +1,8 @@
 use std::collections::BTreeSet;
 
 use crate::{
-    ByteEncoding, Document, EnumRepr, Field, InlineType, ObjectOpenness, TypeKind, TypeRef,
+    ByteEncoding, Document, EnumRepr, Field, InlineType, ObjectOpenness, Presence, TypeKind,
+    TypeRef,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -13,6 +14,7 @@ pub enum QueryRejection {
     OpenObject(String),
     NotAStruct(String),
     NonScalarField,
+    RequiredNullable(String),
     DuplicateField(String),
 }
 
@@ -30,6 +32,9 @@ impl QueryRejection {
             Self::NonScalarField => {
                 "query fields must use scalar types with an unambiguous encoding".into()
             }
+            Self::RequiredNullable(wire) => format!(
+                "query field {wire:?} is required and nullable; a query string has no encoding for a present null, so make the field optional or drop the nullable wrapper"
+            ),
             Self::DuplicateField(wire) => {
                 format!("query field {wire:?} is declared more than once")
             }
@@ -86,7 +91,7 @@ fn collect<'a>(
             } else {
                 own.iter()
                     .try_for_each(|field| {
-                        is_query_field(document, &field.ty, &mut Vec::new())?;
+                        is_query_field(document, field, &mut Vec::new())?;
                         fields.push(field);
                         Ok(())
                     })
@@ -103,7 +108,28 @@ fn collect<'a>(
     result
 }
 
+pub(crate) fn encodes_nullable_as_absence(document: &Document, field: &Field) -> bool {
+    field.presence == Presence::Optional
+        || !document.is_nullable_type(&field.ty, &mut BTreeSet::new())
+}
+
 fn is_query_field(
+    document: &Document,
+    field: &Field,
+    visited: &mut Vec<String>,
+) -> Result<(), QueryRejection> {
+    match &field.ty {
+        TypeRef::Inline(InlineType::Nullable { inner })
+            if !encodes_nullable_as_absence(document, field) =>
+        {
+            Err(QueryRejection::RequiredNullable(field.wire.clone()))
+        }
+        TypeRef::Inline(InlineType::Nullable { inner }) => is_query_value(document, inner, visited),
+        ty => is_query_value(document, ty, visited),
+    }
+}
+
+fn is_query_value(
     document: &Document,
     ty: &TypeRef,
     visited: &mut Vec<String>,
@@ -129,7 +155,7 @@ fn is_query_field(
                 TypeKind::Enum { repr, .. } => matches!(repr, EnumRepr::String),
                 TypeKind::Newtype { inner } => {
                     visited.push(named.id.clone());
-                    let result = is_query_field(document, inner, visited);
+                    let result = is_query_value(document, inner, visited);
                     visited.pop();
                     result.is_ok()
                 }
@@ -150,5 +176,5 @@ pub(crate) fn is_scalar_field(
     ty: &TypeRef,
     visited: &mut Vec<String>,
 ) -> bool {
-    is_query_field(document, ty, visited).is_ok()
+    is_query_value(document, ty, visited).is_ok()
 }

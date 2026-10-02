@@ -9,3 +9,6 @@ rust-version.workspace = true
 pons-ir = { path = "../pons-ir" }
 pons-derive = { path = "../pons-derive" }
 serde_json.workspace = true
+
+[dev-dependencies]
+serde.workspace = true
