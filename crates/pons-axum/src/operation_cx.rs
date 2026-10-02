@@ -1,10 +1,11 @@
+use std::any::type_name;
 use std::collections::BTreeMap;
 
 use pons_core::Schema;
 use pons_ir::{
     Body, ContentKind, CredentialProvision, Diagnostic, DiagnosticSeverity, Direction,
-    HeaderParameter, InlineType, Presence, Response, ResponseStatus, StreamDescription, StreamKind,
-    StreamMessage, TypeDef, TypeKind, TypeRef,
+    HeaderParameter, InlineType, NamedRef, Presence, Response, ResponseStatus, StreamDescription,
+    StreamKind, StreamMessage, TypeDef, TypeKind, TypeRef,
 };
 
 use crate::describe::OperationCx;
@@ -15,9 +16,19 @@ impl OperationCx {
     }
 
     pub fn path_type<T: Schema>(&mut self) {
-        let ty = T::schema(&mut self.types, Direction::Input);
-        self.flat_carriers.push(ty.clone());
+        let ty = self.flat_carrier::<T>("path");
         self.path_types.push(ty);
+    }
+
+    fn flat_carrier<T: Schema>(&mut self, role: &'static str) -> TypeRef {
+        let ty = self
+            .types
+            .register_as(format!("{}#{role}", type_name::<T>()), |types| {
+                T::schema(types, Direction::Input)
+            });
+        self.flat_carriers.push((ty.clone(), role));
+        self.carriers.push(ty.clone());
+        ty
     }
 
     pub fn request_header<T: Schema>(&mut self, wire: &str, presence: Presence) {
@@ -49,8 +60,7 @@ impl OperationCx {
     }
 
     pub fn query_type<T: Schema>(&mut self) {
-        let query = T::schema(&mut self.types, Direction::Input);
-        self.flat_carriers.push(query.clone());
+        let query = self.flat_carrier::<T>("query");
         if self.query.replace(query).is_some() {
             self.diagnostic(
                 "PONS-W101",
@@ -89,10 +99,10 @@ impl OperationCx {
         media_type: Option<String>,
         required: bool,
     ) {
-        let ty = T::schema(&mut self.types, Direction::Input);
-        if content == ContentKind::Form {
-            self.flat_carriers.push(ty.clone());
-        }
+        let ty = match content {
+            ContentKind::Form => self.flat_carrier::<T>("form"),
+            _ => T::schema(&mut self.types, Direction::Input),
+        };
         let body = Body {
             ty,
             content,
@@ -210,15 +220,19 @@ impl OperationCx {
     }
 }
 
-pub(crate) fn lower_flat_carriers(types: &mut BTreeMap<String, TypeDef>, carriers: &[TypeRef]) {
-    carriers
-        .iter()
-        .for_each(|carrier| lower_flat_carrier(types, carrier, &mut Vec::new()));
+pub(crate) fn lower_flat_carriers(
+    types: &mut BTreeMap<String, TypeDef>,
+    carriers: &[(TypeRef, &str)],
+) {
+    carriers.iter().for_each(|(carrier, role)| {
+        lower_flat_carrier(types, carrier, role, &mut Vec::new());
+    });
 }
 
 fn lower_flat_carrier(
     types: &mut BTreeMap<String, TypeDef>,
     carrier: &TypeRef,
+    role: &str,
     visiting: &mut Vec<String>,
 ) {
     let TypeRef::Named(named) = carrier else {
@@ -247,10 +261,43 @@ fn lower_flat_carrier(
         }
         TypeKind::Enum { .. } => Vec::new(),
     };
-    nested
+    let owned = nested
         .iter()
-        .for_each(|ty| lower_flat_carrier(types, ty, visiting));
+        .map(|ty| own(types, ty, role))
+        .collect::<Vec<_>>();
+    if let Some(definition) = types.get_mut(&named.id) {
+        match &mut definition.definition {
+            TypeKind::Newtype { inner } => {
+                if let [only] = owned.as_slice() {
+                    *inner = only.clone();
+                }
+            }
+            TypeKind::Struct { flattened, .. } => *flattened = owned.clone(),
+            TypeKind::Enum { .. } => {}
+        }
+    }
+    owned
+        .iter()
+        .for_each(|ty| lower_flat_carrier(types, ty, role, visiting));
     visiting.pop();
+}
+
+fn own(types: &mut BTreeMap<String, TypeDef>, ty: &TypeRef, role: &str) -> TypeRef {
+    let TypeRef::Named(reference) = ty else {
+        return ty.clone();
+    };
+    if reference.id.ends_with(&format!("#{role}")) {
+        return ty.clone();
+    }
+    let owned = format!("{}#{role}", reference.id);
+    let Some(definition) = types.get(&reference.id).cloned() else {
+        return ty.clone();
+    };
+    types.insert(owned.clone(), definition);
+    TypeRef::Named(NamedRef {
+        id: owned,
+        variant: reference.variant.clone(),
+    })
 }
 
 pub(crate) fn push_diagnostic(

@@ -108,8 +108,7 @@ fn required_error() -> WithErrorHeader<RetryAfter, UserError> {
     WithErrorHeader::new(UserError::Limited, 3)
 }
 
-async fn required_header()
--> Result<pons_axum::extract::Json<User>, WithErrorHeader<RetryAfter, UserError>> {
+async fn required_header() -> Result<axum::Json<User>, WithErrorHeader<RetryAfter, UserError>> {
     Err(required_error())
 }
 
@@ -118,7 +117,7 @@ fn optional_error() -> WithOptionalErrorHeader<RetryAfter, UserError> {
 }
 
 async fn optional_header()
--> Result<pons_axum::extract::Json<User>, WithOptionalErrorHeader<RetryAfter, UserError>> {
+-> Result<axum::Json<User>, WithOptionalErrorHeader<RetryAfter, UserError>> {
     Err(optional_error())
 }
 

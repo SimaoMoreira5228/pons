@@ -12,7 +12,8 @@ use pons_ir::{
 pub struct OperationCx {
     pub(crate) types: TypeCx,
     pub(crate) path_types: Vec<TypeRef>,
-    pub(crate) flat_carriers: Vec<TypeRef>,
+    pub(crate) flat_carriers: Vec<(TypeRef, &'static str)>,
+    pub(crate) carriers: Vec<TypeRef>,
     pub(crate) headers: Vec<HeaderParameter>,
     pub(crate) query: Option<TypeRef>,
     pub(crate) body: Option<Body>,
@@ -26,7 +27,7 @@ pub struct OperationCx {
 }
 
 impl OperationCx {
-    pub(crate) fn mark_validated(&mut self) {
+    pub fn mark_validated(&mut self) {
         self.validated = true;
     }
 }
@@ -244,13 +245,13 @@ where
 
 impl axum::response::IntoResponse for HeaderRejection {
     fn into_response(self) -> axum::response::Response {
-        let message = match self {
-            Self::Missing => "required header is missing",
-            Self::Repeated => "header must not be repeated",
-            Self::Invalid => "header value is invalid",
+        let (expected, found) = match self {
+            Self::Missing => ("a request carrying the required header", "no header"),
+            Self::Repeated => ("a header spelled once", "a repeated header"),
+            Self::Invalid => ("a header value the type reads", "a value it cannot read"),
             Self::Contract(report) => return report.into_response(),
         };
-        (axum::http::StatusCode::BAD_REQUEST, message).into_response()
+        crate::validate::violated(expected, found.to_owned()).into_response()
     }
 }
 
@@ -304,10 +305,9 @@ fn header_value<T: HeaderSpec>(
     let Some(text) = header_text(&parts.headers, T::NAME)? else {
         return Ok(None);
     };
-    let (document, _) =
-        crate::validate::request_contract::<<T as HeaderSpec>::Value>(&parts.extensions);
-    let ty =
-        header_schema::<<T as HeaderSpec>::Value>(&mut TypeCx::new(), Direction::Input, T::NAME);
+    let (document, _) = crate::validate::request_contract::<T::Value>(&parts.extensions, "input")
+        .map_err(HeaderRejection::Contract)?;
+    let ty = header_schema::<T::Value>(&mut TypeCx::new(), Direction::Input, T::NAME);
     let value = crate::validate::token_value(&document, &ty, &text);
     if let Err(report) = crate::validate::check(&document, &ty, &value) {
         return Err(HeaderRejection::Contract(report));

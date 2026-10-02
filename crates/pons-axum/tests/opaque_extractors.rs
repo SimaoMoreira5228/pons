@@ -1,5 +1,6 @@
+use axum::Json;
 use pons_axum::Router;
-use pons_axum::extract::{Json, RawForm, RawPathParams, RawQuery, Request};
+use pons_axum::extract::{RawForm, RawPathParams, RawQuery, Request};
 use pons_axum::routing::{get, post};
 use pons_core::Schema;
 use pons_ir::{ContentKind, Info, InlineType, OpaqueWire, PathSegment, TypeRef};

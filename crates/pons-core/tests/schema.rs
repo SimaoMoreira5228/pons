@@ -173,6 +173,15 @@ enum RequiredPayloads {
 
 #[derive(pons_core::Schema)]
 #[allow(dead_code)]
+struct PresenceMatrix {
+    value: String,
+    nickname: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    tag: Option<String>,
+}
+
+#[derive(pons_core::Schema)]
+#[allow(dead_code)]
 struct DefaultedOptions {
     #[serde(default)]
     nickname: Option<String>,
@@ -1114,7 +1123,8 @@ fn container_level_serde_default_makes_every_field_optional_on_input() {
     );
     assert!(
         both.iter()
-            .all(|field| field.presence == pons_ir::Presence::Optional)
+            .all(|field| field.presence == pons_ir::Presence::Required),
+        "a container default only fills missing keys when reading, so it does not reach the output side"
     );
     assert!(cx.diagnostics().is_empty());
 
@@ -1150,7 +1160,7 @@ fn enum_payload_presence_stays_direction_specific_without_a_container_default() 
             both,
             [
                 pons_ir::Presence::Required,
-                pons_ir::Presence::Optional,
+                pons_ir::Presence::Required,
                 pons_ir::Presence::Optional,
             ],
         ),
@@ -1419,6 +1429,104 @@ fn serde_accepts_a_missing_option_key_but_not_a_missing_plain_key() {
 }
 
 #[test]
+fn serde_writes_an_option_key_on_output_even_when_the_value_is_none() {
+    #[derive(serde::Serialize)]
+    struct Payload {
+        value: String,
+        nickname: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        tag: Option<String>,
+    }
+
+    let none = serde_json::to_value(Payload {
+        value: "a".to_owned(),
+        nickname: None,
+        tag: None,
+    })
+    .unwrap();
+    assert_eq!(none["value"], "a");
+    assert_eq!(
+        none["nickname"],
+        serde_json::Value::Null,
+        "a Serialize derive writes the key for None, so Presence::Required is right for output"
+    );
+    assert!(
+        none.get("tag").is_none(),
+        "skip_serializing_if is the only reason a written key is missing"
+    );
+
+    let some = serde_json::to_value(Payload {
+        value: "a".to_owned(),
+        nickname: Some("b".to_owned()),
+        tag: Some("c".to_owned()),
+    })
+    .unwrap();
+    assert_eq!(some["nickname"], "b");
+    assert_eq!(some["tag"], "c");
+}
+
+#[test]
+fn field_presence_is_resolved_by_the_side_the_serde_rule_belongs_to() {
+    let mut cx = TypeCx::new();
+    let input = PresenceMatrix::schema(&mut cx, Direction::Input);
+    let output = PresenceMatrix::schema(&mut cx, Direction::Output);
+    let both = PresenceMatrix::schema(&mut cx, Direction::Both);
+
+    for (reference, expected) in [
+        (
+            input,
+            [
+                pons_ir::Presence::Required,
+                pons_ir::Presence::Optional,
+                pons_ir::Presence::Optional,
+            ],
+        ),
+        (
+            output,
+            [
+                pons_ir::Presence::Required,
+                pons_ir::Presence::Required,
+                pons_ir::Presence::Optional,
+            ],
+        ),
+        (
+            both,
+            [
+                pons_ir::Presence::Required,
+                pons_ir::Presence::Required,
+                pons_ir::Presence::Optional,
+            ],
+        ),
+    ] {
+        let (fields, _) = struct_shape(&cx, &reference);
+        assert_eq!(
+            fields
+                .iter()
+                .map(|field| field.wire.as_str())
+                .collect::<Vec<_>>(),
+            ["value", "nickname", "tag"]
+        );
+        assert_eq!(
+            fields
+                .iter()
+                .map(|field| field.presence)
+                .collect::<Vec<_>>(),
+            expected
+        );
+        assert!(
+            fields[1..]
+                .iter()
+                .all(|field| matches!(field.ty, TypeRef::Inline(InlineType::Nullable { .. }))),
+            "an omitted key is still a nullable value, not a missing one"
+        );
+    }
+    assert!(cx.diagnostics().is_empty());
+
+    let (types, diagnostics) = cx.into_parts();
+    assert!(document(types, diagnostics).validate().is_ok());
+}
+
+#[test]
 fn an_option_field_is_optional_on_input_and_keeps_its_nullable_type() {
     let mut cx = TypeCx::new();
     let input = DefaultedOptions::schema(&mut cx, Direction::Input);
@@ -1439,7 +1547,8 @@ fn an_option_field_is_optional_on_input_and_keeps_its_nullable_type() {
     );
     assert!(
         both.iter()
-            .all(|field| field.presence == pons_ir::Presence::Optional)
+            .all(|field| field.presence == pons_ir::Presence::Required),
+        "an Option field is only implicitly optional to a reader, so it stays required once the type is also written"
     );
     for direction in [input, output, both] {
         assert!(

@@ -1,4 +1,5 @@
 use std::any::type_name;
+use std::cmp::Reverse;
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex, OnceLock};
 
@@ -11,26 +12,97 @@ use serde_json::Value;
 
 use crate::ViolationReport;
 
+const INPUT: &str = "input";
+
 pub(crate) fn request_contract<T: Schema>(
     extensions: &axum::http::Extensions,
-) -> (Arc<Document>, TypeRef) {
-    let document = extensions
-        .get::<Arc<Document>>()
-        .expect("a request extractor needs the document Router::into_axum installs")
-        .clone();
-    (document, request_type::<T>())
+    carrier: &str,
+) -> Result<(Arc<Document>, TypeRef), ViolationReport> {
+    let Some(document) = extensions.get::<Arc<Document>>() else {
+        return Err(violated(
+            "a request carrying the document Router::into_axum installs",
+            "a request carrying none".to_owned(),
+        ));
+    };
+    Ok((document.clone(), request_type::<T>(carrier)))
 }
 
-fn request_type<T: Schema>() -> TypeRef {
-    static REQUEST_TYPES: OnceLock<Mutex<BTreeMap<&'static str, TypeRef>>> = OnceLock::new();
+fn request_type<T: Schema>(carrier: &str) -> TypeRef {
+    static REQUEST_TYPES: OnceLock<Mutex<BTreeMap<(String, String), TypeRef>>> = OnceLock::new();
+    let (id, role) = (type_name::<T>(), carrier.to_owned());
+    let key = (id.to_owned(), role.clone());
     let mut types = REQUEST_TYPES
         .get_or_init(Default::default)
         .lock()
         .expect("the request type registry is never poisoned");
     types
-        .entry(type_name::<T>())
-        .or_insert_with(|| T::schema(&mut TypeCx::new(), Direction::Input))
+        .entry(key)
+        .or_insert_with(|| {
+            let mut cx = TypeCx::new();
+            match role.as_str() {
+                INPUT => T::schema(&mut cx, Direction::Input),
+                role => {
+                    cx.register_as(format!("{id}#{role}"), |cx| T::schema(cx, Direction::Input))
+                }
+            }
+        })
         .clone()
+}
+
+pub(crate) fn declared_media_type<'a>(
+    document: &'a Document,
+    request: &axum::extract::Request,
+    default: &'a str,
+) -> &'a str {
+    let Some(method) = method(request.method()) else {
+        return default;
+    };
+    document
+        .operations
+        .iter()
+        .filter(|operation| {
+            operation.method == method && path_matches(&operation.path, request.uri().path())
+        })
+        .min_by_key(|operation| specificity(&operation.path))
+        .and_then(|operation| operation.body.as_ref()?.media_type.as_deref())
+        .unwrap_or(default)
+}
+
+fn specificity(segments: &[pons_ir::PathSegment]) -> (Reverse<usize>, usize) {
+    let literals = segments
+        .iter()
+        .filter(|segment| matches!(segment, pons_ir::PathSegment::Literal { .. }))
+        .count();
+    let parameters = segments
+        .iter()
+        .filter(|segment| matches!(segment, pons_ir::PathSegment::Param { .. }))
+        .count();
+    (Reverse(literals), parameters)
+}
+
+fn method(method: &axum::http::Method) -> Option<pons_ir::Method> {
+    Some(match *method {
+        axum::http::Method::GET => pons_ir::Method::Get,
+        axum::http::Method::POST => pons_ir::Method::Post,
+        axum::http::Method::PUT => pons_ir::Method::Put,
+        axum::http::Method::PATCH => pons_ir::Method::Patch,
+        axum::http::Method::DELETE => pons_ir::Method::Delete,
+        axum::http::Method::HEAD => pons_ir::Method::Head,
+        axum::http::Method::OPTIONS => pons_ir::Method::Options,
+        _ => return None,
+    })
+}
+
+fn path_matches(segments: &[pons_ir::PathSegment], path: &str) -> bool {
+    let mut parts = path.split('/').filter(|part| !part.is_empty());
+    segments
+        .iter()
+        .all(|segment| match (segment, parts.next()) {
+            (pons_ir::PathSegment::Param { .. }, Some(_)) => true,
+            (pons_ir::PathSegment::Literal { lit }, Some(part)) => lit == part,
+            _ => false,
+        })
+        && parts.next().is_none()
 }
 
 pub(crate) fn check(
@@ -41,19 +113,20 @@ pub(crate) fn check(
     validate_value(document, ty, Direction::Input, value).map_err(ViolationReport::rejected)
 }
 
-pub(crate) fn check_pairs(
+pub(crate) fn read_pairs<T: serde::de::DeserializeOwned>(
     document: &Document,
     ty: &TypeRef,
     pairs: Vec<(String, String)>,
-) -> Result<(), ViolationReport> {
+) -> Result<T, ViolationReport> {
     let (value, mut violations) = object_value(document, ty, pairs);
     if let Err(found) = validate_value(document, ty, Direction::Input, &value) {
         violations.extend(found);
     }
-    match violations.is_empty() {
-        true => Ok(()),
-        false => Err(ViolationReport::rejected(violations)),
+    if !violations.is_empty() {
+        return Err(ViolationReport::rejected(violations));
     }
+    serde_json::from_value(value)
+        .map_err(|error| violated("a value the request type reads", error.to_string()))
 }
 
 pub(crate) fn violated(expected: &str, found: String) -> ViolationReport {
@@ -83,22 +156,115 @@ pub(crate) fn object_value(
     members(document, ty, &mut declared, &mut Vec::new());
     let mut entries = serde_json::Map::new();
     let mut violations = Vec::new();
-    for (wire, text) in pairs {
-        if entries.contains_key(&wire) {
-            violations.push(Violation::DuplicateItem {
-                path: pointer(&wire),
-                item: 1,
-                first: 0,
-            });
-            continue;
-        }
-        let value = match declared.iter().find(|(name, _)| name == &wire) {
-            Some((_, field)) => token_value(document, field, &text),
-            None => Value::String(text),
+    for (wire, texts) in grouped(pairs) {
+        let field = declared
+            .iter()
+            .find(|(name, _)| name == &wire)
+            .map(|(_, field)| *field);
+        let value = match field.map(|field| (field, array_item(document, field))) {
+            Some((field, Some(_))) => array_value(document, field, &wire, &texts, &mut violations),
+            Some((field, _)) if texts.len() > 1 => {
+                violations.push(Violation::Type {
+                    path: pointer(&wire),
+                    expected: "one value for a field that is not an array".to_owned(),
+                    found: format!("{} values", texts.len()),
+                });
+                token_value(document, field, &texts[texts.len() - 1])
+            }
+            Some((field, _)) => token_value(document, field, &texts[0]),
+            None => Value::String(texts[texts.len() - 1].clone()),
         };
         entries.insert(wire, value);
     }
     (Value::Object(entries), violations)
+}
+
+fn array_value(
+    document: &Document,
+    field: &TypeRef,
+    wire: &str,
+    texts: &[String],
+    violations: &mut Vec<Violation>,
+) -> Value {
+    let item = array_item(document, field).expect("an array field spells its item");
+    let unspellable = if texts.iter().any(|text| text.is_empty()) {
+        Some("an empty value")
+    } else if nested(document, item) && texts.iter().any(|text| spells_array(text).is_none()) {
+        Some("an item that is itself an array")
+    } else {
+        None
+    };
+    if let Some(found) = unspellable {
+        violations.push(Violation::Type {
+            path: pointer(wire),
+            expected: "a value a repeated key can carry".to_owned(),
+            found: found.to_owned(),
+        });
+        return Value::Array(Vec::new());
+    }
+    Value::Array(
+        texts
+            .iter()
+            .flat_map(|text| match spells_array(text) {
+                Some(items) => items,
+                None => vec![item_value(document, item, text)],
+            })
+            .collect(),
+    )
+}
+
+fn item_value(document: &Document, item: &TypeRef, text: &str) -> Value {
+    if carries_json(document, item) {
+        return serde_json::from_str(text).unwrap_or_else(|_| Value::String(text.to_owned()));
+    }
+    token_value(document, item, text)
+}
+
+fn spells_array(text: &str) -> Option<Vec<Value>> {
+    match serde_json::from_str::<Value>(text) {
+        Ok(Value::Array(items)) => Some(items),
+        _ => None,
+    }
+}
+
+fn nested(document: &Document, ty: &TypeRef) -> bool {
+    match ty {
+        TypeRef::Inline(InlineType::Array { .. }) => true,
+        TypeRef::Inline(InlineType::Nullable { inner }) => nested(document, inner),
+        TypeRef::Named(named) => match document.types.get(&named.id).map(|found| &found.definition)
+        {
+            Some(TypeKind::Newtype { inner }) => nested(document, inner),
+            _ => false,
+        },
+        _ => false,
+    }
+}
+
+fn carries_json(document: &Document, ty: &TypeRef) -> bool {
+    match ty {
+        TypeRef::Inline(InlineType::Any | InlineType::Map { .. } | InlineType::Tuple { .. }) => {
+            true
+        }
+        TypeRef::Inline(InlineType::Nullable { inner }) => carries_json(document, inner),
+        TypeRef::Named(named) => match document.types.get(&named.id).map(|found| &found.definition)
+        {
+            Some(TypeKind::Struct { .. }) => true,
+            Some(TypeKind::Newtype { inner }) => carries_json(document, inner),
+            _ => false,
+        },
+        _ => false,
+    }
+}
+
+fn grouped(pairs: Vec<(String, String)>) -> Vec<(String, Vec<String>)> {
+    let mut groups: Vec<(String, Vec<String>)> = Vec::new();
+    for (wire, text) in pairs {
+        match groups.iter_mut().find(|(name, _)| name == &wire) {
+            Some((_, texts)) => texts.push(text),
+            None => groups.push((wire, vec![text])),
+        }
+    }
+    groups
 }
 
 pub(crate) fn path_value(document: &Document, ty: &TypeRef, pairs: Vec<(String, String)>) -> Value {
@@ -152,21 +318,32 @@ fn members<'a>(
     if seen.contains(&named.id) {
         return;
     }
-    let Some(TypeKind::Struct {
-        fields, flattened, ..
-    }) = document.types.get(&named.id).map(|found| &found.definition)
-    else {
+    let Some(definition) = document.types.get(&named.id).map(|found| &found.definition) else {
         return;
     };
     seen.push(named.id.clone());
-    found.extend(fields.iter().map(|field| (field.wire.clone(), &field.ty)));
-    flattened
-        .iter()
-        .for_each(|ty| members(document, ty, found, seen));
+    match definition {
+        TypeKind::Newtype { inner } => members(document, inner, found, seen),
+        TypeKind::Struct {
+            fields, flattened, ..
+        } => {
+            found.extend(fields.iter().map(|field| (field.wire.clone(), &field.ty)));
+            flattened
+                .iter()
+                .for_each(|ty| members(document, ty, found, seen));
+        }
+        TypeKind::Enum { .. } => {}
+    }
     seen.pop();
 }
 
 pub(crate) fn token_value(document: &Document, ty: &TypeRef, text: &str) -> Value {
+    if let Some(item) = array_item(document, ty) {
+        return Value::Array(match serde_json::from_str::<Value>(text) {
+            Ok(Value::Array(items)) => items,
+            _ => vec![token_value(document, item, text)],
+        });
+    }
     match ty {
         TypeRef::Named(named) => {
             match document.types.get(&named.id).map(|found| &found.definition) {
@@ -194,6 +371,19 @@ pub(crate) fn token_value(document: &Document, ty: &TypeRef, text: &str) -> Valu
             _ => Value::String(text.to_owned()),
         },
         _ => Value::String(text.to_owned()),
+    }
+}
+
+fn array_item<'a>(document: &'a Document, ty: &'a TypeRef) -> Option<&'a TypeRef> {
+    match ty {
+        TypeRef::Named(named) => match document.types.get(&named.id).map(|found| &found.definition)
+        {
+            Some(TypeKind::Newtype { inner }) => array_item(document, inner),
+            _ => None,
+        },
+        TypeRef::Inline(InlineType::Nullable { inner }) => array_item(document, inner),
+        TypeRef::Inline(InlineType::Array { item, .. }) => Some(item),
+        _ => None,
     }
 }
 
@@ -279,6 +469,85 @@ mod tests {
                             },
                             "presence": "optional",
                         },
+                        {
+                            "wire": "tags",
+                            "ident": ["tags"],
+                            "ty": {
+                                "kind": "array",
+                                "item": {"kind": "string", "pattern": "^[a-z]+$"},
+                            },
+                            "presence": "optional",
+                        },
+                    ],
+                },
+                "Page#input": {
+                    "name": ["page"],
+                    "direction": "input",
+                    "kind": "struct",
+                    "openness": "reject",
+                    "fields": [
+                        {
+                            "wire": "cursor",
+                            "ident": ["cursor"],
+                            "ty": {
+                                "kind": "int",
+                                "bits": 32,
+                                "signed": false,
+                                "wire": "number",
+                                "maximum": 100,
+                            },
+                            "presence": "required",
+                        },
+                    ],
+                },
+                "Wrapped#input": {
+                    "name": ["wrapped"],
+                    "direction": "input",
+                    "kind": "newtype",
+                    "inner": {"ref": "Filter#input"},
+                },
+                "Paged#input": {
+                    "name": ["paged"],
+                    "direction": "input",
+                    "kind": "struct",
+                    "openness": "reject",
+                    "flattened": [{"ref": "WrappedPage#input"}],
+                },
+                "WrappedPage#input": {
+                    "name": ["wrapped", "page"],
+                    "direction": "input",
+                    "kind": "newtype",
+                    "inner": {"ref": "Page#input"},
+                },
+                "Nested#input": {
+                    "name": ["nested"],
+                    "direction": "input",
+                    "kind": "struct",
+                    "openness": "reject",
+                    "fields": [
+                        {
+                            "wire": "labels",
+                            "ident": ["labels"],
+                            "ty": {
+                                "kind": "array",
+                                "item": {"kind": "array", "item": {"kind": "string"}},
+                            },
+                            "presence": "required",
+                        },
+                    ],
+                },
+                "Objects#input": {
+                    "name": ["objects"],
+                    "direction": "input",
+                    "kind": "struct",
+                    "openness": "reject",
+                    "fields": [
+                        {
+                            "wire": "payload",
+                            "ident": ["payload"],
+                            "ty": {"kind": "array", "item": {"kind": "any"}},
+                            "presence": "required",
+                        },
                     ],
                 },
             },
@@ -293,13 +562,39 @@ mod tests {
         })
     }
 
+    fn named(id: &str) -> TypeRef {
+        TypeRef::Named(pons_ir::NamedRef {
+            id: id.into(),
+            variant: None,
+        })
+    }
+
+    fn reported(
+        contract: &Document,
+        ty: &TypeRef,
+        pairs: &[(&str, &str)],
+    ) -> Result<Value, String> {
+        let pairs = pairs
+            .iter()
+            .map(|(wire, text)| ((*wire).to_owned(), (*text).to_owned()))
+            .collect();
+        read_pairs::<Value>(contract, ty, pairs).map_err(|report| {
+            report
+                .violations
+                .iter()
+                .map(|violation| format!("{}: {}", violation.path, violation.reason))
+                .collect::<Vec<_>>()
+                .join(", ")
+        })
+    }
+
     fn found(pairs: &[(&str, &str)]) -> Vec<String> {
         let contract = contract();
         let pairs = pairs
             .iter()
             .map(|(wire, text)| ((*wire).to_owned(), (*text).to_owned()))
             .collect();
-        check_pairs(&contract, &filter(), pairs)
+        read_pairs::<Value>(&contract, &filter(), pairs)
             .err()
             .map(|report| {
                 report
@@ -373,7 +668,158 @@ mod tests {
         );
         assert_eq!(
             found(&[("slug", "ada"), ("limit", "1"), ("limit", "2")]),
-            ["/limit: array item 1 repeats item 0"]
+            ["/limit: expected one value for a field that is not an array, found 2 values"]
+        );
+    }
+
+    #[test]
+    fn an_array_field_reads_every_value_the_request_spellings_carry() {
+        assert_eq!(
+            found(&[("slug", "ada"), ("tags", "[\"x\",\"y\"]")]),
+            Vec::<String>::new()
+        );
+
+        assert_eq!(
+            found(&[("slug", "ada"), ("tags", "x"), ("tags", "y")]),
+            Vec::<String>::new()
+        );
+        assert_eq!(
+            found(&[("slug", "ada"), ("tags", "x"), ("tags", "Y")]),
+            ["/tags/1: string does not match the pattern ^[a-z]+$"]
+        );
+        assert_eq!(
+            found(&[("slug", "ada"), ("tags", "[\"x\",\"Y\"]")]),
+            ["/tags/1: string does not match the pattern ^[a-z]+$"]
+        );
+    }
+
+    #[test]
+    fn a_carrier_newtype_publishes_the_members_of_the_struct_it_wraps() {
+        let contract = contract();
+        assert_eq!(
+            reported(
+                &contract,
+                &named("Wrapped#input"),
+                &[("slug", "ada"), ("limit", "2")]
+            ),
+            Ok(json!({"slug": "ada", "limit": 2}))
+        );
+        assert_eq!(
+            reported(
+                &contract,
+                &named("Wrapped#input"),
+                &[("slug", "ada"), ("limit", "99")]
+            ),
+            Err("/limit: integer is above its maximum of 10".to_owned())
+        );
+    }
+
+    #[test]
+    fn a_newtype_wrapped_flattened_member_publishes_its_own_members() {
+        let contract = contract();
+        assert_eq!(
+            reported(&contract, &named("Paged#input"), &[("cursor", "7")]),
+            Ok(json!({"cursor": 7}))
+        );
+        assert_eq!(
+            reported(&contract, &named("Paged#input"), &[("cursor", "900")]),
+            Err("/cursor: integer is above its maximum of 100".to_owned())
+        );
+        assert_eq!(
+            reported(&contract, &named("Paged#input"), &[("cursor", "seven")]),
+            Err("/cursor: expected a number, found a string".to_owned())
+        );
+    }
+
+    #[test]
+    fn every_published_method_is_read_and_no_other_is_folded_onto_one() {
+        for (sent, expected) in [
+            ("GET", pons_ir::Method::Get),
+            ("POST", pons_ir::Method::Post),
+            ("PUT", pons_ir::Method::Put),
+            ("PATCH", pons_ir::Method::Patch),
+            ("DELETE", pons_ir::Method::Delete),
+            ("HEAD", pons_ir::Method::Head),
+            ("OPTIONS", pons_ir::Method::Options),
+        ] {
+            let sent = axum::http::Method::from_bytes(sent.as_bytes()).unwrap();
+            assert_eq!(method(&sent), Some(expected), "{sent} is published");
+        }
+        for sent in [
+            axum::http::Method::CONNECT,
+            axum::http::Method::TRACE,
+            axum::http::Method::from_bytes(b"PROPFIND").unwrap(),
+        ] {
+            assert_eq!(
+                method(&sent),
+                None,
+                "{sent} is routable but no operation can publish it, so it reads no operation's body"
+            );
+        }
+    }
+
+    #[test]
+    fn a_repeated_key_cannot_carry_an_item_that_is_itself_an_array() {
+        let contract = contract();
+        assert_eq!(
+            reported(
+                &contract,
+                &named("Nested#input"),
+                &[("labels", r#"[["a"],["b"]]"#)]
+            ),
+            Ok(json!({"labels": [["a"], ["b"]]})),
+            "one token that is a JSON array carries the whole nested field"
+        );
+        for pairs in [
+            vec![("labels", "a"), ("labels", "b")],
+            vec![("labels", "a")],
+        ] {
+            assert_eq!(
+                reported(&contract, &named("Nested#input"), &pairs),
+                Err("/labels: expected a value a repeated key can carry, found an item that is itself an array".to_owned()),
+                "{pairs:?} is reported instead of being read as a flatter array"
+            );
+        }
+    }
+
+    #[test]
+    fn a_repeated_key_cannot_carry_an_empty_array() {
+        let contract = contract();
+        assert_eq!(
+            reported(&contract, &filter(), &[("slug", "ada"), ("tags", "[]")]),
+            Ok(json!({"slug": "ada", "tags": []})),
+            "an empty JSON array spells an empty array"
+        );
+        assert_eq!(
+            reported(&contract, &filter(), &[("slug", "ada"), ("tags", "")]),
+            Err(
+                "/tags: expected a value a repeated key can carry, found an empty value".to_owned()
+            ),
+            "a key with no value spells one empty item, which the field does not declare"
+        );
+    }
+
+    #[test]
+    fn a_repeated_key_reads_the_json_a_value_carries() {
+        let contract = contract();
+        let value = json!({"payload": [{"a": 1}, {"b": 2}]});
+        assert_eq!(
+            reported(
+                &contract,
+                &named("Objects#input"),
+                &[("payload", r#"[{"a":1},{"b":2}]"#)]
+            ),
+            Ok(value.clone()),
+            "one token that is a JSON array carries the whole field"
+        );
+        assert_eq!(
+            reported(
+                &contract,
+                &named("Objects#input"),
+                &[("payload", r#"{"a":1}"#), ("payload", r#"{"b":2}"#)]
+            ),
+            Ok(value),
+            "a repeated key reads the same value, not the text it was spelled with"
         );
     }
 }

@@ -1,6 +1,8 @@
 use axum::response::{IntoResponse, Response};
 use pons_core::{ErrorSpec, Schema, TypeCx};
-use pons_ir::{Direction, Doc, ErrorContent, ErrorResponse, ErrorStatus, Presence, ResponseHeader};
+use pons_ir::{
+    Direction, Doc, ErrorContent, ErrorResponse, ErrorStatus, Presence, ResponseHeader, TypeRef,
+};
 
 use crate::JsonResponse;
 use crate::describe::{
@@ -10,6 +12,7 @@ use crate::describe::{
 use crate::response::WithResponse;
 
 pub(crate) const REJECTED: u16 = 422;
+pub(crate) const REJECTED_NAME: [&str; 2] = ["request", "rejected"];
 
 #[derive(Debug, serde::Serialize, pons_core::Schema)]
 #[serde(deny_unknown_fields)]
@@ -40,12 +43,27 @@ impl ViolationReport {
 
 impl ErrorSpec for ViolationReport {
     fn errors(cx: &mut TypeCx) -> Vec<ErrorResponse> {
-        vec![ErrorResponse {
+        vec![Self::error(Some(<Self as Schema>::schema(
+            cx,
+            Direction::Output,
+        )))]
+    }
+}
+
+impl ViolationReport {
+    pub(crate) fn error(body: Option<TypeRef>) -> ErrorResponse {
+        ErrorResponse {
             status: ErrorStatus::Exact(REJECTED),
-            name: vec!["request".to_owned(), "rejected".to_owned()],
-            content: ErrorContent::Json,
+            name: REJECTED_NAME
+                .iter()
+                .map(|word| (*word).to_owned())
+                .collect(),
+            content: match &body {
+                Some(_) => ErrorContent::Json,
+                None => ErrorContent::Empty,
+            },
             media_type: None,
-            body: Some(<Self as Schema>::schema(cx, Direction::Output)),
+            body,
             headers: Vec::new(),
             retryable: Some(false),
             doc: Some(Doc {
@@ -57,7 +75,7 @@ impl ErrorSpec for ViolationReport {
                 tags: Vec::new(),
             }),
             ext: Default::default(),
-        }]
+        }
     }
 }
 

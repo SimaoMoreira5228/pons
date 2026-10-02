@@ -1,4 +1,4 @@
-use axum::body::{Body, Bytes};
+use axum::body::Bytes;
 use axum::extract::{FromRequest, FromRequestParts, Request};
 use axum::http::Method;
 use pons_core::Schema;
@@ -8,7 +8,12 @@ use serde_json::Value;
 
 use crate::ViolationReport;
 use crate::describe::{DescribeRequest, OperationCx};
-use crate::validate::{check, check_pairs, decode_pairs, path_value, request_contract, violated};
+use crate::validate::{
+    check, declared_media_type, decode_pairs, path_value, read_pairs, request_contract, violated,
+};
+
+const JSON_MEDIA_TYPE: &str = "application/json";
+const FORM_MEDIA_TYPE: &str = "application/x-www-form-urlencoded";
 
 pub struct Json<T>(pub T);
 
@@ -20,14 +25,39 @@ where
     type Rejection = ViolationReport;
 
     async fn from_request(request: Request, state: &S) -> Result<Self, Self::Rejection> {
-        let (document, ty) = request_contract::<T>(request.extensions());
+        let (document, ty) = request_contract::<T>(request.extensions(), "input")?;
+        let expected = declared_media_type(&document, &request, JSON_MEDIA_TYPE);
+        let announced = announced_media_type(&request, expected)?;
         let bytes = read_body(request, state).await?;
+        refuse_unannounced(expected, announced, &bytes)?;
         let value: Value = serde_json::from_slice(&bytes)
             .map_err(|error| violated("a JSON document", error.to_string()))?;
         check(&document, &ty, &value)?;
         let value = serde_json::from_value(value)
             .map_err(|error| violated("a value the request type reads", error.to_string()))?;
         Ok(Json(value))
+    }
+}
+
+fn announced_media_type(request: &Request, expected: &str) -> Result<bool, ViolationReport> {
+    let Some(found) = request.headers().get(axum::http::header::CONTENT_TYPE) else {
+        return Ok(false);
+    };
+    let found = found.to_str().unwrap_or_default();
+    match pons_ir::media_type_matches(found, expected) {
+        true => Ok(true),
+        false => Err(violated(expected, found.to_owned())),
+    }
+}
+
+fn refuse_unannounced(
+    expected: &str,
+    announced: bool,
+    bytes: &Bytes,
+) -> Result<(), ViolationReport> {
+    match announced || bytes.is_empty() {
+        true => Ok(()),
+        false => Err(violated(expected, String::new())),
     }
 }
 
@@ -48,24 +78,23 @@ where
     type Rejection = ViolationReport;
 
     async fn from_request(request: Request, state: &S) -> Result<Self, Self::Rejection> {
-        let (document, ty) = request_contract::<T>(request.extensions());
+        let (document, ty) = request_contract::<T>(request.extensions(), "form")?;
         if matches!(*request.method(), Method::GET | Method::HEAD) {
-            let query = request.uri().query().unwrap_or_default().to_owned();
-            check_pairs(&document, &ty, decode_pairs(&query))?;
-            return Ok(Form(read_form(request, state).await?));
+            return Ok(Form(read_pairs(
+                &document,
+                &ty,
+                decode_pairs(request.uri().query().unwrap_or_default()),
+            )?));
         }
-        let method = request.method().clone();
-        let headers = request.headers().clone();
+        let expected = declared_media_type(&document, &request, FORM_MEDIA_TYPE);
+        let announced = announced_media_type(&request, expected)?;
         let bytes = read_body(request, state).await?;
-        check_pairs(
+        refuse_unannounced(expected, announced, &bytes)?;
+        Ok(Form(read_pairs(
             &document,
             &ty,
             decode_pairs(&String::from_utf8_lossy(&bytes)),
-        )?;
-        let mut body = Request::new(Body::from(bytes));
-        *body.method_mut() = method;
-        *body.headers_mut() = headers;
-        Ok(Form(read_form(body, state).await?))
+        )?))
     }
 }
 
@@ -89,15 +118,12 @@ where
         parts: &mut axum::http::request::Parts,
         _: &S,
     ) -> Result<Self, Self::Rejection> {
-        let (document, ty) = request_contract::<T>(&parts.extensions);
-        check_pairs(
+        let (document, ty) = request_contract::<T>(&parts.extensions, "query")?;
+        Ok(Query(read_pairs(
             &document,
             &ty,
             decode_pairs(parts.uri.query().unwrap_or_default()),
-        )?;
-        let value = axum::extract::Query::try_from_uri(&parts.uri)
-            .map_err(|error| violated("a query the request type reads", error.to_string()))?;
-        Ok(Query(value.0))
+        )?))
     }
 }
 
@@ -121,7 +147,7 @@ where
         parts: &mut axum::http::request::Parts,
         state: &S,
     ) -> Result<Self, Self::Rejection> {
-        let (document, ty) = request_contract::<T>(&parts.extensions);
+        let (document, ty) = request_contract::<T>(&parts.extensions, "path")?;
         let params = axum::extract::RawPathParams::from_request_parts(parts, state)
             .await
             .map_err(|error| violated("path parameters the route declares", error.to_string()))?;
@@ -148,14 +174,4 @@ async fn read_body<S: Send + Sync>(request: Request, state: &S) -> Result<Bytes,
     Bytes::from_request(request, state)
         .await
         .map_err(|error| violated("a readable request body", error.to_string()))
-}
-
-async fn read_form<T: DeserializeOwned, S: Send + Sync>(
-    request: Request,
-    state: &S,
-) -> Result<T, ViolationReport> {
-    axum::extract::Form::<T>::from_request(request, state)
-        .await
-        .map(|form| form.0)
-        .map_err(|error| violated("a form the request type reads", error.to_string()))
 }

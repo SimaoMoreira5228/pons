@@ -422,14 +422,14 @@ fn field_body(
     let wire_in = field.attrs.name().deserialize_name();
     let wire_out = field.attrs.name().serialize_name();
     let ident = words(&field.member.to_token_stream().to_string());
+
     let optional_on_input = container_default || has_default(&field.attrs) || is_option(field.ty);
     let optional_on_output = field.attrs.skip_serializing_if().is_some();
     let doc = doc_value(&field.original.attrs);
     let presence = quote! {
         let presence = match direction {
             ::pons_core::ir::Direction::Input => if #optional_on_input { ::pons_core::ir::Presence::Optional } else { ::pons_core::ir::Presence::Required },
-            ::pons_core::ir::Direction::Output => if #optional_on_output { ::pons_core::ir::Presence::Optional } else { ::pons_core::ir::Presence::Required },
-            ::pons_core::ir::Direction::Both => if #optional_on_input || #optional_on_output { ::pons_core::ir::Presence::Optional } else { ::pons_core::ir::Presence::Required },
+            ::pons_core::ir::Direction::Output | ::pons_core::ir::Direction::Both => if #optional_on_output { ::pons_core::ir::Presence::Optional } else { ::pons_core::ir::Presence::Required },
         };
     };
     let ty = field_type_expression(field);

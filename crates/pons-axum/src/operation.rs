@@ -1,11 +1,10 @@
 use std::collections::{BTreeMap, HashMap};
 
-use pons_core::ErrorSpec;
 use pons_ir::{
-    Diagnostic, Method, Operation, OperationSemantics, PathSegment, TypeDef, TypeKind, TypeRef,
+    Diagnostic, Direction, ErrorStatus, Method, Operation, OperationSemantics, PathSegment,
+    TypeDef, TypeKind, TypeRef,
 };
 
-use crate::ViolationReport;
 use crate::describe::OperationCx;
 use crate::metadata::OperationMeta;
 use crate::operation_cx::push_diagnostic;
@@ -20,6 +19,7 @@ pub(crate) struct RouteDescription {
 pub(crate) struct BuiltOperation {
     pub operation: Operation,
     pub types: BTreeMap<String, TypeDef>,
+    pub carriers: Vec<TypeRef>,
 }
 
 pub(crate) fn build(path: &str, description: RouteDescription) -> BuiltOperation {
@@ -31,7 +31,7 @@ pub(crate) fn build(path: &str, description: RouteDescription) -> BuiltOperation
     } = description;
     let mut diagnostics = cx.diagnostics.clone();
     if cx.validated {
-        cx.errors.extend(ViolationReport::errors(&mut cx.types));
+        declare_rejection(&mut cx, method, &mut diagnostics);
     }
     if cx.path_types.len() > 1 {
         push_diagnostic(
@@ -75,7 +75,42 @@ pub(crate) fn build(path: &str, description: RouteDescription) -> BuiltOperation
         ext: BTreeMap::new(),
         diagnostics,
     };
-    BuiltOperation { operation, types }
+    BuiltOperation {
+        carriers: cx.carriers,
+        operation,
+        types,
+    }
+}
+
+fn declare_rejection(cx: &mut OperationCx, method: Method, diagnostics: &mut Vec<Diagnostic>) {
+    let status = ErrorStatus::Exact(crate::error::REJECTED);
+    if let Some(declared) = cx.errors.iter().find(|error| error.status == status) {
+        let name = format!("{:?}", declared.name);
+        if method == Method::Head && declared.body.is_some() {
+            return push_diagnostic(
+                diagnostics,
+                "PONS-E102",
+                format!(
+                    "a HEAD operation cannot serve the request rejection as {name}, which carries a body"
+                ),
+            );
+        }
+        return push_diagnostic(
+            diagnostics,
+            "PONS-W101",
+            format!(
+                "a request is rejected as {name}, the {status:?} the operation already declares"
+            ),
+        );
+    }
+    let body = match method {
+        Method::Head => None,
+        _ => Some(<crate::ViolationReport as pons_core::Schema>::schema(
+            &mut cx.types,
+            Direction::Output,
+        )),
+    };
+    cx.errors.push(crate::ViolationReport::error(body));
 }
 
 fn path_types(types: &BTreeMap<String, TypeDef>, carriers: &[TypeRef]) -> HashMap<String, TypeRef> {

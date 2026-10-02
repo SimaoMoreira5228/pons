@@ -11,8 +11,8 @@ use pons_axum::{
 use pons_axum::{Form, Path, Query};
 use pons_core::Schema;
 use pons_ir::{
-    AuthScheme, ContentKind, CredentialLocator, CredentialProvision, Info, InlineType, OpaqueWire,
-    Operation, PathSegment, ResponseStatus, TypeKind, TypeRef,
+    AuthScheme, ContentKind, CredentialLocator, CredentialProvision, Field, Info, InlineType,
+    ObjectOpenness, OpaqueWire, Operation, PathSegment, ResponseStatus, TypeKind, TypeRef,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -31,6 +31,46 @@ struct FilePath {
 
 #[derive(Deserialize, Schema)]
 #[serde(deny_unknown_fields)]
+struct Both {
+    slug: String,
+    limit: Option<u16>,
+}
+
+async fn both_query(Query(query): Query<Both>) -> axum::Json<User> {
+    let _ = (query.slug, query.limit);
+    axum::Json(User {
+        id: 1,
+        name: "Ada".into(),
+    })
+}
+
+async fn both_body(pons_axum::Json(body): pons_axum::Json<Both>) -> axum::Json<User> {
+    let _ = (body.slug, body.limit);
+    axum::Json(User {
+        id: 1,
+        name: "Ada".into(),
+    })
+}
+
+async fn query_and_body(
+    Query(_query): Query<Q>,
+    pons_axum::Json(_body): pons_axum::Json<Q>,
+) -> axum::Json<User> {
+    axum::Json(User {
+        id: 1,
+        name: "Ada".into(),
+    })
+}
+
+async fn query_and_path(Query(_query): Query<Q>, Path(_path): Path<Q>) -> axum::Json<User> {
+    axum::Json(User {
+        id: 1,
+        name: "Ada".into(),
+    })
+}
+
+#[derive(Deserialize, Schema)]
+#[serde(deny_unknown_fields)]
 struct UserQuery {
     #[serde(default)]
     limit: Option<u16>,
@@ -43,10 +83,32 @@ struct Q {
     limit: Option<u16>,
 }
 
-#[derive(Deserialize, Schema)]
-#[serde(deny_unknown_fields)]
-struct RequiredNullableQ {
-    limit: Option<u16>,
+#[derive(Deserialize)]
+struct RequiredNullableQ;
+
+impl Schema for RequiredNullableQ {
+    fn schema(cx: &mut pons_core::TypeCx, direction: pons_ir::Direction) -> TypeRef {
+        cx.named::<Self>(
+            vec!["required".into(), "nullable".into(), "q".into()],
+            direction,
+            None,
+            |cx| TypeKind::Struct {
+                fields: vec![Field {
+                    wire: "limit".into(),
+                    ident: vec!["limit".into()],
+                    ty: <Option<u16> as Schema>::schema(cx, direction),
+                    presence: pons_ir::Presence::Required,
+                    default: Default::default(),
+                    access: None,
+                    doc: None,
+                    diagnostics: Vec::new(),
+                    ext: Default::default(),
+                }],
+                flattened: Vec::new(),
+                openness: ObjectOpenness::Reject,
+            },
+        )
+    }
 }
 
 #[derive(Serialize, Schema)]
@@ -123,24 +185,24 @@ async fn get_user(
     Path(path): Path<UserPath>,
     Query(query): Query<UserQuery>,
     State(state): State<AppState>,
-) -> pons_axum::extract::Json<User> {
+) -> axum::Json<User> {
     let _ = (path.id, query.limit, state);
-    pons_axum::extract::Json(User {
+    axum::Json(User {
         id: 1,
         name: "Ada".into(),
     })
 }
 
-async fn list_users(State(_state): State<AppState>) -> pons_axum::extract::Json<Vec<User>> {
-    pons_axum::extract::Json(vec![User {
+async fn list_users(State(_state): State<AppState>) -> axum::Json<Vec<User>> {
+    axum::Json(vec![User {
         id: 1,
         name: "Ada".into(),
     }])
 }
 
-async fn get_file(Path(path): Path<FilePath>) -> pons_axum::extract::Json<User> {
+async fn get_file(Path(path): Path<FilePath>) -> axum::Json<User> {
     let _ = path.rest;
-    pons_axum::extract::Json(User {
+    axum::Json(User {
         id: 1,
         name: "Ada".into(),
     })
@@ -149,33 +211,32 @@ async fn get_file(Path(path): Path<FilePath>) -> pons_axum::extract::Json<User> 
 async fn headers(
     Header(request_id): Header<RequestId>,
     OptionalHeader(retry): OptionalHeader<Retry>,
-) -> pons_axum::extract::Json<User> {
+) -> axum::Json<User> {
     let _ = (request_id, retry);
-    pons_axum::extract::Json(User {
+    axum::Json(User {
         id: 1,
         name: "Ada".into(),
     })
 }
 
-async fn provisioned(_provides: Provides) -> pons_axum::extract::Json<User> {
-    pons_axum::extract::Json(User {
+async fn provisioned(_provides: Provides) -> axum::Json<User> {
+    axum::Json(User {
         id: 1,
         name: "Ada".into(),
     })
 }
 
-async fn authenticated(auth: Auth<Provides>) -> pons_axum::extract::Json<User> {
+async fn authenticated(auth: Auth<Provides>) -> axum::Json<User> {
     let _ = auth.into_inner();
-    pons_axum::extract::Json(User {
+    axum::Json(User {
         id: 1,
         name: "Ada".into(),
     })
 }
 
-async fn response_headers() -> WithStatus<201, WithHeader<TraceId, pons_axum::extract::Json<User>>>
-{
+async fn response_headers() -> WithStatus<201, WithHeader<TraceId, axum::Json<User>>> {
     WithStatus::new(WithHeader::new(
-        pons_axum::extract::Json(User {
+        axum::Json(User {
             id: 1,
             name: "Ada".into(),
         }),
@@ -183,9 +244,9 @@ async fn response_headers() -> WithStatus<201, WithHeader<TraceId, pons_axum::ex
     ))
 }
 
-async fn optional_response_headers() -> WithOptionalHeader<Retry, pons_axum::extract::Json<User>> {
+async fn optional_response_headers() -> WithOptionalHeader<Retry, axum::Json<User>> {
     WithOptionalHeader::new(
-        pons_axum::extract::Json(User {
+        axum::Json(User {
             id: 1,
             name: "Ada".into(),
         }),
@@ -228,70 +289,64 @@ impl axum::response::IntoResponse for UserError {
     }
 }
 
-async fn typed_user() -> Result<pons_axum::extract::Json<User>, UserError> {
+async fn typed_user() -> Result<axum::Json<User>, UserError> {
     Err(UserError::Missing)
 }
 
 async fn create_user(
     pons_axum::Json(input): pons_axum::Json<CreateUser>,
-) -> WithStatus<201, pons_axum::extract::Json<User>> {
+) -> WithStatus<201, axum::Json<User>> {
     let name = input.name;
-    WithStatus::new(pons_axum::extract::Json(User { id: 1, name }))
+    WithStatus::new(axum::Json(User { id: 1, name }))
 }
 
 async fn created_user(
     pons_axum::Json(input): pons_axum::Json<CreateUser>,
-) -> Result<WithStatus<201, pons_axum::extract::Json<User>>, UserError> {
+) -> Result<WithStatus<201, axum::Json<User>>, UserError> {
     let name = input.name;
-    Ok(WithStatus::new(pons_axum::extract::Json(User {
-        id: 1,
-        name,
-    })))
+    Ok(WithStatus::new(axum::Json(User { id: 1, name })))
 }
 
-async fn form_user(Form(input): Form<CreateUser>) -> pons_axum::extract::Json<User> {
-    pons_axum::extract::Json(User {
+async fn form_user(Form(input): Form<CreateUser>) -> axum::Json<User> {
+    axum::Json(User {
         id: 1,
         name: input.name,
     })
 }
 
-async fn query_q(Query(query): Query<Q>) -> pons_axum::extract::Json<User> {
+async fn query_q(Query(query): Query<Q>) -> axum::Json<User> {
     let _ = query.limit;
-    pons_axum::extract::Json(User {
+    axum::Json(User {
         id: 1,
         name: "Ada".into(),
     })
 }
 
-async fn form_q(Form(form): Form<Q>) -> pons_axum::extract::Json<User> {
+async fn form_q(Form(form): Form<Q>) -> axum::Json<User> {
     let _ = form.limit;
-    pons_axum::extract::Json(User {
+    axum::Json(User {
         id: 1,
         name: "Ada".into(),
     })
 }
 
-async fn path_q(Path(path): Path<Q>) -> pons_axum::extract::Json<User> {
+async fn path_q(Path(path): Path<Q>) -> axum::Json<User> {
     let _ = path.limit;
-    pons_axum::extract::Json(User {
+    axum::Json(User {
         id: 1,
         name: "Ada".into(),
     })
 }
 
-async fn required_nullable_q(
-    Query(query): Query<RequiredNullableQ>,
-) -> pons_axum::extract::Json<User> {
-    let _ = query.limit;
-    pons_axum::extract::Json(User {
+async fn required_nullable_q(Query(_query): Query<RequiredNullableQ>) -> axum::Json<User> {
+    axum::Json(User {
         id: 1,
         name: "Ada".into(),
     })
 }
 
-async fn multipart_user(_multipart: Multipart) -> pons_axum::extract::Json<User> {
-    pons_axum::extract::Json(User {
+async fn multipart_user(_multipart: Multipart) -> axum::Json<User> {
+    axum::Json(User {
         id: 1,
         name: "Ada".into(),
     })
@@ -309,30 +364,30 @@ enum FlattenedCreate {
 
 async fn flattened_create(
     pons_axum::Json(FlattenedCreate::Simple { name, .. }): pons_axum::Json<FlattenedCreate>,
-) -> pons_axum::extract::Json<User> {
-    pons_axum::extract::Json(User { id: 1, name })
+) -> axum::Json<User> {
+    axum::Json(User { id: 1, name })
 }
 
 async fn delete_user() -> NoContent {
     NoContent
 }
 
-async fn unservable_status() -> WithStatus<600, pons_axum::extract::Json<User>> {
-    WithStatus::new(pons_axum::extract::Json(User {
+async fn unservable_status() -> WithStatus<600, axum::Json<User>> {
+    WithStatus::new(axum::Json(User {
         id: 1,
         name: "Ada".into(),
     }))
 }
 
-async fn informational_status() -> WithStatus<100, pons_axum::extract::Json<User>> {
-    WithStatus::new(pons_axum::extract::Json(User {
+async fn informational_status() -> WithStatus<100, axum::Json<User>> {
+    WithStatus::new(axum::Json(User {
         id: 1,
         name: "Ada".into(),
     }))
 }
 
-async fn first_user() -> pons_axum::extract::Json<User> {
-    pons_axum::extract::Json(User {
+async fn first_user() -> axum::Json<User> {
+    axum::Json(User {
         id: 1,
         name: "Ada".into(),
     })
@@ -407,8 +462,8 @@ fn get_status(app: &mut axum::Router<()>, path: &str, authorized: bool) -> Statu
     block_on(app.call(request)).unwrap().status()
 }
 
-async fn raw_headers(_headers: pons_axum::http::HeaderMap) -> pons_axum::extract::Json<User> {
-    pons_axum::extract::Json(User {
+async fn raw_headers(_headers: pons_axum::http::HeaderMap) -> axum::Json<User> {
+    axum::Json(User {
         id: 1,
         name: "Ada".into(),
     })
@@ -418,10 +473,10 @@ async fn raw_response() -> axum::response::Response {
     StatusCode::OK.into_response()
 }
 
-async fn dynamic_status() -> (StatusCode, pons_axum::extract::Json<User>) {
+async fn dynamic_status() -> (StatusCode, axum::Json<User>) {
     (
         StatusCode::CREATED,
-        pons_axum::extract::Json(User {
+        axum::Json(User {
             id: 1,
             name: "Ada".into(),
         }),
@@ -453,6 +508,101 @@ fn operation<'a>(document: &'a pons_ir::Document, literal: &str) -> &'a Operatio
 
 fn optional_integer(ty: &TypeRef) -> bool {
     matches!(ty, TypeRef::Inline(InlineType::Int { bits: 16, .. }))
+}
+
+fn nullable_integer(ty: &TypeRef) -> bool {
+    matches!(
+        ty,
+        TypeRef::Inline(InlineType::Nullable { inner }) if optional_integer(inner)
+    )
+}
+
+fn limit_field<'a>(document: &'a pons_ir::Document, ty: &'a TypeRef) -> (&'a str, TypeRef) {
+    let TypeRef::Named(reference) = ty else {
+        panic!("{ty:?} is not a named type")
+    };
+    let TypeKind::Struct { fields, .. } = &document.types[&reference.id].definition else {
+        panic!("{} is not a struct", reference.id)
+    };
+    let field = fields.iter().find(|field| field.wire == "limit").unwrap();
+    assert_eq!(field.presence, pons_ir::Presence::Optional);
+    (reference.id.as_str(), field.ty.clone())
+}
+
+fn q_components(document: &pons_ir::Document) -> Vec<&str> {
+    document
+        .types
+        .keys()
+        .map(String::as_str)
+        .filter(|id| id.starts_with("router::Q#"))
+        .collect()
+}
+
+#[test]
+fn a_query_carrier_publishes_one_component_with_the_lowered_shape() {
+    let document = Router::<()>::new(info())
+        .route("/query", get(query_q))
+        .into_document()
+        .unwrap();
+
+    assert_eq!(
+        q_components(&document),
+        ["router::Q#query"],
+        "the derived copy no operation references is not published"
+    );
+    let (query_id, limit) = limit_field(
+        &document,
+        operation(&document, "query").query.as_ref().unwrap(),
+    );
+    assert_eq!(query_id, "router::Q#query");
+    assert!(optional_integer(&limit), "{limit:?} is an absent key");
+
+    let coverage = pons_ir::canonical_coverage(&document, false).unwrap();
+    assert!(
+        !coverage.keys().any(|subject| subject.ends_with("#input")),
+        "{:?} reports a subject no operation references",
+        coverage.keys().collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn a_route_that_takes_one_type_as_a_query_and_a_body_publishes_a_component_each() {
+    let document = Router::<()>::new(info())
+        .route("/both", post(query_and_body))
+        .into_document()
+        .unwrap();
+
+    assert_eq!(
+        q_components(&document),
+        ["router::Q#input", "router::Q#query"]
+    );
+    let operation = operation(&document, "both");
+    let (query_id, query_limit) = limit_field(&document, operation.query.as_ref().unwrap());
+    assert_eq!(query_id, "router::Q#query");
+    assert!(
+        optional_integer(&query_limit),
+        "{query_limit:?} is an absent key"
+    );
+    let (body_id, body_limit) = limit_field(&document, &operation.body.as_ref().unwrap().ty);
+    assert_eq!(body_id, "router::Q#input");
+    assert!(
+        nullable_integer(&body_limit),
+        "{body_limit:?} keeps the nullability a JSON body carries"
+    );
+}
+
+#[test]
+fn a_type_no_operation_references_is_not_published() {
+    let document = Router::<()>::new(info())
+        .route("/segment/{limit}", get(query_and_path))
+        .into_document()
+        .unwrap();
+
+    assert_eq!(
+        q_components(&document),
+        ["router::Q#path", "router::Q#query"],
+        "the two carriers keep their own copy and the derived one is dropped"
+    );
 }
 
 #[test]
@@ -487,6 +637,61 @@ fn a_flat_carrier_publishes_a_nullable_optional_field_as_an_absent_key() {
     };
     assert_eq!(param, "limit");
     assert!(optional_integer(ty));
+}
+
+#[test]
+fn a_query_and_a_json_body_publish_a_definition_each_of_one_rust_type() {
+    let document = Router::<()>::new(info())
+        .route("/both-query", get(both_query))
+        .route("/both-body", post(both_body))
+        .into_document()
+        .unwrap();
+
+    let (query_id, query_limit) = limit_field(
+        &document,
+        operation(&document, "both-query").query.as_ref().unwrap(),
+    );
+    let (body_id, body_limit) = limit_field(
+        &document,
+        &operation(&document, "both-body").body.as_ref().unwrap().ty,
+    );
+    assert_eq!(
+        body_id, "router::Both#input",
+        "the JSON body keeps the derived definition"
+    );
+    assert_eq!(
+        query_id, "router::Both#query",
+        "the query is published as its own carrier"
+    );
+    assert!(
+        nullable_integer(&body_limit),
+        "{body_limit:?} keeps its nullability"
+    );
+    assert!(
+        optional_integer(&query_limit),
+        "{query_limit:?} is an absent key"
+    );
+}
+
+#[test]
+fn the_definitions_one_rust_type_publishes_do_not_depend_on_the_route_order() {
+    fn router(query_first: bool) -> pons_axum::Router<()> {
+        let query = || get(both_query);
+        let body = || post(both_body);
+        let router = Router::<()>::new(info());
+        match query_first {
+            true => router
+                .route("/both-query", query())
+                .route("/both-body", body()),
+            false => router
+                .route("/both-body", body())
+                .route("/both-query", query()),
+        }
+    }
+    assert_eq!(
+        router(true).into_document().unwrap(),
+        router(false).into_document().unwrap()
+    );
 }
 
 #[test]
@@ -625,7 +830,7 @@ fn dynamic_response_status_preserves_the_body_contract() {
 
     let response = (
         StatusCode::CREATED,
-        pons_axum::extract::Json(User {
+        axum::Json(User {
             id: 1,
             name: "Ada".into(),
         }),
@@ -832,6 +1037,7 @@ fn pending_layers_are_applied_once_each_in_registration_order() {
                 "/traced-after",
                 get_with(list_users, OperationMeta::new("session.traced_after")),
             )
+            .auth_scheme("session", AuthScheme::Bearer { format: None })
     }
     fn doubled() -> Router<AppState> {
         DocumentedLayer::new(axum::middleware::from_fn(trace_layer_a), SessionAuth)
@@ -847,6 +1053,7 @@ fn pending_layers_are_applied_once_each_in_registration_order() {
                 "/doubled-after",
                 get_with(list_users, OperationMeta::new("session.doubled_after")),
             )
+            .auth_scheme("session", AuthScheme::Bearer { format: None })
     }
 
     LAYER_TRACE.lock().unwrap().clear();
@@ -1091,7 +1298,7 @@ fn router_describes_path_query_body_response_and_state() {
             .iter()
             .any(|diagnostic| diagnostic.code == "PONS-W101")
     );
-    let response = WithStatus::<201, _>::new(pons_axum::extract::Json(User {
+    let response = WithStatus::<201, _>::new(axum::Json(User {
         id: 1,
         name: "Ada".into(),
     }))
@@ -1099,7 +1306,7 @@ fn router_describes_path_query_body_response_and_state() {
     assert_eq!(response.status(), StatusCode::CREATED);
 
     let response = WithHeader::<TraceId, _>::new(
-        pons_axum::extract::Json(User {
+        axum::Json(User {
             id: 1,
             name: "Ada".into(),
         }),
@@ -1108,7 +1315,7 @@ fn router_describes_path_query_body_response_and_state() {
     .into_response();
     assert_eq!(response.headers()["x-trace-id"], "trace-123");
     let response = WithHeader::<TraceId, _>::new(
-        pons_axum::extract::Json(User {
+        axum::Json(User {
             id: 1,
             name: "Ada".into(),
         }),
@@ -1117,7 +1324,7 @@ fn router_describes_path_query_body_response_and_state() {
     .into_response();
     assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
     let response = WithStatus::<201, _>::new(WithHeader::<TraceId, _>::new(
-        pons_axum::extract::Json(User {
+        axum::Json(User {
             id: 1,
             name: "Ada".into(),
         }),
@@ -1127,7 +1334,7 @@ fn router_describes_path_query_body_response_and_state() {
     assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
 
     let response = WithOptionalHeader::<Retry, _>::new(
-        pons_axum::extract::Json(User {
+        axum::Json(User {
             id: 1,
             name: "Ada".into(),
         }),
