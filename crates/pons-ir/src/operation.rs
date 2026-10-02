@@ -403,6 +403,18 @@ pub enum ErrorStatus {
     Default,
 }
 
+impl ErrorStatus {
+    pub fn covers(&self, other: &Self) -> bool {
+        match (self, other) {
+            (Self::Default, _) => true,
+            (Self::Exact(covered), Self::Exact(status)) => covered == status,
+            (Self::Class(covered), Self::Class(class)) => covered == class,
+            (Self::Class(covered), Self::Exact(status)) => *status / 100 == u16::from(*covered),
+            _ => false,
+        }
+    }
+}
+
 impl JsonSchema for ErrorStatus {
     fn schema_name() -> Cow<'static, str> {
         "ErrorStatus".into()

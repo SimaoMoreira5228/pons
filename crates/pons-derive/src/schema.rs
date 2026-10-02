@@ -182,6 +182,60 @@ fn refuse(message: String) -> TokenStream {
     quote!(cx.push_error("PONS-E101", #message);)
 }
 
+fn refuse_both(message: String) -> TokenStream {
+    quote! {
+        if direction == ::pons_core::ir::Direction::Both {
+            cx.push_error("PONS-E103", #message);
+        }
+    }
+}
+
+fn side_presence(optional: bool, side: &str, reason: &'static str) -> String {
+    match optional {
+        true => format!("optional on {side} ({reason})"),
+        false => format!("required on {side}"),
+    }
+}
+
+fn field_side_refusals(
+    field: &ast::Field<'_>,
+    supports_flatten: bool,
+    container_default: bool,
+) -> Vec<TokenStream> {
+    if field.attrs.flatten() && supports_flatten {
+        return Vec::new();
+    }
+    let ident = field.member.to_token_stream().to_string();
+    let name = field.attrs.name();
+    let (wire_in, wire_out) = (
+        name.deserialize_name().value.clone(),
+        name.serialize_name().value.clone(),
+    );
+    let mut refusals = Vec::new();
+    if wire_in != wire_out {
+        refusals.push(refuse_both(format!(
+            "{ident} is read as \"{wire_in}\" and written as \"{wire_out}\", but Field::wire names one key, so derive this type per direction"
+        )));
+    }
+    let optional_on_input = container_default || has_default(&field.attrs) || is_option(field.ty);
+    let optional_on_output = field.attrs.skip_serializing_if().is_some();
+    if optional_on_input != optional_on_output {
+        let reason_on_input = if container_default {
+            "a container #[serde(default)] fills a missing key"
+        } else if has_default(&field.attrs) {
+            "#[serde(default)] fills a missing key"
+        } else {
+            "an Option key may be missing"
+        };
+        refusals.push(refuse_both(format!(
+            "{ident} is {} and {}, but Field::presence holds one value, so derive this type per direction",
+            side_presence(optional_on_input, "input", reason_on_input),
+            side_presence(optional_on_output, "output", "skip_serializing_if omits the key"),
+        )));
+    }
+    refusals
+}
+
 fn names<T: ToTokens>(members: impl Iterator<Item = T>) -> String {
     members
         .map(|member| member.to_token_stream().to_string())
@@ -221,6 +275,14 @@ fn enum_definition(variants: &[ast::Variant<'_>], attrs: &attr::Container) -> To
         };
         let include_input = !variant.attrs.skip_deserializing();
         let include_output = !variant.attrs.skip_serializing();
+        let side_refusal = if wire_in.value != wire_out.value {
+            refuse_both(format!(
+                "variant {} is read as \"{}\" and written as \"{}\", but Variant::wire names one key, so derive this type per direction",
+                variant.ident, wire_in.value, wire_out.value
+            ))
+        } else {
+            TokenStream::new()
+        };
         quote! {
             let included = match direction {
                 ::pons_core::ir::Direction::Input => #include_input,
@@ -230,6 +292,7 @@ fn enum_definition(variants: &[ast::Variant<'_>], attrs: &attr::Container) -> To
             if included {
                 #alias_warning
                 #other_warning
+                #side_refusal
                 let wire = match direction {
                     ::pons_core::ir::Direction::Input => #wire_in,
                     ::pons_core::ir::Direction::Output | ::pons_core::ir::Direction::Both => #wire_out,
@@ -308,11 +371,17 @@ fn enum_representation(tag: &attr::TagType, variants: &[ast::Variant<'_>]) -> To
                 .iter()
                 .filter(|variant| !variant.attrs.skip_serializing())
                 .all(|variant| matches!(variant.style, ast::Style::Unit));
+            let both_is_string = variants
+                .iter()
+                .filter(|variant| {
+                    !variant.attrs.skip_deserializing() && !variant.attrs.skip_serializing()
+                })
+                .all(|variant| matches!(variant.style, ast::Style::Unit));
             quote!({
                 let string_repr = match direction {
                     ::pons_core::ir::Direction::Input => #input_is_string,
                     ::pons_core::ir::Direction::Output => #output_is_string,
-                    ::pons_core::ir::Direction::Both => #input_is_string && #output_is_string,
+                    ::pons_core::ir::Direction::Both => #both_is_string,
                 };
                 if string_repr {
                     ::pons_core::ir::EnumRepr::String
@@ -387,12 +456,14 @@ fn field_expression(
             ::pons_core::ir::Direction::Both => !#skip_input && !#skip_output,
         };
     };
+    let refusals = field_side_refusals(field, supports_flatten, container_default);
     let regular = field_body(field, supports_flatten, container_default, flatten, false);
     if !flatten || !codecs.any() {
         return quote! {
             #included
             if included {
                 #alias_warning
+                #( #refusals )*
                 #regular
             }
         };
@@ -403,6 +474,7 @@ fn field_expression(
         #included
         if included {
             #alias_warning
+            #( #refusals )*
             if #probe {
                 #opaque
             } else {

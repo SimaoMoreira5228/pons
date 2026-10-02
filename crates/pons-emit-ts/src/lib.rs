@@ -449,13 +449,37 @@ fn unique_names(bases: impl IntoIterator<Item = String>) -> Vec<String> {
 }
 
 fn type_names(document: &Document) -> BTreeMap<String, String> {
-    let names = unique_names(
-        document
-            .types
-            .values()
-            .map(|definition| pascal(&definition.name)),
-    );
-    document.types.keys().cloned().zip(names).collect()
+    let mut entries = document
+        .types
+        .iter()
+        .map(|(id, definition)| {
+            (
+                type_name_base(id, &pascal(&definition.name)),
+                role(id).is_some(),
+                id.clone(),
+            )
+        })
+        .collect::<Vec<_>>();
+    entries.sort();
+    let names = unique_names(entries.iter().map(|(base, _, _)| base.clone()));
+    entries
+        .into_iter()
+        .map(|(_, _, id)| id)
+        .zip(names)
+        .collect()
+}
+
+fn type_name_base(id: &str, base: &str) -> String {
+    match role(id) {
+        Some(role) => format!("{base}{}", pascal(&[role.to_owned()])),
+        None => base.to_owned(),
+    }
+}
+
+fn role(id: &str) -> Option<&str> {
+    let role = id.rsplit_once('#')?.1;
+    (!role.is_empty() && role.chars().all(|c| c.is_ascii_alphanumeric() || c == '_'))
+        .then_some(role)
 }
 
 fn pascal(words: &[String]) -> String {
@@ -584,7 +608,7 @@ mod tests {
         ResponseStatus, StreamKind, TypeKind, TypeRef,
     };
     use serde_json::json;
-    use std::collections::BTreeMap;
+    use std::collections::{BTreeMap, BTreeSet};
 
     #[test]
     fn emits_a_client_for_the_contract_fixture() {
@@ -1457,6 +1481,104 @@ mod tests {
         ] {
             assert!(client.contains(&format!("export type {name} =")));
         }
+    }
+
+    fn carriers(definitions: &[(&str, &str, &str)]) -> Document {
+        let mut document: Document =
+            serde_json::from_str(include_str!("../../../fixtures/login.json")).unwrap();
+        for (id, name, marker) in definitions {
+            document.types.insert(
+                (*id).into(),
+                serde_json::from_value(json!({
+                    "kind": "struct",
+                    "name": [name],
+                    "direction": "input",
+                    "openness": "reject",
+                    "fields": [{
+                        "wire": marker,
+                        "ident": [marker],
+                        "ty": {"kind": "string"},
+                        "presence": "required"
+                    }]
+                }))
+                .unwrap(),
+            );
+        }
+        document
+    }
+
+    fn aliases(document: &Document) -> BTreeMap<String, String> {
+        let types = super::emit(document)
+            .unwrap()
+            .into_iter()
+            .find(|file| file.path == "types.ts")
+            .unwrap()
+            .content;
+        let aliases = types
+            .lines()
+            .filter_map(|line| line.strip_prefix("export type "))
+            .filter_map(|line| line.split_once(" = "))
+            .map(|(name, body)| {
+                (
+                    name.to_owned(),
+                    body.strip_suffix(';').unwrap_or(body).to_owned(),
+                )
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            aliases.len(),
+            aliases
+                .iter()
+                .map(|(name, _)| name)
+                .collect::<BTreeSet<_>>()
+                .len(),
+            "{aliases:?} declares one name twice"
+        );
+        aliases.into_iter().collect()
+    }
+
+    #[test]
+    fn names_each_role_of_one_type_after_the_role_its_id_carries() {
+        let both = aliases(&carriers(&[
+            ("router::Q#input", "q", "body"),
+            ("router::Q#query", "q", "query"),
+        ]));
+        assert_eq!(both["QInput"], "{ \"body\": string }");
+        assert_eq!(both["QQuery"], "{ \"query\": string }");
+        assert!(
+            both.keys().all(|name| !name.contains('#')),
+            "{both:?} leaks an id role"
+        );
+        assert!(
+            both["User"].contains("\"id\": string") && !both.contains_key("User2"),
+            "{both:?} renames a type one definition publishes"
+        );
+
+        let reversed = aliases(&carriers(&[
+            ("a::Q#query", "q", "query"),
+            ("z::Q#input", "q", "body"),
+        ]));
+        assert_eq!(reversed["QInput"], "{ \"body\": string }");
+        assert_eq!(reversed["QQuery"], "{ \"query\": string }");
+
+        let lone = aliases(&carriers(&[("router::Q#query", "q", "query")]));
+        assert_eq!(
+            lone["QQuery"], "{ \"query\": string }",
+            "pruning a sibling leaves the survivor's alias alone"
+        );
+        assert!(!lone.contains_key("QInput"));
+    }
+
+    #[test]
+    fn a_role_suffixed_alias_never_takes_the_alias_another_type_publishes() {
+        let names = aliases(&carriers(&[
+            ("a::Q#input", "q", "first"),
+            ("b::Q#input", "q", "second"),
+            ("c::qInput", "qInput", "published"),
+        ]));
+        assert_eq!(names["QInput"], "{ \"published\": string }");
+        assert_eq!(names["QInput2"], "{ \"first\": string }");
+        assert_eq!(names["QInput3"], "{ \"second\": string }");
     }
 
     #[test]

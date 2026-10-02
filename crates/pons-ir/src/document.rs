@@ -6,12 +6,13 @@ use serde_json::Value;
 use crate::IR_VERSION;
 use crate::operation::{
     ApiKeyLocation, AuthScheme, ContentKind, CredentialLocator, ErrorContent, ErrorResponse,
-    ErrorStatus, Method, OAuthFlowKind, Operation, ResponseStatus,
+    ErrorStatus, Method, OAuthFlowKind, Operation, PathSegment, ResponseStatus, StreamKind,
 };
 use crate::types::{
-    Diagnostic, DiagnosticSeverity, EnumRepr, Field, InlineType, IntegerWire, OpaqueWire, Presence,
-    TypeDef, TypeKind, TypeRef, VariantPayload,
+    Access, Diagnostic, DiagnosticSeverity, Direction, EnumRepr, Field, InlineType, IntegerWire,
+    ObjectOpenness, OpaqueWire, Presence, TypeDef, TypeKind, TypeRef, VariantPayload,
 };
+use crate::violation::direction_name;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
@@ -56,6 +57,35 @@ fn response_status_conflicts(response: ResponseStatus, error: &ErrorStatus) -> b
         (ResponseStatus::Default | ResponseStatus::Unknown, ErrorStatus::Default) => true,
         _ => false,
     }
+}
+
+#[derive(Clone, Copy)]
+enum Boundary {
+    Request,
+    Response,
+}
+
+impl Boundary {
+    fn refuses(self, direction: Direction) -> bool {
+        matches!(
+            (self, direction),
+            (Self::Request, Direction::Output) | (Self::Response, Direction::Input)
+        )
+    }
+
+    fn crossing(self) -> &'static str {
+        match self {
+            Self::Request => "input or both",
+            Self::Response => "output or both",
+        }
+    }
+}
+
+fn field_crosses(field: &Field, boundary: Boundary) -> bool {
+    !matches!(
+        (boundary, field.access),
+        (Boundary::Request, Some(Access::ReadOnly)) | (Boundary::Response, Some(Access::WriteOnly))
+    )
 }
 
 fn scan_opaque_references(
@@ -304,11 +334,27 @@ impl Document {
 
         let mut common_error_ids = BTreeSet::new();
         let mut common_error_slots = BTreeSet::new();
-        for error in &self.common_errors {
+        for (index, error) in self.common_errors.iter().enumerate() {
             if !common_error_slots.insert(error.status.clone()) {
                 errors.push(ValidationError::InvalidValue {
                     path: "common_errors".into(),
                     message: format!("duplicate error dispatch slot {:?}", error.status),
+                });
+            }
+            if let Some(covering) =
+                self.common_errors
+                    .iter()
+                    .enumerate()
+                    .find(|(other, candidate)| {
+                        *other != index && candidate.status.covers(&error.status)
+                    })
+            {
+                errors.push(ValidationError::InvalidValue {
+                    path: "common_errors".into(),
+                    message: format!(
+                        "error dispatch slot {:?} is already claimed: the common error {:?} covers it",
+                        error.status, covering.1.status
+                    ),
                 });
             }
             if !common_error_ids.insert((error.status.clone(), error.name.clone())) {
@@ -654,10 +700,18 @@ impl Document {
                         path: owner.clone(),
                         message: format!("duplicate error dispatch slot {:?}", error.status),
                     });
-                } else if operation.errors_inherit && common_error_slots.contains(&error.status) {
+                } else if operation.errors_inherit
+                    && let Some(common) = self
+                        .common_errors
+                        .iter()
+                        .find(|common| common.status.covers(&error.status))
+                {
                     errors.push(ValidationError::InvalidValue {
                         path: owner.clone(),
-                        message: format!("error dispatch slot {:?} is inherited", error.status),
+                        message: format!(
+                            "error dispatch slot {:?} is inherited: the common error {:?} already covers it",
+                            error.status, common.status
+                        ),
                     });
                 }
                 if !operation_error_ids.insert(identity.clone()) {
@@ -710,11 +764,243 @@ impl Document {
                 }
             }
         }
+        self.validate_directions(&mut errors);
 
         if errors.is_empty() {
             Ok(())
         } else {
             Err(errors)
+        }
+    }
+
+    fn validate_directions(&self, errors: &mut Vec<ValidationError>) {
+        for (index, error) in self.common_errors.iter().enumerate() {
+            let prefix = format!("common_errors[{index}]");
+            if let Some(body) = &error.body {
+                self.check_direction(
+                    body,
+                    "error body",
+                    format!("{prefix}.body"),
+                    Boundary::Response,
+                    errors,
+                );
+            }
+            for (header_index, header) in error.headers.iter().enumerate() {
+                self.check_direction(
+                    &header.ty,
+                    "error header",
+                    format!("{prefix}.headers[{header_index}].ty"),
+                    Boundary::Response,
+                    errors,
+                );
+            }
+        }
+        for (index, operation) in self.operations.iter().enumerate() {
+            let prefix = format!("operations[{index}]");
+            for (segment_index, segment) in operation.path.iter().enumerate() {
+                if let PathSegment::Param { ty, .. } = segment {
+                    self.check_direction(
+                        ty,
+                        "path parameter",
+                        format!("{prefix}.path[{segment_index}].ty"),
+                        Boundary::Request,
+                        errors,
+                    );
+                }
+            }
+            if let Some(query) = &operation.query {
+                self.check_direction(
+                    query,
+                    "query",
+                    format!("{prefix}.query"),
+                    Boundary::Request,
+                    errors,
+                );
+            }
+            for (header_index, header) in operation.headers.iter().enumerate() {
+                self.check_direction(
+                    &header.ty,
+                    "request header",
+                    format!("{prefix}.headers[{header_index}].ty"),
+                    Boundary::Request,
+                    errors,
+                );
+            }
+            if let Some(body) = &operation.body {
+                self.check_direction(
+                    &body.ty,
+                    "request body",
+                    format!("{prefix}.body.ty"),
+                    Boundary::Request,
+                    errors,
+                );
+            }
+            for (response_index, response) in operation.responses.iter().enumerate() {
+                let response_prefix = format!("{prefix}.responses[{response_index}]");
+                if let Some(body) = &response.body {
+                    self.check_direction(
+                        body,
+                        "response body",
+                        format!("{response_prefix}.body"),
+                        Boundary::Response,
+                        errors,
+                    );
+                }
+                for (header_index, header) in response.headers.iter().enumerate() {
+                    self.check_direction(
+                        &header.ty,
+                        "response header",
+                        format!("{response_prefix}.headers[{header_index}].ty"),
+                        Boundary::Response,
+                        errors,
+                    );
+                }
+            }
+            for (error_index, error) in operation.errors.iter().enumerate() {
+                let error_prefix = format!("{prefix}.errors[{error_index}]");
+                if let Some(body) = &error.body {
+                    self.check_direction(
+                        body,
+                        "error body",
+                        format!("{error_prefix}.body"),
+                        Boundary::Response,
+                        errors,
+                    );
+                }
+                for (header_index, header) in error.headers.iter().enumerate() {
+                    self.check_direction(
+                        &header.ty,
+                        "error header",
+                        format!("{error_prefix}.headers[{header_index}].ty"),
+                        Boundary::Response,
+                        errors,
+                    );
+                }
+            }
+            if let Some(stream) = &operation.stream {
+                match &stream.kind {
+                    StreamKind::Sse { events } => {
+                        for (event_index, event) in events.iter().enumerate() {
+                            self.check_direction(
+                                &event.data,
+                                "stream event",
+                                format!("{prefix}.stream.events[{event_index}].data"),
+                                Boundary::Response,
+                                errors,
+                            );
+                        }
+                    }
+                    StreamKind::Ndjson { item } => self.check_direction(
+                        item,
+                        "stream item",
+                        format!("{prefix}.stream.item"),
+                        Boundary::Response,
+                        errors,
+                    ),
+                    StreamKind::Websocket { .. } | StreamKind::Bytes { .. } => {}
+                }
+            }
+        }
+    }
+
+    fn check_direction(
+        &self,
+        reference: &TypeRef,
+        role: &str,
+        path: String,
+        boundary: Boundary,
+        errors: &mut Vec<ValidationError>,
+    ) {
+        if let Some(mismatch) = self.direction_mismatch(reference, boundary) {
+            errors.push(ValidationError::InvalidValue {
+                path,
+                message: format!(
+                    "the {role} needs a type of the {} direction, but {mismatch}",
+                    boundary.crossing()
+                ),
+            });
+        }
+    }
+
+    fn direction_mismatch(&self, reference: &TypeRef, boundary: Boundary) -> Option<String> {
+        self.direction_reached(reference, boundary, &mut BTreeSet::new())
+    }
+
+    fn direction_reached(
+        &self,
+        reference: &TypeRef,
+        boundary: Boundary,
+        visited: &mut BTreeSet<String>,
+    ) -> Option<String> {
+        let TypeRef::Named(named) = reference else {
+            return match reference {
+                TypeRef::Inline(InlineType::Nullable { inner }) => {
+                    self.direction_reached(inner, boundary, visited)
+                }
+                TypeRef::Inline(InlineType::Array { item, .. }) => {
+                    self.direction_reached(item, boundary, visited)
+                }
+                TypeRef::Inline(InlineType::Map { key, value }) => self
+                    .direction_reached(key, boundary, visited)
+                    .or_else(|| self.direction_reached(value, boundary, visited)),
+                TypeRef::Inline(InlineType::Tuple { items }) => items
+                    .iter()
+                    .find_map(|item| self.direction_reached(item, boundary, visited)),
+                _ => None,
+            };
+        };
+        let definition = self.types.get(&named.id)?;
+        if boundary.refuses(definition.direction) {
+            return Some(format!(
+                "{} is declared {}",
+                named.id,
+                direction_name(definition.direction)
+            ));
+        }
+        if !visited.insert(named.id.clone()) {
+            return None;
+        }
+        match &definition.definition {
+            TypeKind::Newtype { inner } => self.direction_reached(inner, boundary, visited),
+            TypeKind::Struct {
+                fields,
+                flattened,
+                openness,
+            } => fields
+                .iter()
+                .filter(|field| field_crosses(field, boundary))
+                .find_map(|field| self.direction_reached(&field.ty, boundary, visited))
+                .or_else(|| {
+                    flattened
+                        .iter()
+                        .find_map(|member| self.direction_reached(member, boundary, visited))
+                })
+                .or_else(|| match openness {
+                    ObjectOpenness::PreserveTyped { value } => {
+                        self.direction_reached(value, boundary, visited)
+                    }
+                    _ => None,
+                }),
+            TypeKind::Enum { variants, .. } => {
+                let selected: Vec<_> = match &named.variant {
+                    Some(wire) => variants
+                        .iter()
+                        .filter(|variant| variant.wire == *wire)
+                        .collect(),
+                    None => variants.iter().collect(),
+                };
+                selected.iter().find_map(|variant| match &variant.payload {
+                    VariantPayload::Unit => None,
+                    VariantPayload::Newtype { ty } => self.direction_reached(ty, boundary, visited),
+                    VariantPayload::Tuple { items } => items
+                        .iter()
+                        .find_map(|item| self.direction_reached(item, boundary, visited)),
+                    VariantPayload::Struct { fields } => fields
+                        .iter()
+                        .filter(|field| field_crosses(field, boundary))
+                        .find_map(|field| self.direction_reached(&field.ty, boundary, visited)),
+                })
+            }
         }
     }
 

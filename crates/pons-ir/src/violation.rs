@@ -244,7 +244,7 @@ fn access_name(access: Access) -> &'static str {
     }
 }
 
-fn direction_name(direction: Direction) -> &'static str {
+pub(crate) fn direction_name(direction: Direction) -> &'static str {
     match direction {
         Direction::Input => "input",
         Direction::Output => "output",

@@ -61,13 +61,21 @@ pub fn emit_with_mode(document: &Document, mode: EmitMode) -> Result<EmitOutput,
             document
                 .types
                 .iter()
-                .map(|(id, ty)| (id.clone(), readable_name(&ty.name))),
+                .map(|(id, ty)| {
+                    (
+                        schema_name_base(id, &ty.name),
+                        role(id).is_some(),
+                        id.clone(),
+                    )
+                })
+                .collect(),
         ),
         security_names: unique_names(
             document
                 .auth_schemes
                 .keys()
-                .map(|id| (id.clone(), readable_name(std::slice::from_ref(id)))),
+                .map(|id| (readable_name(std::slice::from_ref(id)), false, id.clone()))
+                .collect(),
         ),
         selected_variants: std::cell::RefCell::new(BTreeSet::new()),
     };
@@ -201,31 +209,59 @@ fn merge_coverage(coverage: &mut Coverage, subject: String, required: CoverageSe
     }
 }
 
-fn unique_names(items: impl Iterator<Item = (String, String)>) -> BTreeMap<String, String> {
+fn schema_name_base(id: &str, name: &[String]) -> String {
+    let base = readable_name(name);
+    match role(id) {
+        Some(role) => format!("{base}{}", capitalize(role)),
+        None => base,
+    }
+}
+
+fn role(id: &str) -> Option<&str> {
+    let role = id.rsplit_once('#')?.1;
+    (!role.is_empty() && role.chars().all(|c| c.is_ascii_alphanumeric() || c == '_'))
+        .then_some(role)
+}
+
+fn unique_names(mut items: Vec<(String, bool, String)>) -> BTreeMap<String, String> {
+    items.sort();
+    let reserved = items
+        .iter()
+        .map(|(base, _, _)| base.clone())
+        .collect::<BTreeSet<_>>();
+    let mut assigned = BTreeSet::new();
     let mut names = BTreeMap::new();
-    let mut used = std::collections::BTreeSet::new();
-    for (id, name) in items {
-        let mut candidate = name.clone();
-        let mut suffix = 2;
-        while !used.insert(candidate.clone()) {
-            candidate = format!("{name}{suffix}");
+    for (base, _, id) in items {
+        let mut suffix = 1;
+        let candidate = loop {
+            let candidate = if suffix == 1 {
+                base.clone()
+            } else {
+                format!("{base}{suffix}")
+            };
+            if (suffix == 1 || !reserved.contains(&candidate)) && assigned.insert(candidate.clone())
+            {
+                break candidate;
+            }
             suffix += 1;
-        }
+        };
         names.insert(id, candidate);
     }
     names
 }
 
+fn capitalize(word: &str) -> String {
+    let mut chars = word.chars();
+    chars
+        .next()
+        .map(|first| first.to_uppercase().chain(chars).collect::<String>())
+        .unwrap_or_default()
+}
+
 fn readable_name(words: &[String]) -> String {
     let value = words
         .iter()
-        .map(|word| {
-            let mut chars = word.chars();
-            chars
-                .next()
-                .map(|first| first.to_uppercase().chain(chars).collect::<String>())
-                .unwrap_or_default()
-        })
+        .map(|word| capitalize(word))
         .collect::<String>();
     let mut name = value
         .chars()
@@ -1134,6 +1170,76 @@ mod tests {
         assert!(security.get("Tenant").is_some());
         assert!(security.get("Tenant2").is_some());
         assert!(security.get("Tenant3").is_some(), "{security:#}");
+    }
+
+    fn component_names(document: &pons_ir::Document) -> BTreeMap<String, String> {
+        let output: Value = serde_json::from_str(&super::emit(document).unwrap()).unwrap();
+        output["components"]["schemas"]
+            .as_object()
+            .unwrap()
+            .iter()
+            .map(|(name, schema)| {
+                (
+                    name.clone(),
+                    schema["x-pons"]["type"]["id"].as_str().unwrap().to_owned(),
+                )
+            })
+            .collect()
+    }
+
+    #[test]
+    fn names_each_role_of_one_type_after_the_role_its_id_carries() {
+        fn carriers(ids: &[&str]) -> pons_ir::Document {
+            let mut document = fixture();
+            for id in ids {
+                let mut definition = named_type("q");
+                definition.direction = Direction::Input;
+                document.types.insert((*id).into(), definition);
+            }
+            document
+        }
+
+        let both = component_names(&carriers(&["router::Q#input", "router::Q#query"]));
+        assert_eq!(both["QInput"], "router::Q#input");
+        assert_eq!(both["QQuery"], "router::Q#query");
+        assert!(
+            both.keys().all(|name| !name.contains('#')),
+            "{both:?} leaks an id role"
+        );
+        assert_eq!(
+            both["User"], "User",
+            "a name one definition publishes keeps the plain name"
+        );
+
+        let reversed = component_names(&carriers(&["a::Q#query", "z::Q#input"]));
+        assert_eq!(reversed["QInput"], "z::Q#input");
+        assert_eq!(reversed["QQuery"], "a::Q#query");
+
+        let lone = component_names(&carriers(&["router::Q#query"]));
+        assert_eq!(
+            lone["QQuery"], "router::Q#query",
+            "pruning a sibling leaves the survivor's name alone"
+        );
+        assert!(!lone.contains_key("QInput"));
+    }
+
+    #[test]
+    fn a_role_suffixed_name_never_takes_the_name_another_type_publishes() {
+        let mut document = fixture();
+        for (id, name) in [
+            ("a::Q#input", "q"),
+            ("b::Q#input", "q"),
+            ("c::qInput", "qInput"),
+        ] {
+            let mut definition = named_type(name);
+            definition.direction = Direction::Input;
+            document.types.insert(id.into(), definition);
+        }
+
+        let names = component_names(&document);
+        assert_eq!(names["QInput"], "c::qInput");
+        assert_eq!(names["QInput2"], "a::Q#input");
+        assert_eq!(names["QInput3"], "b::Q#input");
     }
 
     #[test]

@@ -190,6 +190,27 @@ struct DefaultedOptions {
 
 #[derive(pons_core::Schema)]
 #[allow(dead_code)]
+struct SharedBoth {
+    value: String,
+    count: u8,
+}
+
+#[derive(pons_core::Schema)]
+#[allow(dead_code)]
+struct SkippedOptionBoth {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    tag: Option<String>,
+}
+
+#[derive(pons_core::Schema)]
+#[allow(dead_code)]
+struct RenamedSides {
+    #[serde(rename(serialize = "from_server", deserialize = "to_server"))]
+    value: String,
+}
+
+#[derive(pons_core::Schema)]
+#[allow(dead_code)]
 struct OneSidedCodecs {
     #[serde(serialize_with = "encode_value")]
     encoded: Vec<u8>,
@@ -1105,11 +1126,10 @@ fn container_level_serde_default_makes_every_field_optional_on_input() {
     let mut cx = TypeCx::new();
     let input = ContainerDefaults::schema(&mut cx, Direction::Input);
     let output = ContainerDefaults::schema(&mut cx, Direction::Output);
-    let both = ContainerDefaults::schema(&mut cx, Direction::Both);
+    let _ = ContainerDefaults::schema(&mut cx, Direction::Both);
 
     let (input, _) = struct_shape(&cx, &input);
     let (output, _) = struct_shape(&cx, &output);
-    let (both, _) = struct_shape(&cx, &both);
     assert_eq!(input.len(), 3);
     assert!(
         input
@@ -1121,15 +1141,16 @@ fn container_level_serde_default_makes_every_field_optional_on_input() {
             .iter()
             .all(|field| field.presence == pons_ir::Presence::Required)
     );
-    assert!(
-        both.iter()
-            .all(|field| field.presence == pons_ir::Presence::Required),
-        "a container default only fills missing keys when reading, so it does not reach the output side"
-    );
-    assert!(cx.diagnostics().is_empty());
 
+    let refusal = error_coded(&cx, "PONS-E103", "count");
+    assert!(
+        refusal.message.contains("container #[serde(default)]"),
+        "the reason is named: {}",
+        refusal.message
+    );
+    assert!(refusal.message.contains("per direction"));
     let (types, diagnostics) = cx.into_parts();
-    assert!(document(types, diagnostics).validate().is_ok());
+    assert!(document(types, diagnostics).validate().is_err());
 }
 
 #[test]
@@ -1137,7 +1158,6 @@ fn enum_payload_presence_stays_direction_specific_without_a_container_default() 
     let mut cx = TypeCx::new();
     let input = RequiredPayloads::schema(&mut cx, Direction::Input);
     let output = RequiredPayloads::schema(&mut cx, Direction::Output);
-    let both = RequiredPayloads::schema(&mut cx, Direction::Both);
 
     for (reference, expected) in [
         (
@@ -1150,14 +1170,6 @@ fn enum_payload_presence_stays_direction_specific_without_a_container_default() 
         ),
         (
             output,
-            [
-                pons_ir::Presence::Required,
-                pons_ir::Presence::Required,
-                pons_ir::Presence::Optional,
-            ],
-        ),
-        (
-            both,
             [
                 pons_ir::Presence::Required,
                 pons_ir::Presence::Required,
@@ -1185,6 +1197,32 @@ fn enum_payload_presence_stays_direction_specific_without_a_container_default() 
 
     let (types, diagnostics) = cx.into_parts();
     assert!(document(types, diagnostics).validate().is_ok());
+}
+
+#[test]
+fn both_refuses_an_option_field_the_two_sides_do_not_share() {
+    let mut cx = TypeCx::new();
+    let _ = RequiredPayloads::schema(&mut cx, Direction::Both);
+    let refusal = error_coded(&cx, "PONS-E103", "notes");
+    assert!(
+        refusal
+            .message
+            .contains("optional on input (an Option key may be missing)"),
+        "{}",
+        refusal.message
+    );
+    assert!(
+        refusal.message.contains("required on output"),
+        "{}",
+        refusal.message
+    );
+    assert_eq!(
+        cx.diagnostics().len(),
+        1,
+        "tag is omitted by both sides, so only notes is refused"
+    );
+    let (types, diagnostics) = cx.into_parts();
+    assert!(document(types, diagnostics).validate().is_err());
 }
 
 fn struct_payload_fields<'cx>(cx: &'cx TypeCx, reference: &TypeRef) -> &'cx [pons_ir::Field] {
@@ -1290,15 +1328,15 @@ fn one_sided_codec_with_flatten_only_opaques_the_codec_direction() {
     assert!(document(types, diagnostics).validate().is_ok());
 }
 
-fn error_diagnostic<'a>(cx: &'a TypeCx, needle: &str) -> &'a pons_ir::Diagnostic {
+fn error_coded<'a>(cx: &'a TypeCx, code: &str, needle: &str) -> &'a pons_ir::Diagnostic {
     cx.diagnostics()
         .iter()
         .find(|diagnostic| {
-            diagnostic.code == "PONS-E101"
+            diagnostic.code == code
                 && diagnostic.severity == DiagnosticSeverity::Error
                 && diagnostic.message.contains(needle)
         })
-        .unwrap_or_else(|| panic!("PONS-E101 mentioning {needle} in {:?}", cx.diagnostics()))
+        .unwrap_or_else(|| panic!("{code} mentioning {needle} in {:?}", cx.diagnostics()))
 }
 
 #[test]
@@ -1313,7 +1351,7 @@ fn serde_tag_on_a_struct_is_refused_instead_of_dropped() {
     };
     assert_eq!(openness, &pons_ir::ObjectOpenness::Reject);
 
-    let diagnostic = error_diagnostic(&cx, "kind");
+    let diagnostic = error_coded(&cx, "PONS-E101", "kind");
     assert!(diagnostic.message.contains("no literal type"));
     let (types, diagnostics) = cx.into_parts();
     assert!(document(types, diagnostics).validate().is_err());
@@ -1323,7 +1361,7 @@ fn serde_tag_on_a_struct_is_refused_instead_of_dropped() {
 fn an_untagged_variant_under_a_tagged_container_is_refused() {
     let mut cx = TypeCx::new();
     let _ = MixedTaggedVariants::schema(&mut cx, Direction::Output);
-    let diagnostic = error_diagnostic(&cx, "Loose");
+    let diagnostic = error_coded(&cx, "PONS-E101", "Loose");
     assert!(diagnostic.message.contains("untagged"));
     assert!(diagnostic.message.contains("EnumRepr"));
     let (types, diagnostics) = cx.into_parts();
@@ -1334,7 +1372,7 @@ fn an_untagged_variant_under_a_tagged_container_is_refused() {
 fn an_untagged_container_with_several_payload_variants_is_refused() {
     let mut cx = TypeCx::new();
     let _ = UntaggedOverlap::schema(&mut cx, Direction::Output);
-    let diagnostic = error_diagnostic(&cx, "Number, Text");
+    let diagnostic = error_coded(&cx, "PONS-E101", "Number, Text");
     assert!(diagnostic.message.contains("no discriminator"));
     let (types, diagnostics) = cx.into_parts();
     assert!(document(types, diagnostics).validate().is_err());
@@ -1377,7 +1415,7 @@ fn transparent_uses_the_field_serde_marks_instead_of_the_first() {
 fn a_transparent_field_that_derives_disagree_on_is_refused() {
     let mut cx = TypeCx::new();
     let _ = TransparentSplit::schema(&mut cx, Direction::Input);
-    let diagnostic = error_diagnostic(&cx, "preferred");
+    let diagnostic = error_coded(&cx, "PONS-E101", "preferred");
     assert!(diagnostic.message.contains("Deserialize"));
     let (types, diagnostics) = cx.into_parts();
     assert!(document(types, diagnostics).validate().is_err());
@@ -1387,7 +1425,7 @@ fn a_transparent_field_that_derives_disagree_on_is_refused() {
 fn deny_unknown_fields_on_an_enum_is_refused() {
     let mut cx = TypeCx::new();
     let _ = ClosedEnum::schema(&mut cx, Direction::Input);
-    let diagnostic = error_diagnostic(&cx, "deny_unknown_fields");
+    let diagnostic = error_coded(&cx, "PONS-E101", "deny_unknown_fields");
     assert!(diagnostic.message.contains("VariantPayload::Struct"));
     let (types, diagnostics) = cx.into_parts();
     assert!(document(types, diagnostics).validate().is_err());
@@ -1397,7 +1435,7 @@ fn deny_unknown_fields_on_an_enum_is_refused() {
 fn serde_default_on_a_tuple_struct_is_refused() {
     let mut cx = TypeCx::new();
     let _ = TupleDefaults::schema(&mut cx, Direction::Input);
-    let diagnostic = error_diagnostic(&cx, "tuple struct");
+    let diagnostic = error_coded(&cx, "PONS-E101", "tuple struct");
     assert!(diagnostic.message.contains("InlineType::Tuple"));
     let (types, diagnostics) = cx.into_parts();
     assert!(document(types, diagnostics).validate().is_err());
@@ -1470,7 +1508,6 @@ fn field_presence_is_resolved_by_the_side_the_serde_rule_belongs_to() {
     let mut cx = TypeCx::new();
     let input = PresenceMatrix::schema(&mut cx, Direction::Input);
     let output = PresenceMatrix::schema(&mut cx, Direction::Output);
-    let both = PresenceMatrix::schema(&mut cx, Direction::Both);
 
     for (reference, expected) in [
         (
@@ -1483,14 +1520,6 @@ fn field_presence_is_resolved_by_the_side_the_serde_rule_belongs_to() {
         ),
         (
             output,
-            [
-                pons_ir::Presence::Required,
-                pons_ir::Presence::Required,
-                pons_ir::Presence::Optional,
-            ],
-        ),
-        (
-            both,
             [
                 pons_ir::Presence::Required,
                 pons_ir::Presence::Required,
@@ -1531,10 +1560,8 @@ fn an_option_field_is_optional_on_input_and_keeps_its_nullable_type() {
     let mut cx = TypeCx::new();
     let input = DefaultedOptions::schema(&mut cx, Direction::Input);
     let output = DefaultedOptions::schema(&mut cx, Direction::Output);
-    let both = DefaultedOptions::schema(&mut cx, Direction::Both);
     let (input, _) = struct_shape(&cx, &input);
     let (output, _) = struct_shape(&cx, &output);
-    let (both, _) = struct_shape(&cx, &both);
 
     assert_eq!(input[0].wire, "nickname");
     assert_eq!(input[0].presence, pons_ir::Presence::Optional);
@@ -1545,12 +1572,7 @@ fn an_option_field_is_optional_on_input_and_keeps_its_nullable_type() {
             .iter()
             .all(|field| field.presence == pons_ir::Presence::Required)
     );
-    assert!(
-        both.iter()
-            .all(|field| field.presence == pons_ir::Presence::Required),
-        "an Option field is only implicitly optional to a reader, so it stays required once the type is also written"
-    );
-    for direction in [input, output, both] {
+    for direction in [input, output] {
         assert!(
             direction
                 .iter()
@@ -1559,6 +1581,124 @@ fn an_option_field_is_optional_on_input_and_keeps_its_nullable_type() {
     }
     assert!(cx.diagnostics().is_empty());
 
+    let (types, diagnostics) = cx.into_parts();
+    assert!(document(types, diagnostics).validate().is_ok());
+}
+
+#[test]
+fn both_refuses_a_field_that_serde_defaults() {
+    let mut cx = TypeCx::new();
+    let _ = DefaultedOptions::schema(&mut cx, Direction::Both);
+    let refusal = error_coded(&cx, "PONS-E103", "nickname");
+    assert!(
+        refusal
+            .message
+            .contains("#[serde(default)] fills a missing key"),
+        "{}",
+        refusal.message
+    );
+    assert_eq!(
+        cx.diagnostics().len(),
+        2,
+        "both Option fields are only optional to a reader, so neither key survives a shared definition"
+    );
+    let (types, diagnostics) = cx.into_parts();
+    assert!(document(types, diagnostics).validate().is_err());
+}
+
+#[test]
+fn a_shared_type_stays_one_definition_for_both_and_agrees_with_each_side() {
+    let mut cx = TypeCx::new();
+    let both = SharedBoth::schema(&mut cx, Direction::Both);
+    let input = SharedBoth::schema(&mut cx, Direction::Input);
+    let output = SharedBoth::schema(&mut cx, Direction::Output);
+    let TypeRef::Named(named) = &both else {
+        panic!()
+    };
+    assert_eq!(
+        named.id,
+        std::any::type_name::<SharedBoth>(),
+        "Both keys one definition, without a side suffix"
+    );
+    assert_eq!(cx.definitions().len(), 3, "one per direction asked for");
+
+    let shape = |reference: &TypeRef| {
+        let (fields, _) = struct_shape(&cx, reference);
+        fields
+            .iter()
+            .map(|field| (field.wire.as_str(), field.presence))
+            .collect::<Vec<_>>()
+    };
+    let both_shape = shape(&both);
+    assert_eq!(
+        both_shape,
+        [
+            ("value", pons_ir::Presence::Required),
+            ("count", pons_ir::Presence::Required)
+        ]
+    );
+    assert_eq!(shape(&input), both_shape);
+    assert_eq!(shape(&output), both_shape);
+    assert!(cx.diagnostics().is_empty());
+
+    let (types, diagnostics) = cx.into_parts();
+    assert!(document(types, diagnostics).validate().is_ok());
+}
+
+#[test]
+fn an_option_the_two_sides_omit_alike_is_still_one_definition_for_both() {
+    let mut cx = TypeCx::new();
+    let both = SkippedOptionBoth::schema(&mut cx, Direction::Both);
+    let (fields, _) = struct_shape(&cx, &both);
+    assert_eq!(fields[0].wire, "tag");
+    assert_eq!(
+        fields[0].presence,
+        pons_ir::Presence::Optional,
+        "an Option key may be missing on input and skip_serializing_if may omit it on output, so Optional is true of both"
+    );
+    assert!(cx.diagnostics().is_empty());
+    let (types, diagnostics) = cx.into_parts();
+    assert!(document(types, diagnostics).validate().is_ok());
+}
+
+#[test]
+fn both_refuses_a_field_named_differently_by_side() {
+    let mut cx = TypeCx::new();
+    let _ = RenamedSides::schema(&mut cx, Direction::Both);
+    let refusal = error_coded(&cx, "PONS-E103", "value");
+    assert!(refusal.message.contains("to_server"), "{}", refusal.message);
+    assert!(
+        refusal.message.contains("from_server"),
+        "{}",
+        refusal.message
+    );
+    let (types, diagnostics) = cx.into_parts();
+    assert!(document(types, diagnostics).validate().is_err());
+}
+
+#[test]
+fn both_describes_the_representation_the_included_variants_share() {
+    let mut cx = TypeCx::new();
+    let both = ExternalShape::schema(&mut cx, Direction::Both);
+    let TypeRef::Named(named) = both else {
+        panic!()
+    };
+    let TypeKind::Enum { repr, variants } = &cx.definitions()[&named.id].definition else {
+        panic!()
+    };
+    assert_eq!(
+        repr,
+        &EnumRepr::String,
+        "the only variant Both carries is unit, and serde writes a bare unit variant as a string"
+    );
+    assert_eq!(
+        variants
+            .iter()
+            .map(|variant| variant.wire.as_str())
+            .collect::<Vec<_>>(),
+        ["Plain"]
+    );
+    assert!(cx.diagnostics().is_empty());
     let (types, diagnostics) = cx.into_parts();
     assert!(document(types, diagnostics).validate().is_ok());
 }

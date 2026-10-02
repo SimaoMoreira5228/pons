@@ -698,6 +698,298 @@ fn validation_rejects_duplicate_error_dispatch_slots() {
 }
 
 #[test]
+fn validation_refuses_operation_errors_a_common_error_range_covers() {
+    let base: Document =
+        serde_json::from_str(include_str!("../../../fixtures/login.json")).unwrap();
+    let with_common = |common: ErrorStatus| {
+        let mut document = base.clone();
+        let rejected = &mut document.operations[0].errors[0];
+        rejected.status = ErrorStatus::Exact(422);
+        rejected.name = vec!["request".into(), "rejected".into()];
+        let mut inherited = rejected.clone();
+        inherited.status = common;
+        document.common_errors.push(inherited);
+        document
+    };
+    let inherited = |document: &Document, covering: &str| {
+        document.validate().unwrap_err().iter().any(|error| {
+            let error = error.to_string();
+            error.contains("error dispatch slot Exact(422) is inherited")
+                && error.contains(covering)
+        })
+    };
+
+    assert!(inherited(&with_common(ErrorStatus::Class(4)), "Class(4)"));
+    assert!(inherited(&with_common(ErrorStatus::Default), "Default"));
+    with_common(ErrorStatus::Class(5)).validate().unwrap();
+    with_common(ErrorStatus::Exact(422)).validate().unwrap_err();
+}
+
+#[test]
+fn validation_refuses_two_common_errors_that_claim_one_dispatch_slot() {
+    let base: Document =
+        serde_json::from_str(include_str!("../../../fixtures/login.json")).unwrap();
+    let with_common = |covered: ErrorStatus, claiming: ErrorStatus| {
+        let mut document = base.clone();
+        let template = document.operations[0].errors[0].clone();
+        document.operations[0].errors.clear();
+        for status in [covered, claiming] {
+            let mut common = template.clone();
+            common.status = status;
+            document.common_errors.push(common);
+        }
+        document
+    };
+    let claimed = |document: &Document, claiming: &str| {
+        document.validate().unwrap_err().iter().any(|error| {
+            let error = error.to_string();
+            error.contains("error dispatch slot") && error.contains(claiming)
+        })
+    };
+
+    assert!(claimed(
+        &with_common(ErrorStatus::Exact(422), ErrorStatus::Class(4)),
+        "Class(4)"
+    ));
+    assert!(claimed(
+        &with_common(ErrorStatus::Exact(422), ErrorStatus::Default),
+        "Default"
+    ));
+    with_common(ErrorStatus::Exact(422), ErrorStatus::Class(5))
+        .validate()
+        .unwrap();
+    with_common(ErrorStatus::Exact(422), ErrorStatus::Exact(422))
+        .validate()
+        .unwrap_err();
+}
+
+#[test]
+fn an_error_status_covers_the_statuses_a_runtime_can_answer_it_for() {
+    assert!(ErrorStatus::Class(4).covers(&ErrorStatus::Exact(422)));
+    assert!(ErrorStatus::Class(4).covers(&ErrorStatus::Class(4)));
+    assert!(ErrorStatus::Default.covers(&ErrorStatus::Exact(418)));
+    assert!(ErrorStatus::Default.covers(&ErrorStatus::Default));
+    assert!(ErrorStatus::Exact(422).covers(&ErrorStatus::Exact(422)));
+    assert!(!ErrorStatus::Exact(422).covers(&ErrorStatus::Class(4)));
+    assert!(!ErrorStatus::Class(4).covers(&ErrorStatus::Exact(503)));
+    assert!(!ErrorStatus::Class(4).covers(&ErrorStatus::Default));
+}
+
+#[test]
+fn validation_rejects_a_use_site_whose_type_cannot_cross_the_boundary() {
+    use serde_json::json;
+
+    struct Mismatch {
+        name: &'static str,
+        edit: fn(&mut serde_json::Value),
+        expected: &'static str,
+    }
+
+    let cases = [
+        Mismatch {
+            name: "an output type as a request body",
+            edit: |raw| {
+                raw["operations"][0]["body"] =
+                    json!({"ty": {"ref": "User"}, "content": "json", "required": true});
+            },
+            expected: "operations[0].body.ty: the request body needs a type of the input or both direction, but User is declared output",
+        },
+        Mismatch {
+            name: "an output type as a path parameter",
+            edit: |raw| {
+                raw["operations"][1]["path"][1] = json!({"param": "cursor", "ty": {"ref": "User"}});
+            },
+            expected: "operations[1].path[1].ty: the path parameter needs a type of the input or both direction, but User is declared output",
+        },
+        Mismatch {
+            name: "an output type as a query",
+            edit: |raw| {
+                raw["types"]["Filter"] = json!({
+                    "kind": "struct", "name": ["filter"], "direction": "output",
+                    "openness": "reject",
+                    "fields": [{"wire": "q", "ident": ["q"], "ty": {"kind": "string"}, "presence": "optional"}]
+                });
+                raw["operations"][1]["query"] = json!({"ref": "Filter"});
+            },
+            expected: "operations[1].query: the query needs a type of the input or both direction, but Filter is declared output",
+        },
+        Mismatch {
+            name: "an output type as a request header",
+            edit: |raw| {
+                raw["operations"][1]["headers"][0]["ty"] = json!({"ref": "User"});
+            },
+            expected: "operations[1].headers[0].ty: the request header needs a type of the input or both direction, but User is declared output",
+        },
+        Mismatch {
+            name: "an input type as a response body",
+            edit: |raw| {
+                raw["operations"][0]["responses"][0]["body"] = json!({"ref": "LoginRequest"});
+            },
+            expected: "operations[0].responses[0].body: the response body needs a type of the output or both direction, but LoginRequest is declared input",
+        },
+        Mismatch {
+            name: "an input type as a response header",
+            edit: |raw| {
+                raw["operations"][0]["responses"][0]["headers"] = json!([{
+                    "wire": "X-Login", "ty": {"ref": "LoginRequest"}, "presence": "required"
+                }]);
+            },
+            expected: "operations[0].responses[0].headers[0].ty: the response header needs a type of the output or both direction, but LoginRequest is declared input",
+        },
+        Mismatch {
+            name: "an input type as an error body",
+            edit: |raw| {
+                raw["operations"][0]["errors"][0]["body"] = json!({"ref": "LoginRequest"});
+            },
+            expected: "operations[0].errors[0].body: the error body needs a type of the output or both direction, but LoginRequest is declared input",
+        },
+        Mismatch {
+            name: "an input type as an error header",
+            edit: |raw| {
+                raw["operations"][0]["errors"][0]["headers"] = json!([{
+                    "wire": "X-Login", "ty": {"ref": "LoginRequest"}, "presence": "required"
+                }]);
+            },
+            expected: "operations[0].errors[0].headers[0].ty: the error header needs a type of the output or both direction, but LoginRequest is declared input",
+        },
+        Mismatch {
+            name: "an input type as a common error body",
+            edit: |raw| {
+                raw["common_errors"] = json!([{
+                    "status": 429, "name": ["throttled"], "content": "json",
+                    "body": {"ref": "LoginRequest"}
+                }]);
+                raw["operations"][0]["errors_inherit"] = json!(true);
+            },
+            expected: "common_errors[0].body: the error body needs a type of the output or both direction, but LoginRequest is declared input",
+        },
+        Mismatch {
+            name: "an input type as a stream event",
+            edit: |raw| {
+                raw["operations"][1]["stream"]["events"] =
+                    json!([{"event": "login", "data": {"ref": "LoginRequest"}}]);
+            },
+            expected: "operations[1].stream.events[0].data: the stream event needs a type of the output or both direction, but LoginRequest is declared input",
+        },
+        Mismatch {
+            name: "an input type as a stream item",
+            edit: |raw| {
+                raw["operations"][1]["stream"] =
+                    json!({"kind": "ndjson", "item": {"ref": "LoginRequest"}});
+            },
+            expected: "operations[1].stream.item: the stream item needs a type of the output or both direction, but LoginRequest is declared input",
+        },
+        Mismatch {
+            name: "an input type reached through a newtype",
+            edit: |raw| {
+                raw["types"]["Envelope"] = json!({
+                    "kind": "newtype", "name": ["envelope"], "direction": "both",
+                    "inner": {"ref": "LoginRequest"}
+                });
+                raw["operations"][0]["responses"][0]["body"] = json!({"ref": "Envelope"});
+            },
+            expected: "operations[0].responses[0].body: the response body needs a type of the output or both direction, but LoginRequest is declared input",
+        },
+        Mismatch {
+            name: "an output type reached through a struct field",
+            edit: |raw| {
+                raw["types"]["Envelope"] = json!({
+                    "kind": "struct", "name": ["envelope"], "direction": "both",
+                    "openness": "reject",
+                    "fields": [{"wire": "user", "ident": ["user"], "ty": {"ref": "User"}, "presence": "required"}]
+                });
+                raw["operations"][0]["body"] =
+                    json!({"ty": {"ref": "Envelope"}, "content": "json", "required": true});
+            },
+            expected: "operations[0].body.ty: the request body needs a type of the input or both direction, but User is declared output",
+        },
+        Mismatch {
+            name: "an output type reached through a flattened member",
+            edit: |raw| {
+                raw["types"]["Envelope"] = json!({
+                    "kind": "struct", "name": ["envelope"], "direction": "both",
+                    "openness": "reject", "flattened": [{"ref": "User"}], "fields": []
+                });
+                raw["operations"][0]["body"] =
+                    json!({"ty": {"ref": "Envelope"}, "content": "json", "required": true});
+            },
+            expected: "operations[0].body.ty: the request body needs a type of the input or both direction, but User is declared output",
+        },
+        Mismatch {
+            name: "an output type reached through a typed openness value",
+            edit: |raw| {
+                raw["types"]["Envelope"] = json!({
+                    "kind": "struct", "name": ["envelope"], "direction": "both",
+                    "openness": {"preserve_typed": {"value": {"ref": "User"}}}, "fields": []
+                });
+                raw["operations"][0]["body"] =
+                    json!({"ty": {"ref": "Envelope"}, "content": "json", "required": true});
+            },
+            expected: "operations[0].body.ty: the request body needs a type of the input or both direction, but User is declared output",
+        },
+        Mismatch {
+            name: "an input type reached through an enum payload",
+            edit: |raw| {
+                raw["types"]["Envelope"] = json!({
+                    "kind": "enum", "name": ["envelope"], "direction": "both",
+                    "repr": {"kind": "external"},
+                    "variants": [{"wire": "login", "ident": ["login"], "payload": {"kind": "newtype", "ty": {"ref": "LoginRequest"}}}]
+                });
+                raw["operations"][0]["responses"][0]["body"] = json!({"ref": "Envelope"});
+            },
+            expected: "operations[0].responses[0].body: the response body needs a type of the output or both direction, but LoginRequest is declared input",
+        },
+        Mismatch {
+            name: "an output type in a field the request side never reads",
+            edit: |raw| {
+                raw["types"]["Envelope"] = json!({
+                    "kind": "struct", "name": ["envelope"], "direction": "both",
+                    "openness": "reject",
+                    "fields": [{"wire": "user", "ident": ["user"], "ty": {"ref": "User"}, "presence": "required", "access": "read_only"}]
+                });
+                raw["operations"][0]["body"] =
+                    json!({"ty": {"ref": "Envelope"}, "content": "json", "required": true});
+            },
+            expected: "",
+        },
+    ];
+    for Mismatch {
+        name,
+        edit,
+        expected,
+    } in cases
+    {
+        let mut raw: serde_json::Value =
+            serde_json::from_str(include_str!("../../../fixtures/login.json")).unwrap();
+        edit(&mut raw);
+        let document: Document = serde_json::from_value(raw)
+            .unwrap_or_else(|error| panic!("{name}: the edit is not a document: {error}"));
+        let outcome = document.validate();
+        if expected.is_empty() {
+            outcome.unwrap_or_else(|errors| {
+                panic!(
+                    "{name}: {}",
+                    errors
+                        .iter()
+                        .map(ToString::to_string)
+                        .collect::<Vec<_>>()
+                        .join("\n")
+                )
+            });
+            continue;
+        }
+        let errors = outcome
+            .err()
+            .unwrap_or_else(|| panic!("{name}: the document was accepted"))
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(errors.contains(expected), "{name}: {errors}");
+    }
+}
+
+#[test]
 fn validation_rejects_exact_error_response_collisions() {
     let base: Document =
         serde_json::from_str(include_str!("../../../fixtures/login.json")).unwrap();
