@@ -166,6 +166,75 @@ fn diff_accepts_identical_contracts() {
 }
 
 #[test]
+fn diff_reports_an_invalid_new_contract_with_its_own_exit_code() {
+    let directory = tempfile::tempdir().unwrap();
+    let old = directory.path().join("old.json");
+    let new = directory.path().join("new.json");
+    fs::write(&old, FIXTURE).unwrap();
+    let mut input: Value = serde_json::from_str(FIXTURE).unwrap();
+    input["types"]["User"]["diagnostics"] = serde_json::json!([{
+        "severity": "error",
+        "code": "type.x",
+        "message": "unresolved"
+    }]);
+    fs::write(&new, serde_json::to_vec(&input).unwrap()).unwrap();
+
+    let output = pons().arg("diff").arg(&old).arg(&new).output().unwrap();
+    assert_eq!(output.status.code(), Some(3));
+    assert!(
+        String::from_utf8_lossy(&output.stdout)
+            .contains("BREAKING document: the new document is invalid: type User diagnostics")
+    );
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("error diagnostic type.x: unresolved")
+    );
+}
+
+#[test]
+fn diff_passes_a_repair_of_an_invalid_previous_contract() {
+    let directory = tempfile::tempdir().unwrap();
+    let old = directory.path().join("old.json");
+    let new = directory.path().join("new.json");
+    let mut input: Value = serde_json::from_str(FIXTURE).unwrap();
+    input["types"]["User"]["fields"][1]["default"] = serde_json::json!(7);
+    fs::write(&old, serde_json::to_vec(&input).unwrap()).unwrap();
+    fs::write(&new, FIXTURE).unwrap();
+
+    let output = pons().arg("diff").arg(&old).arg(&new).output().unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("INFO document: the previous document was invalid"));
+    assert!(stdout.contains("NON_BREAKING types.User.fields.nickname: field default changed"));
+    assert!(output.stderr.is_empty());
+}
+
+#[test]
+fn diff_passes_a_warning_only_change() {
+    let directory = tempfile::tempdir().unwrap();
+    let old = directory.path().join("old.json");
+    let new = directory.path().join("new.json");
+    fs::write(&old, FIXTURE).unwrap();
+    let mut input: Value = serde_json::from_str(FIXTURE).unwrap();
+    input["operations"][0]["body"]["ext"] = serde_json::json!({"source.body": 1});
+    fs::write(&new, serde_json::to_vec(&input).unwrap()).unwrap();
+
+    let output = pons().arg("diff").arg(&old).arg(&new).output().unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        String::from_utf8_lossy(&output.stdout)
+            .contains("WARNING operations.auth.login.body: request body metadata changed")
+    );
+}
+
+#[test]
 fn emit_writes_a_typed_typescript_client() {
     let directory = tempfile::tempdir().unwrap();
     let output_dir = directory.path().join("generated");

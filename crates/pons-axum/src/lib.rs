@@ -35,8 +35,8 @@ pub use ndjson::Ndjson;
 use operation::build;
 pub use pons_ir::Info;
 use pons_ir::{
-    AuthRequirement, AuthScheme, Diagnostic, Document, ErrorResponse, ResponseHeader, TypeDef,
-    TypeKind, TypeRef, ValidationError,
+    AuthRequirement, AuthScheme, Diagnostic, Document, ErrorContent, ErrorResponse, ResponseHeader,
+    TypeDef, TypeKind, TypeRef, ValidationError,
 };
 pub use raw_bytes::RawBytes;
 pub use request::{Form, Json, Path, Query};
@@ -377,15 +377,15 @@ fn wire_differences(inherited: &ErrorResponse, declared: &ErrorResponse) -> Vec<
             both_spelled_differ(inherited.body.as_ref(), declared.body.as_ref()),
         ),
         ("content", inherited.content != declared.content),
-        ("media type", inherited.media_type != declared.media_type),
+        (
+            "media type",
+            effective_media_type(inherited) != effective_media_type(declared),
+        ),
         (
             "response headers",
             !same_headers(&inherited.headers, &declared.headers),
         ),
-        (
-            "retryable",
-            both_spelled_differ(inherited.retryable.as_ref(), declared.retryable.as_ref()),
-        ),
+        ("retryable", inherited.retryable != declared.retryable),
         ("extensions", inherited.ext != declared.ext),
     ]
     .into_iter()
@@ -397,6 +397,18 @@ fn both_spelled_differ<T: PartialEq>(inherited: Option<&T>, declared: Option<&T>
     match (inherited, declared) {
         (Some(inherited), Some(declared)) => inherited != declared,
         _ => false,
+    }
+}
+
+fn effective_media_type(error: &ErrorResponse) -> Option<&str> {
+    match error.media_type.as_deref() {
+        Some(declared) => Some(declared),
+        None => match error.content {
+            ErrorContent::Json => Some("application/json"),
+            ErrorContent::ProblemJson => Some("application/problem+json"),
+            ErrorContent::Text => Some("text/plain"),
+            ErrorContent::Empty => None,
+        },
     }
 }
 

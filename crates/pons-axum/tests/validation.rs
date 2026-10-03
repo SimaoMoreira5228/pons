@@ -1723,8 +1723,8 @@ fn a_common_error_range_that_covers_the_rejection_is_diagnosed_before_it_is_publ
 
         let errors = refused_build(router);
         assert!(
-            errors.contains("PONS-E102") && errors.contains("is inherited"),
-            "{errors} must refuse to install a document that keeps an inherited slot"
+            errors.contains("PONS-E102") && errors.contains("a different body and retryable"),
+            "{errors} must refuse to install a document whose rejection slot another error answers"
         );
     }
 }
@@ -1746,19 +1746,125 @@ fn a_common_error_range_that_answers_the_rejection_the_same_way_leaves_the_slot_
 }
 
 #[test]
-fn a_common_error_that_omits_retryable_does_not_disagree_with_the_rejection() {
+fn a_common_error_that_spells_the_media_type_the_rejection_answers_with_owns_the_slot() {
+    struct LoudRejectionReport;
+
+    impl ErrorSpec for LoudRejectionReport {
+        fn errors(cx: &mut TypeCx) -> Vec<ErrorResponse> {
+            pons_axum::ViolationReport::errors(cx)
+                .into_iter()
+                .map(|mut error| {
+                    error.media_type = Some("application/json".into());
+                    error.name = vec!["loud".into()];
+                    error
+                })
+                .collect()
+        }
+    }
+
+    let document = Router::<()>::new(info())
+        .common_error::<LoudRejectionReport>()
+        .route("/loud", post(create_open_user))
+        .into_document()
+        .expect("the media type the rejection answers with is not a disagreement");
+    assert_eq!(
+        document.common_errors[0].media_type.as_deref(),
+        Some("application/json"),
+        "the common error spells what the rejection's content kind already answers"
+    );
+    let loud = operation(&document, "loud");
+    assert!(
+        loud.errors.is_empty(),
+        "{:?} must leave the slot to the common error that answers the same media type",
+        loud.errors
+    );
+    assert!(loud.diagnostics.is_empty());
+}
+
+#[test]
+fn a_common_error_that_leaves_retryable_out_does_not_own_the_slot_the_client_reads() {
+    fn router() -> Router<()> {
+        Router::<()>::new(info())
+            .common_error::<SilentRejectionReport>()
+            .route("/silent", post(create_open_user))
+    }
+    let document = router().document();
+    assert_eq!(
+        declared_rejection(&document, "silent")
+            .expect("/silent declares the rejection the runtime can serve")
+            .retryable,
+        Some(false),
+        "the rejection the client reads is never retryable"
+    );
+    assert_eq!(document.common_errors[0].retryable, None);
+    let diagnostic = operation(&document, "silent")
+        .diagnostics
+        .iter()
+        .find(|diagnostic| diagnostic.code == "PONS-E102")
+        .expect("a common error that never says whether it is retryable cannot own the slot");
+    assert!(
+        diagnostic.message.contains("retryable"),
+        "{} must name the field the client branches on",
+        diagnostic.message
+    );
+
+    let errors = refused(router());
+    assert!(
+        errors.contains("PONS-E102") && errors.contains("retryable"),
+        "{errors} must refuse a document whose inherited slot no longer says a request is not retryable"
+    );
+}
+
+#[test]
+fn a_common_error_that_leaves_retryable_out_as_the_rejection_does_owns_the_slot() {
+    struct SilentRejection(pons_axum::ViolationReport);
+
+    impl ErrorSpec for SilentRejection {
+        fn errors(cx: &mut TypeCx) -> Vec<ErrorResponse> {
+            pons_axum::ViolationReport::errors(cx)
+                .into_iter()
+                .map(|mut error| {
+                    error.retryable = None;
+                    error
+                })
+                .collect()
+        }
+    }
+
+    impl IntoResponse for SilentRejection {
+        fn into_response(self) -> axum::response::Response {
+            self.0.into_response()
+        }
+    }
+
+    async fn declares_its_own_silent_rejection(
+        Json(_body): Json<OpenUser>,
+    ) -> Result<axum::Json<User>, SilentRejection> {
+        Err(SilentRejection(pons_axum::ViolationReport {
+            violations: Vec::new(),
+        }))
+    }
+
     let document = Router::<()>::new(info())
         .common_error::<SilentRejectionReport>()
-        .route("/silent", post(create_open_user))
+        .route("/silent", post(declares_its_own_silent_rejection))
         .into_document()
-        .expect("a value one side leaves out is not a disagreement");
+        .expect("a value both errors leave out is not a disagreement");
+    assert_eq!(document.common_errors[0].retryable, None);
     let silent = operation(&document, "silent");
     assert!(
         silent.errors.is_empty(),
-        "{:?} leaves the slot to the common error that answers it the same way",
+        "{:?} must leave the slot to the common error that leaves the field out too",
         silent.errors
     );
-    assert!(silent.diagnostics.is_empty());
+    assert!(
+        !silent
+            .diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code == "PONS-E102"),
+        "{:?} must not report a field neither error spells",
+        silent.diagnostics
+    );
 }
 
 #[test]

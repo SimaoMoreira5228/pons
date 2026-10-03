@@ -107,15 +107,6 @@ fn definition_type(
                 .map(|field| local_type_ref(&field.ty, document, names, mode))
                 .collect::<Result<Vec<_>, _>>()?;
             known_types.extend(flattened_types);
-            if let ObjectOpenness::PreserveTyped { value } = openness {
-                let extra = local_type_ref(openness_value(value, document), document, names, mode)?;
-                if known_types.iter().any(|ty| *ty != extra) {
-                    return Err(EmitError(
-                        "TypeScript cannot represent typed object openness when direct or flattened fields have different types"
-                            .into(),
-                    ));
-                }
-            }
             if let Some(carrier) = flattened_opaque(flattened, document) {
                 return local_type_ref(carrier, document, names, mode);
             }
@@ -138,6 +129,12 @@ fn definition_type(
                 ObjectOpenness::PreserveTyped { value } => {
                     let extra =
                         local_type_ref(openness_value(value, document), document, names, mode)?;
+                    if known_types.iter().any(|ty| *ty != extra) {
+                        return Err(EmitError(
+                            "TypeScript cannot represent typed object openness when direct or flattened fields have different types"
+                                .into(),
+                        ));
+                    }
                     let index_type = if fields.iter().any(|field| {
                         field.presence == pons_ir::Presence::Optional
                             || matches!(

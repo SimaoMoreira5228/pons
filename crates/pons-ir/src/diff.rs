@@ -1,8 +1,8 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use crate::{
-    AuthScheme, Body, Direction, Doc, Document, ErrorResponse, Field, Info, InlineType, OAuthFlow,
-    Operation, Presence, Response, TypeDef, TypeKind, TypeRef,
+    AuthScheme, Body, Diagnostic, DiagnosticSeverity, Direction, Doc, Document, ErrorResponse,
+    Field, Info, InlineType, OAuthFlow, Operation, Presence, Response, TypeDef, TypeKind, TypeRef,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -26,10 +26,12 @@ pub struct Diff {
 }
 
 impl Diff {
+    pub fn worst(&self) -> Option<ChangeLevel> {
+        self.changes.iter().map(|change| change.level).max()
+    }
+
     pub fn has_breaking_changes(&self) -> bool {
-        self.changes
-            .iter()
-            .any(|change| change.level == ChangeLevel::Breaking)
+        self.worst() == Some(ChangeLevel::Breaking)
     }
 }
 
@@ -41,6 +43,7 @@ impl Document {
         new.canonicalize();
 
         let mut diff = Diff::default();
+        diff_validity(&mut diff, &old, &new);
         if old.ext != new.ext {
             add(
                 &mut diff,
@@ -61,6 +64,31 @@ impl Document {
         diff_operations(&mut diff, &old, &new);
         diff
     }
+}
+
+fn diff_validity(diff: &mut Diff, old: &Document, new: &Document) {
+    let (level, label, errors) = match (old.validate().err(), new.validate().err()) {
+        (None, None) | (Some(_), Some(_)) => return,
+        (Some(errors), None) => (
+            ChangeLevel::Info,
+            "the previous document was invalid",
+            errors,
+        ),
+        (None, Some(errors)) => (ChangeLevel::Breaking, "the new document is invalid", errors),
+    };
+    add(
+        diff,
+        level,
+        "document",
+        format!(
+            "{label}: {}",
+            errors
+                .iter()
+                .map(ToString::to_string)
+                .collect::<Vec<_>>()
+                .join("; ")
+        ),
+    );
 }
 
 fn add(diff: &mut Diff, level: ChangeLevel, path: impl Into<String>, detail: impl Into<String>) {
@@ -306,6 +334,21 @@ fn add_doc_change(diff: &mut Diff, path: &str, old: Option<&Doc>, new: Option<&D
     add(diff, level, path, format!("{label} {change}"));
 }
 
+fn diff_diagnostics(diff: &mut Diff, path: &str, old: &[Diagnostic], new: &[Diagnostic]) {
+    for diagnostic in new {
+        if diagnostic.severity == DiagnosticSeverity::Error
+            && !old.iter().any(|previous| previous.code == diagnostic.code)
+        {
+            add(
+                diff,
+                ChangeLevel::Breaking,
+                path,
+                format!("error diagnostic added: {}", diagnostic.code),
+            );
+        }
+    }
+}
+
 fn diff_type(diff: &mut Diff, id: &str, old: &TypeDef, new: &TypeDef) {
     let path = format!("types.{id}");
     if old.name != new.name {
@@ -330,7 +373,7 @@ fn diff_type(diff: &mut Diff, id: &str, old: &TypeDef, new: &TypeDef) {
                 openness: new_openness,
             },
         ) => {
-            diff_fields(diff, &path, old.direction, old_fields, new_fields);
+            diff_fields(diff, &path, new.direction, old_fields, new_fields);
             if old_flattened != new_flattened {
                 add(
                     diff,
@@ -410,6 +453,19 @@ fn diff_type(diff: &mut Diff, id: &str, old: &TypeDef, new: &TypeDef) {
                             "enum variant metadata changed",
                         );
                     }
+                    add_doc_change(
+                        diff,
+                        &format!("{path}.variants.{wire}"),
+                        previous.doc.as_ref(),
+                        variant.doc.as_ref(),
+                        "enum variant",
+                    );
+                    diff_diagnostics(
+                        diff,
+                        &format!("{path}.variants.{wire}"),
+                        &previous.diagnostics,
+                        &variant.diagnostics,
+                    );
                 } else {
                     let level = if new.direction == Direction::Input {
                         ChangeLevel::NonBreaking
@@ -432,6 +488,8 @@ fn diff_type(diff: &mut Diff, id: &str, old: &TypeDef, new: &TypeDef) {
         }
         _ => add(diff, ChangeLevel::Breaking, &path, "type kind changed"),
     }
+    add_doc_change(diff, &path, old.doc.as_ref(), new.doc.as_ref(), "type");
+    diff_diagnostics(diff, &path, &old.diagnostics, &new.diagnostics);
 }
 
 fn diff_fields(diff: &mut Diff, owner: &str, direction: Direction, old: &[Field], new: &[Field]) {
@@ -451,8 +509,7 @@ fn diff_fields(diff: &mut Diff, owner: &str, direction: Direction, old: &[Field]
         let path = format!("{owner}.fields.{wire}");
         let Some(previous) = old.get(wire) else {
             let input_required = matches!(direction, Direction::Input | Direction::Both)
-                && field.presence == Presence::Required
-                && field.access != Some(crate::Access::ReadOnly);
+                && field.presence == Presence::Required;
             add(
                 diff,
                 if input_required {
@@ -530,6 +587,14 @@ fn diff_fields(diff: &mut Diff, owner: &str, direction: Direction, old: &[Field]
         if previous.ext != field.ext {
             add(diff, ChangeLevel::Warning, &path, "field metadata changed");
         }
+        add_doc_change(
+            diff,
+            &path,
+            previous.doc.as_ref(),
+            field.doc.as_ref(),
+            "field",
+        );
+        diff_diagnostics(diff, &path, &previous.diagnostics, &field.diagnostics);
     }
 }
 

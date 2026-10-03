@@ -10,7 +10,7 @@ use std::process::ExitCode;
 use pons_emit_ts::ErrorStrategy;
 use pons_ir::{ChangeLevel, Document};
 
-const HELP: &str = "Usage: pons <command> <ir.json> [arguments]\n\nCommands:\n  check <ir.json>                              Validate an IR document\n  fmt <ir.json>                                Rewrite an IR document in canonical form\n  diff <old.json> <new.json>                   Classify changes between two IR documents\n  emit --target <name> <ir.json> <output-dir> [--strict|--lossy] [--errors <neverthrow|throw>] [--coverage <relative-file>]\n                                                Generate files (built-in: ts, openapi)\n      --strict                                 Reject unsupported/lossy coverage; opaque is allowed on ts/openapi, and on a plugin that declares it (default)\n      --lossy                                  Emit non-exact coverage with warnings\n      --errors <neverthrow|throw>              TypeScript target only: neverthrow (default), throw\n      --coverage <relative-file>               Write emitter coverage as JSON\n";
+const HELP: &str = "Usage: pons <command> <ir.json> [arguments]\n\nCommands:\n  check <ir.json>                              Validate an IR document\n  fmt <ir.json>                                Rewrite an IR document in canonical form\n  diff <old.json> <new.json>                   Classify changes between two IR documents (exit 1 breaking, exit 3 invalid new contract)\n  emit --target <name> <ir.json> <output-dir> [--strict|--lossy] [--errors <neverthrow|throw>] [--coverage <relative-file>]\n                                                Generate files (built-in: ts, openapi)\n      --strict                                 Reject unsupported/lossy coverage; opaque is allowed on ts/openapi, and on a plugin that declares it (default)\n      --lossy                                  Emit non-exact coverage with warnings\n      --errors <neverthrow|throw>              TypeScript target only: neverthrow (default), throw\n      --coverage <relative-file>               Write emitter coverage as JSON\n";
 
 fn main() -> ExitCode {
     match run(env::args_os().skip(1).collect()) {
@@ -22,6 +22,10 @@ fn main() -> ExitCode {
         Err(CliError::Failure(message)) => {
             eprintln!("pons: {message}");
             ExitCode::FAILURE
+        }
+        Err(CliError::Invalid(message)) => {
+            eprintln!("pons: {message}");
+            ExitCode::from(3)
         }
     }
 }
@@ -45,8 +49,6 @@ fn run(args: Vec<OsString>) -> Result<(), CliError> {
         }
         let old = read_document(Path::new(&args[1]))?;
         let new = read_document(Path::new(&args[2]))?;
-        validate(&old)?;
-        validate(&new)?;
         let diff = old.diff(&new);
         if diff.changes.is_empty() {
             println!("No changes.");
@@ -60,7 +62,10 @@ fn run(args: Vec<OsString>) -> Result<(), CliError> {
             };
             println!("{level} {}: {}", change.path, change.detail);
         }
-        return if diff.has_breaking_changes() {
+        if let Err(message) = validation_errors(&new) {
+            return Err(CliError::Invalid(message));
+        }
+        return if diff.worst() == Some(ChangeLevel::Breaking) {
             Err(CliError::Failure("breaking changes found".into()))
         } else {
             Ok(())
@@ -196,14 +201,16 @@ fn read_document(path: &Path) -> Result<Document, CliError> {
 }
 
 fn validate(document: &Document) -> Result<(), CliError> {
+    validation_errors(document).map_err(CliError::Failure)
+}
+
+fn validation_errors(document: &Document) -> Result<(), String> {
     document.validate().map_err(|errors| {
-        CliError::Failure(
-            errors
-                .iter()
-                .map(ToString::to_string)
-                .collect::<Vec<_>>()
-                .join("\n"),
-        )
+        errors
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>()
+            .join("\n")
     })
 }
 
@@ -257,4 +264,5 @@ fn rewrite_canonical(path: &Path, document: &Document) -> Result<(), CliError> {
 enum CliError {
     Usage(String),
     Failure(String),
+    Invalid(String),
 }

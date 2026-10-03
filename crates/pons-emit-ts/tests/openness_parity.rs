@@ -218,7 +218,7 @@ fn a_flattened_map_is_rejected_by_both() {
 }
 
 #[test]
-fn a_flattened_opaque_carrier_does_not_hide_incompatible_typed_openness() {
+fn a_flattened_opaque_carrier_types_the_struct_as_its_codec_value() {
     let mut raw: Value =
         serde_json::from_str(include_str!("../../../fixtures/login.json")).unwrap();
     raw["types"]["Metadata"] = json!({
@@ -230,12 +230,13 @@ fn a_flattened_opaque_carrier_does_not_hide_incompatible_typed_openness() {
         "flattened": [{"kind": "opaque", "codec": "flatten.codec", "wire": "json"}],
     });
     let document: Document = serde_json::from_value(raw).unwrap();
-    let error = pons_emit_ts::emit(&document).unwrap_err();
-    assert!(
-        error.0.contains("direct or flattened fields"),
-        "{}",
-        error.0
-    );
+    let types = pons_emit_ts::emit(&document)
+        .unwrap()
+        .into_iter()
+        .find(|file| file.path == "types.ts")
+        .unwrap()
+        .content;
+    assert!(types.contains("export type Metadata = unknown;"), "{types}");
 }
 
 #[test]

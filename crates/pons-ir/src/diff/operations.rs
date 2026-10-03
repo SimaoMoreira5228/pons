@@ -44,22 +44,11 @@ fn operation_paths(old: &Document, new: &Document) -> BTreeMap<Vec<Vec<String>>,
         .chain(&new.operations)
         .map(|operation| operation.id.clone())
         .collect::<BTreeSet<_>>();
-    let mut paths = BTreeMap::new();
-    let mut used = BTreeSet::new();
-    for id in ids {
-        let readable = readable_operation_path(&id);
-        let mut path = readable.clone();
-        if !used.insert(path.clone()) {
-            path = format!("operations.{}", crate::operation_path(&id));
-            let mut suffix = 2;
-            while !used.insert(path.clone()) {
-                path = format!("{readable}#{suffix}");
-                suffix += 1;
-            }
-        }
-        paths.insert(id, path);
-    }
-    paths
+    injective_paths(
+        ids,
+        |id| readable_operation_path(id),
+        |id| format!("operations.{}", crate::operation_path(id)),
+    )
 }
 
 fn readable_operation_path(id: &[Vec<String>]) -> String {
@@ -70,6 +59,29 @@ fn readable_operation_path(id: &[Vec<String>]) -> String {
             .collect::<Vec<_>>()
             .join(".")
     )
+}
+
+fn injective_paths<K: Ord>(
+    keys: impl IntoIterator<Item = K>,
+    readable: impl Fn(&K) -> String,
+    escaped: impl Fn(&K) -> String,
+) -> BTreeMap<K, String> {
+    let mut paths = BTreeMap::new();
+    let mut used = BTreeSet::new();
+    for key in keys {
+        let read = readable(&key);
+        let mut path = read.clone();
+        if !used.insert(path.clone()) {
+            path = escaped(&key);
+            let mut suffix = 2;
+            while !used.insert(path.clone()) {
+                path = format!("{read}#{suffix}");
+                suffix += 1;
+            }
+        }
+        paths.insert(key, path);
+    }
+    paths
 }
 
 fn diff_operation(diff: &mut Diff, path: &str, old: &Operation, new: &Operation) {
@@ -171,7 +183,10 @@ fn diff_operation(diff: &mut Diff, path: &str, old: &Operation, new: &Operation)
             "inherited errors changed",
         );
     }
-    if old.auth != new.auth {
+    if old.auth.alternatives != new.auth.alternatives
+        || old.auth.scopes != new.auth.scopes
+        || old.auth.optional != new.auth.optional
+    {
         add(
             diff,
             ChangeLevel::Breaking,
@@ -179,22 +194,45 @@ fn diff_operation(diff: &mut Diff, path: &str, old: &Operation, new: &Operation)
             "authentication requirement changed",
         );
     }
-    if old.provides != new.provides {
+    if old.auth.ext != new.auth.ext {
         add(
+            diff,
+            ChangeLevel::Warning,
+            format!("{path}.auth"),
+            "authentication requirement metadata changed",
+        );
+    }
+    match (&old.provides, &new.provides) {
+        (Some(old), Some(new)) => {
+            if old.scheme != new.scheme
+                || old.value != new.value
+                || old.expires_at != new.expires_at
+            {
+                add(
+                    diff,
+                    ChangeLevel::Breaking,
+                    format!("{path}.provides"),
+                    "credential provision changed",
+                );
+            }
+            if old.ext != new.ext {
+                add(
+                    diff,
+                    ChangeLevel::Warning,
+                    format!("{path}.provides"),
+                    "credential provision metadata changed",
+                );
+            }
+        }
+        (Some(_), None) | (None, Some(_)) => add(
             diff,
             ChangeLevel::Breaking,
             format!("{path}.provides"),
             "credential provision changed",
-        );
+        ),
+        (None, None) => {}
     }
-    if old.stream != new.stream {
-        add(
-            diff,
-            ChangeLevel::Breaking,
-            format!("{path}.stream"),
-            "stream definition changed",
-        );
-    }
+    diff_stream(diff, path, old.stream.as_ref(), new.stream.as_ref());
     if old.ext != new.ext {
         add(
             diff,
@@ -233,11 +271,7 @@ fn diff_body(diff: &mut Diff, path: &str, old: Option<&Body>, new: Option<&Body>
         }
         return;
     };
-    if old.ty != new.ty
-        || old.content != new.content
-        || old.media_type != new.media_type
-        || old.ext != new.ext
-    {
+    if old.ty != new.ty || old.content != new.content || old.media_type != new.media_type {
         add(
             diff,
             ChangeLevel::Breaking,
@@ -259,6 +293,123 @@ fn diff_body(diff: &mut Diff, path: &str, old: Option<&Body>, new: Option<&Body>
                 "request body became required"
             },
         );
+    }
+    if old.ext != new.ext {
+        add(
+            diff,
+            ChangeLevel::Warning,
+            format!("{path}.body"),
+            "request body metadata changed",
+        );
+    }
+}
+
+fn diff_stream(
+    diff: &mut Diff,
+    path: &str,
+    old: Option<&crate::StreamDescription>,
+    new: Option<&crate::StreamDescription>,
+) {
+    match (old, new) {
+        (Some(old), Some(new)) => match (&old.kind, &new.kind) {
+            (crate::StreamKind::Sse { events: old }, crate::StreamKind::Sse { events: new }) => {
+                let old: BTreeMap<_, _> = old.iter().map(|event| (&event.event, event)).collect();
+                let new: BTreeMap<_, _> = new.iter().map(|event| (&event.event, event)).collect();
+                for event in old.keys() {
+                    if !new.contains_key(event) {
+                        add(
+                            diff,
+                            ChangeLevel::Breaking,
+                            format!("{path}.stream.events.{event}"),
+                            "stream event removed",
+                        );
+                    }
+                }
+                for (event, message) in new {
+                    let event_path = format!("{path}.stream.events.{event}");
+                    match old.get(event) {
+                        Some(previous) if previous.data != message.data => add(
+                            diff,
+                            ChangeLevel::Breaking,
+                            event_path,
+                            "stream event data type changed",
+                        ),
+                        Some(_) => {}
+                        None => add(
+                            diff,
+                            ChangeLevel::NonBreaking,
+                            event_path,
+                            "stream event added",
+                        ),
+                    }
+                }
+            }
+            (crate::StreamKind::Ndjson { item: old }, crate::StreamKind::Ndjson { item: new })
+                if old != new =>
+            {
+                add(
+                    diff,
+                    ChangeLevel::Breaking,
+                    format!("{path}.stream.item"),
+                    "stream item type changed",
+                )
+            }
+            (
+                crate::StreamKind::Bytes { content_type: old },
+                crate::StreamKind::Bytes { content_type: new },
+            ) if old != new => add(
+                diff,
+                ChangeLevel::Breaking,
+                format!("{path}.stream.content_type"),
+                "stream content type changed",
+            ),
+            (
+                crate::StreamKind::Websocket {
+                    client: old_client,
+                    server: old_server,
+                },
+                crate::StreamKind::Websocket {
+                    client: new_client,
+                    server: new_server,
+                },
+            ) => {
+                if old_client != new_client {
+                    add(
+                        diff,
+                        ChangeLevel::Breaking,
+                        format!("{path}.stream.client"),
+                        "stream client message type changed",
+                    );
+                }
+                if old_server != new_server {
+                    add(
+                        diff,
+                        ChangeLevel::Breaking,
+                        format!("{path}.stream.server"),
+                        "stream server message type changed",
+                    );
+                }
+            }
+            _ => add(
+                diff,
+                ChangeLevel::Breaking,
+                format!("{path}.stream"),
+                "stream kind changed",
+            ),
+        },
+        (Some(_), None) => add(
+            diff,
+            ChangeLevel::Breaking,
+            format!("{path}.stream"),
+            "stream removed",
+        ),
+        (None, Some(_)) => add(
+            diff,
+            ChangeLevel::Breaking,
+            format!("{path}.stream"),
+            "stream added",
+        ),
+        (None, None) => {}
     }
 }
 
@@ -411,31 +562,32 @@ pub(super) fn diff_errors(
     old: &[ErrorResponse],
     new: &[ErrorResponse],
 ) {
+    let paths = error_paths(path, old, new);
     let old: BTreeMap<_, _> = old
         .iter()
-        .map(|error| ((&error.status, &error.name), error))
+        .map(|error| ((error.status.clone(), error.name.clone()), error))
         .collect();
     let new: BTreeMap<_, _> = new
         .iter()
-        .map(|error| ((&error.status, &error.name), error))
+        .map(|error| ((error.status.clone(), error.name.clone()), error))
         .collect();
     for key in old.keys() {
         if !new.contains_key(key) {
             add(
                 diff,
                 ChangeLevel::Breaking,
-                format!("{path}.errors.{}", key.1.join("_")),
+                paths.get(key).unwrap().clone(),
                 "error removed",
             );
         }
     }
     for (key, error) in new {
-        let error_path = format!("{path}.errors.{}", key.1.join("_"));
+        let error_path = paths.get(&key).unwrap().clone();
         let Some(previous) = old.get(&key) else {
             add(
                 diff,
                 ChangeLevel::Breaking,
-                &error_path,
+                error_path,
                 "error status added",
             );
             continue;
@@ -464,4 +616,31 @@ pub(super) fn diff_errors(
             );
         }
     }
+}
+
+fn error_paths(
+    path: &str,
+    old: &[ErrorResponse],
+    new: &[ErrorResponse],
+) -> BTreeMap<(crate::ErrorStatus, crate::Name), String> {
+    let keys = old
+        .iter()
+        .chain(new)
+        .map(|error| (error.status.clone(), error.name.clone()))
+        .collect::<BTreeSet<_>>();
+    injective_paths(
+        keys,
+        |(_, name)| format!("{path}.errors.{}", name.join("_")),
+        |(status, name)| {
+            let status = match status {
+                crate::ErrorStatus::Exact(status) => status.to_string(),
+                crate::ErrorStatus::Class(class) => format!("{class}xx"),
+                crate::ErrorStatus::Default => "default".into(),
+            };
+            format!(
+                "{path}.errors.{status}.{}",
+                crate::operation_path(std::slice::from_ref(name))
+            )
+        },
+    )
 }

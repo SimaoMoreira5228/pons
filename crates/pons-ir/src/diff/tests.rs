@@ -67,6 +67,493 @@ fn equivalent_orderings_have_no_diff() {
 }
 
 #[test]
+fn flattened_reordering_has_no_diff() {
+    let member = |id: &str| {
+        serde_json::json!({
+            "kind": "struct",
+            "name": [id],
+            "direction": "output",
+            "openness": "reject",
+            "fields": [{
+                "wire": id,
+                "ident": [id],
+                "ty": {"kind": "string"},
+                "presence": "optional"
+            }]
+        })
+    };
+    let mut old: Document = serde_json::from_value(fixture()).unwrap();
+    for id in ["Meta", "Trace"] {
+        old.types
+            .insert(id.into(), serde_json::from_value(member(id)).unwrap());
+    }
+    let TypeKind::Struct { flattened, .. } = &mut old.types.get_mut("User").unwrap().definition
+    else {
+        unreachable!()
+    };
+    *flattened = vec![
+        TypeRef::Named(crate::NamedRef {
+            id: "Meta".into(),
+            variant: None,
+        }),
+        TypeRef::Named(crate::NamedRef {
+            id: "Trace".into(),
+            variant: None,
+        }),
+    ];
+
+    let mut new = old.clone();
+    let TypeKind::Struct { flattened, .. } = &mut new.types.get_mut("User").unwrap().definition
+    else {
+        unreachable!()
+    };
+    flattened.reverse();
+    old.validate().unwrap();
+    new.validate().unwrap();
+
+    assert_eq!(old.diff(&new), Diff::default());
+}
+
+#[test]
+fn worst_reports_the_highest_level() {
+    let old: Document = serde_json::from_value(fixture()).unwrap();
+    assert_eq!(old.diff(&old).worst(), None);
+
+    let mut warned = old.clone();
+    warned.operations[0].semantics.pagination = Some(serde_json::json!({"cursor": true}));
+    let diff = old.diff(&warned);
+    assert_eq!(diff.worst(), Some(ChangeLevel::Warning));
+    assert!(!diff.has_breaking_changes());
+
+    let mut broken = warned;
+    broken.operations[0].semantics.idempotent = true;
+    let diff = old.diff(&broken);
+    assert_eq!(diff.worst(), Some(ChangeLevel::Breaking));
+    assert!(diff.has_breaking_changes());
+}
+
+#[test]
+fn field_presence_is_graded_against_the_new_direction() {
+    let mut old: Document = serde_json::from_value(fixture()).unwrap();
+    old.types.insert(
+        "Profile".into(),
+        serde_json::from_value(serde_json::json!({
+            "kind": "struct",
+            "name": ["profile"],
+            "direction": "output",
+            "openness": "reject",
+            "fields": [{
+                "wire": "handle",
+                "ident": ["handle"],
+                "ty": {"kind": "string"},
+                "presence": "optional"
+            }]
+        }))
+        .unwrap(),
+    );
+    let mut new: Document = serde_json::from_value(serde_json::to_value(&old).unwrap()).unwrap();
+    let definition = new.types.get_mut("Profile").unwrap();
+    definition.direction = Direction::Input;
+    let TypeKind::Struct { fields, .. } = &mut definition.definition else {
+        unreachable!()
+    };
+    fields[0].presence = Presence::Required;
+    old.validate().unwrap();
+    new.validate().unwrap();
+
+    let change = change_at(&old, &new, "types.Profile.fields.handle");
+    assert_eq!(change.level, ChangeLevel::Breaking);
+    assert_eq!(change.detail, "field presence changed");
+    assert_eq!(old.diff(&new).worst(), Some(ChangeLevel::Breaking));
+    assert_eq!(
+        change_at(&old, &new, "types.Profile").detail,
+        "type direction changed"
+    );
+}
+
+#[test]
+fn a_required_read_only_input_field_is_breaking() {
+    let old: Document = serde_json::from_value(fixture()).unwrap();
+    let mut changed = fixture();
+    changed["types"]["EventQuery"]["fields"]
+        .as_array_mut()
+        .unwrap()
+        .push(serde_json::json!({
+            "wire": "since",
+            "ident": ["since"],
+            "ty": {"kind": "string"},
+            "presence": "required",
+            "access": "read_only"
+        }));
+    let new: Document = serde_json::from_value(changed).unwrap();
+    assert!(new.validate().is_err());
+
+    let change = change_at(&old, &new, "types.EventQuery.fields.since");
+    assert_eq!(change.level, ChangeLevel::Breaking);
+    assert_eq!(change.detail, "field added");
+}
+
+#[test]
+fn an_invalid_side_is_reported_once() {
+    let old: Document = serde_json::from_value(fixture()).unwrap();
+
+    let mut carrier = fixture();
+    carrier["operations"][1]["headers"]
+        .as_array_mut()
+        .unwrap()
+        .push(serde_json::json!({
+            "wire": "X-Tenant",
+            "ident": ["tenant"],
+            "ty": {"kind": "string"},
+            "presence": "optional"
+        }));
+    let conflicting: Document = serde_json::from_value(carrier).unwrap();
+    assert!(conflicting.validate().is_err());
+
+    let diff = old.diff(&conflicting);
+    let reported = diff
+        .changes
+        .iter()
+        .filter(|change| change.path == "document")
+        .collect::<Vec<_>>();
+    assert_eq!(reported.len(), 1);
+    assert_eq!(reported[0].level, ChangeLevel::Breaking);
+    assert!(
+        reported[0]
+            .detail
+            .starts_with("the new document is invalid: ")
+    );
+    assert!(reported[0].detail.contains("apiKey carrier name"));
+    assert_eq!(
+        change_at(
+            &old,
+            &conflicting,
+            "operations.events.watch.headers.X-Tenant"
+        )
+        .level,
+        ChangeLevel::NonBreaking
+    );
+    assert_eq!(diff.worst(), Some(ChangeLevel::Breaking));
+
+    let mut contradicted = fixture();
+    contradicted["types"]["User"]["fields"][1]["default"] = serde_json::json!(7);
+    let invalid: Document = serde_json::from_value(contradicted).unwrap();
+    assert!(invalid.validate().is_err());
+    assert_eq!(
+        change_at(&old, &invalid, "types.User.fields.nickname").level,
+        ChangeLevel::NonBreaking
+    );
+    let change = change_at(&old, &invalid, "document");
+    assert_eq!(change.level, ChangeLevel::Breaking);
+    assert!(change.detail.contains("contradicts its type"));
+
+    let mut diagnosed = fixture();
+    diagnosed["types"]["User"]["diagnostics"] = serde_json::json!([{
+        "severity": "error",
+        "code": "type.x",
+        "message": "unresolved"
+    }]);
+    let broken: Document = serde_json::from_value(diagnosed).unwrap();
+    assert!(broken.validate().is_err());
+
+    let change = change_at(&broken, &old, "document");
+    assert_eq!(change.level, ChangeLevel::Info);
+    assert!(
+        change
+            .detail
+            .starts_with("the previous document was invalid: ")
+    );
+    assert!(change.detail.contains("error diagnostic type.x"));
+}
+
+#[test]
+fn type_field_and_variant_documentation_is_compared() {
+    let old: Document = serde_json::from_value(fixture()).unwrap();
+    let mut deprecated = fixture();
+    deprecated["types"]["User"]["doc"] = serde_json::json!({"deprecated": true});
+    deprecated["types"]["User"]["fields"][0]["doc"] = serde_json::json!({"deprecated": true});
+    deprecated["types"]["LoginError"]["variants"][0]["doc"] =
+        serde_json::json!({"deprecated": true});
+    let new: Document = serde_json::from_value(deprecated).unwrap();
+    new.validate().unwrap();
+
+    let diff = old.diff(&new);
+    assert_eq!(diff.worst(), Some(ChangeLevel::Warning));
+    for (path, label) in [
+        ("types.User", "type"),
+        ("types.User.fields.id", "field"),
+        ("types.LoginError.variants.invalid", "enum variant"),
+    ] {
+        let change = diff
+            .changes
+            .iter()
+            .find(|change| change.path == path)
+            .unwrap_or_else(|| panic!("no change reported at {path}"));
+        assert_eq!(change.level, ChangeLevel::Warning);
+        assert_eq!(change.detail, format!("{label} deprecation changed"));
+    }
+
+    let mut summarized = fixture();
+    summarized["types"]["User"]["doc"] = serde_json::json!({"summary": "an account"});
+    let new: Document = serde_json::from_value(summarized).unwrap();
+    let change = change_at(&old, &new, "types.User");
+    assert_eq!(change.level, ChangeLevel::Info);
+    assert_eq!(change.detail, "type documentation changed");
+    assert!(!old.diff(&new).has_breaking_changes());
+}
+
+#[test]
+fn added_error_diagnostics_are_reported() {
+    let old: Document = serde_json::from_value(fixture()).unwrap();
+    let mut changed = fixture();
+    changed["types"]["User"]["diagnostics"] = serde_json::json!([{
+        "severity": "error",
+        "code": "type.x",
+        "message": "unresolved"
+    }]);
+    changed["types"]["User"]["fields"][0]["diagnostics"] = serde_json::json!([{
+        "severity": "error",
+        "code": "field.x",
+        "message": "unresolved"
+    }]);
+    changed["types"]["LoginError"]["variants"][0]["diagnostics"] = serde_json::json!([{
+        "severity": "error",
+        "code": "variant.x",
+        "message": "unresolved"
+    }]);
+    let new: Document = serde_json::from_value(changed).unwrap();
+    assert!(new.validate().is_err());
+
+    let diff = old.diff(&new);
+    assert_eq!(diff.worst(), Some(ChangeLevel::Breaking));
+    for (path, code) in [
+        ("types.User", "type.x"),
+        ("types.User.fields.id", "field.x"),
+        ("types.LoginError.variants.invalid", "variant.x"),
+    ] {
+        let change = diff
+            .changes
+            .iter()
+            .find(|change| change.path == path)
+            .unwrap_or_else(|| panic!("no change reported at {path}"));
+        assert_eq!(change.level, ChangeLevel::Breaking);
+        assert_eq!(change.detail, format!("error diagnostic added: {code}"));
+    }
+}
+
+#[test]
+fn request_body_auth_and_provision_metadata_are_warnings() {
+    let old: Document = serde_json::from_value(fixture()).unwrap();
+    let mut annotated = old.clone();
+    annotated.operations[0]
+        .body
+        .as_mut()
+        .unwrap()
+        .ext
+        .insert("source.body".into(), serde_json::json!(1));
+    annotated.operations[0]
+        .auth
+        .ext
+        .insert("source.auth".into(), serde_json::json!(1));
+    annotated.operations[0]
+        .provides
+        .as_mut()
+        .unwrap()
+        .ext
+        .insert("source.provision".into(), serde_json::json!(1));
+
+    let diff = old.diff(&annotated);
+    assert_eq!(diff.worst(), Some(ChangeLevel::Warning));
+    assert!(!diff.has_breaking_changes());
+    for (path, detail) in [
+        (
+            "operations.auth.login.body",
+            "request body metadata changed",
+        ),
+        (
+            "operations.auth.login.auth",
+            "authentication requirement metadata changed",
+        ),
+        (
+            "operations.auth.login.provides",
+            "credential provision metadata changed",
+        ),
+    ] {
+        let change = diff
+            .changes
+            .iter()
+            .find(|change| change.path == path)
+            .unwrap_or_else(|| panic!("no change reported at {path}"));
+        assert_eq!(change.level, ChangeLevel::Warning);
+        assert_eq!(change.detail, detail);
+    }
+
+    let mut retyped = annotated;
+    retyped.operations[0].body.as_mut().unwrap().media_type =
+        Some("application/vnd.acme+json".into());
+    let diff = old.diff(&retyped);
+    let body = diff
+        .changes
+        .iter()
+        .filter(|change| change.path == "operations.auth.login.body")
+        .collect::<Vec<_>>();
+    assert!(
+        body.iter()
+            .any(|change| change.level == ChangeLevel::Breaking
+                && change.detail == "request body changed")
+    );
+    assert!(
+        body.iter()
+            .any(|change| change.level == ChangeLevel::Warning
+                && change.detail == "request body metadata changed")
+    );
+}
+
+#[test]
+fn stream_events_are_classified_per_event() {
+    let old: Document = serde_json::from_value(fixture()).unwrap();
+
+    let mut added = fixture();
+    added["operations"][1]["stream"]["events"]
+        .as_array_mut()
+        .unwrap()
+        .push(serde_json::json!({"event": "audit", "data": {"ref": "User"}}));
+    let new: Document = serde_json::from_value(added).unwrap();
+    let change = change_at(&old, &new, "operations.events.watch.stream.events.audit");
+    assert_eq!(change.level, ChangeLevel::NonBreaking);
+    assert_eq!(change.detail, "stream event added");
+
+    let mut renamed = fixture();
+    renamed["operations"][1]["stream"]["events"][0]["event"] = serde_json::json!("person");
+    let new: Document = serde_json::from_value(renamed).unwrap();
+    let removed = change_at(&old, &new, "operations.events.watch.stream.events.user");
+    assert_eq!(removed.level, ChangeLevel::Breaking);
+    assert_eq!(removed.detail, "stream event removed");
+    assert_eq!(
+        change_at(&old, &new, "operations.events.watch.stream.events.person").detail,
+        "stream event added"
+    );
+
+    let mut retyped = fixture();
+    retyped["operations"][1]["stream"]["events"][0]["data"] = serde_json::json!({"kind": "string"});
+    let new: Document = serde_json::from_value(retyped).unwrap();
+    let change = change_at(&old, &new, "operations.events.watch.stream.events.user");
+    assert_eq!(change.level, ChangeLevel::Breaking);
+    assert_eq!(change.detail, "stream event data type changed");
+}
+
+#[test]
+fn non_event_stream_kinds_keep_their_own_paths() {
+    let old: Document = serde_json::from_value(fixture()).unwrap();
+    let reskinned = |kind: crate::StreamKind| {
+        let mut document = old.clone();
+        document.operations[1].stream.as_mut().unwrap().kind = kind;
+        document.validate().unwrap();
+        document
+    };
+    let kind_changed = reskinned(crate::StreamKind::Ndjson {
+        item: TypeRef::Inline(InlineType::Bool),
+    });
+    let change = change_at(&old, &kind_changed, "operations.events.watch.stream");
+    assert_eq!(change.level, ChangeLevel::Breaking);
+    assert_eq!(change.detail, "stream kind changed");
+
+    for (from, to, path, detail) in [
+        (
+            crate::StreamKind::Ndjson {
+                item: TypeRef::Inline(InlineType::Bool),
+            },
+            crate::StreamKind::Ndjson {
+                item: TypeRef::Inline(InlineType::Null),
+            },
+            "operations.events.watch.stream.item",
+            "stream item type changed",
+        ),
+        (
+            crate::StreamKind::Bytes {
+                content_type: "application/octet-stream".into(),
+            },
+            crate::StreamKind::Bytes {
+                content_type: "application/x-ndjson".into(),
+            },
+            "operations.events.watch.stream.content_type",
+            "stream content type changed",
+        ),
+        (
+            crate::StreamKind::Websocket {
+                client: TypeRef::Inline(InlineType::Bool),
+                server: TypeRef::Inline(InlineType::Bool),
+            },
+            crate::StreamKind::Websocket {
+                client: TypeRef::Inline(InlineType::Null),
+                server: TypeRef::Inline(InlineType::Bool),
+            },
+            "operations.events.watch.stream.client",
+            "stream client message type changed",
+        ),
+    ] {
+        let retyped = reskinned(to);
+        let change = change_at(&reskinned(from), &retyped, path);
+        assert_eq!(
+            (change.level, change.detail.as_str()),
+            (ChangeLevel::Breaking, detail)
+        );
+    }
+}
+
+#[test]
+fn error_change_paths_are_injective() {
+    let old: Document = serde_json::from_value(fixture()).unwrap();
+
+    let mut statuses = old.clone();
+    statuses.operations[0].errors[0].doc = Some(doc(Some("Login failed"), None));
+    let mut unavailable = statuses.operations[0].errors[0].clone();
+    unavailable.status = crate::ErrorStatus::Class(5);
+    statuses.operations[0].errors.push(unavailable);
+    statuses.validate().unwrap();
+
+    let mut paths = old
+        .diff(&statuses)
+        .changes
+        .iter()
+        .map(|change| change.path.clone())
+        .collect::<Vec<_>>();
+    paths.sort();
+    assert_eq!(
+        paths,
+        vec![
+            "operations.auth.login.errors.5xx.login_error".to_owned(),
+            "operations.auth.login.errors.login_error".to_owned(),
+        ]
+    );
+
+    let mut names = old.clone();
+    let mut parts = names.operations[0].errors[0].clone();
+    parts.name = vec!["a".into(), "b".into()];
+    let mut joined = parts.clone();
+    joined.status = crate::ErrorStatus::Class(5);
+    joined.name = vec!["a_b".into()];
+    names.operations[0].errors = vec![parts, joined];
+    names.validate().unwrap();
+
+    let mut paths = old
+        .diff(&names)
+        .changes
+        .iter()
+        .map(|change| change.path.clone())
+        .collect::<Vec<_>>();
+    paths.sort();
+    assert_eq!(
+        paths,
+        vec![
+            "operations.auth.login.errors.5xx.a%5Fb".to_owned(),
+            "operations.auth.login.errors.a_b".to_owned(),
+            "operations.auth.login.errors.login_error".to_owned(),
+        ]
+    );
+}
+
+#[test]
 fn classifies_added_fields_and_output_enum_variants() {
     let old: Document = serde_json::from_value(fixture()).unwrap();
     let mut changed = fixture();
