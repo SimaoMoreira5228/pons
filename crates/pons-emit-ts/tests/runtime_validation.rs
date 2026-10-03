@@ -4359,6 +4359,63 @@ if (invalidSent !== 0) throw new Error("invalid untagged value reached fetch");
     run_bun(&files, harness);
 }
 
+fn narrowed_untagged_document() -> pons_ir::Document {
+    let mut raw: serde_json::Value =
+        serde_json::from_str(include_str!("../../../fixtures/login.json")).unwrap();
+    raw["types"]["Choice"] = serde_json::json!({
+        "kind": "enum", "name": ["choice"], "direction": "output", "repr": {"kind": "untagged"},
+        "variants": [
+            {"wire": "label", "ident": ["label"], "payload": {"kind": "newtype", "ty": {"kind": "string"}}},
+            {"wire": "count", "ident": ["count"], "payload": {"kind": "newtype", "ty": {"kind": "int", "bits": 16, "signed": false, "wire": "number"}}}
+        ]
+    });
+    raw["operations"][0]["errors"][0]["body"] =
+        serde_json::json!({"ref": "Choice", "variant": "label"});
+    serde_json::from_value(raw).unwrap()
+}
+
+#[test]
+fn a_narrowed_untagged_variant_only_tries_the_variant_it_names() {
+    let document = narrowed_untagged_document();
+    let files = emit_with_strategy(&document, EmitMode::Strict, ErrorStrategy::Throw)
+        .unwrap()
+        .files;
+    let client = files.iter().find(|file| file.path == "client.ts").unwrap();
+    assert!(
+        client
+            .content
+            .contains("{ kind: \"http\"; status: number; body: string; headers: Headers }"),
+        "the narrowed declaration must not offer the other variant:\n{}",
+        client.content
+    );
+
+    let harness = r#"
+import { createClient } from "./client.ts";
+
+const named = createClient({
+  baseUrl: "http://example.test",
+  fetch: async () => new Response(JSON.stringify("late"), { status: 400, headers: { "content-type": "application/json" } }),
+});
+const failure = await named.auth.login({ body: { email: "person@example.test" } }).catch((cause: any) => cause);
+if (failure?.kind !== "http" || failure.body !== "late") {
+  throw new Error(`the narrowed variant was not decoded: ${JSON.stringify(failure)}`);
+}
+
+const other = createClient({
+  baseUrl: "http://example.test",
+  fetch: async () => new Response(JSON.stringify(7), { status: 400, headers: { "content-type": "application/json" } }),
+});
+try {
+  await other.auth.login({ body: { email: "person@example.test" } });
+  throw new Error("a value of another variant was accepted");
+} catch (cause) {
+  const text = JSON.stringify(cause);
+  if (!text.includes("value does not match an enum variant")) throw new Error(text);
+}
+"#;
+    run_bun(&files, harness);
+}
+
 #[test]
 fn drops_refreshed_custom_query_credentials_across_redirects() {
     let mut document: pons_ir::Document =

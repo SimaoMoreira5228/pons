@@ -453,6 +453,12 @@ fn block_on<F: Future>(future: F) -> F::Output {
     }
 }
 
+fn built(router: pons_axum::Router<()>) -> axum::Router<()> {
+    router
+        .into_axum()
+        .expect("the fixture router installs a document that validates")
+}
+
 fn get_status(app: &mut axum::Router<()>, path: &str, authorized: bool) -> StatusCode {
     let mut builder = pons_axum::http::Request::builder().uri(path);
     if authorized {
@@ -1014,7 +1020,7 @@ fn documented_layer_enforces_auth_on_routes_added_after_it() {
         );
     }
 
-    let mut app = router().into_axum();
+    let mut app = built(router());
     for path in ["/before", "/after"] {
         assert_eq!(get_status(&mut app, path, false), StatusCode::UNAUTHORIZED);
         assert_eq!(get_status(&mut app, path, true), StatusCode::OK);
@@ -1057,12 +1063,12 @@ fn pending_layers_are_applied_once_each_in_registration_order() {
     }
 
     LAYER_TRACE.lock().unwrap().clear();
-    let mut app = router().with_state::<()>(AppState).into_axum();
+    let mut app = built(router().with_state::<()>(AppState));
     assert_eq!(get_status(&mut app, "/traced-after", true), StatusCode::OK);
     assert_eq!(LAYER_TRACE.lock().unwrap().as_slice(), ["b", "a"]);
 
     LAYER_TRACE.lock().unwrap().clear();
-    let mut app = doubled().with_state::<()>(AppState).into_axum();
+    let mut app = built(doubled().with_state::<()>(AppState));
     assert_eq!(get_status(&mut app, "/doubled-after", true), StatusCode::OK);
     assert_eq!(LAYER_TRACE.lock().unwrap().as_slice(), ["a", "a"]);
 }

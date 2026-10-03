@@ -302,6 +302,50 @@ enum CommonRejection {
     Rejected,
 }
 
+#[derive(Debug, Serialize, Schema, pons_core::ApiError)]
+enum RangeRejection {
+    #[allow(dead_code)]
+    #[pons(status = "4xx")]
+    Rejected,
+}
+
+#[derive(Debug, Serialize, Schema, pons_core::ApiError)]
+enum DefaultRejection {
+    #[allow(dead_code)]
+    #[pons(status = "default")]
+    Rejected,
+}
+
+struct RangeRejectionReport;
+
+impl ErrorSpec for RangeRejectionReport {
+    fn errors(cx: &mut TypeCx) -> Vec<ErrorResponse> {
+        pons_axum::ViolationReport::errors(cx)
+            .into_iter()
+            .map(|mut error| {
+                error.status = ErrorStatus::Class(4);
+                error.name = vec!["range".into()];
+                error
+            })
+            .collect()
+    }
+}
+
+struct SilentRejectionReport;
+
+impl ErrorSpec for SilentRejectionReport {
+    fn errors(cx: &mut TypeCx) -> Vec<ErrorResponse> {
+        pons_axum::ViolationReport::errors(cx)
+            .into_iter()
+            .map(|mut error| {
+                error.retryable = None;
+                error.name = vec!["silent".into()];
+                error
+            })
+            .collect()
+    }
+}
+
 async fn head_search(pons_axum::Query(_query): pons_axum::Query<Search>) -> NoContent {
     NoContent
 }
@@ -504,6 +548,12 @@ fn header_request(path: &str, name: &str, value: &str) -> Request<Body> {
         .unwrap()
 }
 
+fn built(router: Router<()>) -> axum::Router<()> {
+    router
+        .into_axum()
+        .expect("the fixture router installs a document that validates")
+}
+
 fn send(app: &mut axum::Router<()>, request: Request<Body>) -> (StatusCode, String) {
     let response = block_on(app.call(request)).unwrap();
     let status = response.status();
@@ -572,7 +622,7 @@ fn openness(document: &pons_ir::Document, id: &str) -> ObjectOpenness {
 
 #[test]
 fn a_body_string_that_breaks_the_published_pattern_is_rejected() {
-    let mut app = router().into_axum();
+    let mut app = built(router());
     rejected(
         &mut app,
         json_request(
@@ -585,7 +635,7 @@ fn a_body_string_that_breaks_the_published_pattern_is_rejected() {
 
 #[test]
 fn a_body_number_outside_its_published_bounds_is_rejected() {
-    let mut app = router().into_axum();
+    let mut app = built(router());
     rejected(
         &mut app,
         json_request("/users", r#"{"slug":"ada","retries":9,"tags":["x"]}"#),
@@ -595,7 +645,7 @@ fn a_body_number_outside_its_published_bounds_is_rejected() {
 
 #[test]
 fn a_body_missing_a_required_field_is_rejected() {
-    let mut app = router().into_axum();
+    let mut app = built(router());
     rejected(
         &mut app,
         json_request("/users", r#"{"slug":"ada","tags":["x"]}"#),
@@ -605,7 +655,7 @@ fn a_body_missing_a_required_field_is_rejected() {
 
 #[test]
 fn a_body_that_repeats_an_item_of_a_unique_array_is_rejected() {
-    let mut app = router().into_axum();
+    let mut app = built(router());
     rejected(
         &mut app,
         json_request("/users", r#"{"slug":"ada","retries":2,"tags":["x","x"]}"#),
@@ -615,7 +665,7 @@ fn a_body_that_repeats_an_item_of_a_unique_array_is_rejected() {
 
 #[test]
 fn an_unknown_property_is_rejected_against_deny_unknown_fields() {
-    let mut app = router().into_axum();
+    let mut app = built(router());
     rejected(
         &mut app,
         json_request(
@@ -628,7 +678,7 @@ fn an_unknown_property_is_rejected_against_deny_unknown_fields() {
 
 #[test]
 fn a_body_that_is_not_json_is_rejected_by_the_same_declared_response() {
-    let mut app = router().into_axum();
+    let mut app = built(router());
     let (status, body) = send(&mut app, json_request("/users", "slug=ada"));
     assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{body}");
     let report: Value = serde_json::from_str(&body).unwrap();
@@ -646,7 +696,7 @@ fn a_body_that_is_not_json_is_rejected_by_the_same_declared_response() {
 
 #[test]
 fn a_query_outside_its_published_bounds_is_rejected() {
-    let mut app = router().into_axum();
+    let mut app = built(router());
     rejected(
         &mut app,
         get_request("/search?slug=ada&limit=9"),
@@ -661,7 +711,7 @@ fn a_query_outside_its_published_bounds_is_rejected() {
 
 #[test]
 fn a_path_parameter_outside_its_published_pattern_is_rejected() {
-    let mut app = router().into_axum();
+    let mut app = built(router());
     rejected(
         &mut app,
         get_request("/users/Ada%20Lovelace"),
@@ -671,7 +721,7 @@ fn a_path_parameter_outside_its_published_pattern_is_rejected() {
 
 #[test]
 fn a_form_field_outside_its_published_pattern_is_rejected() {
-    let mut app = router().into_axum();
+    let mut app = built(router());
     rejected(
         &mut app,
         request(
@@ -685,7 +735,7 @@ fn a_form_field_outside_its_published_pattern_is_rejected() {
 
 #[test]
 fn a_header_value_outside_its_published_bounds_is_rejected() {
-    let mut app = router().into_axum();
+    let mut app = built(router());
     rejected(
         &mut app,
         header_request("/retried", "x-retries", "9"),
@@ -695,7 +745,7 @@ fn a_header_value_outside_its_published_bounds_is_rejected() {
 
 #[test]
 fn a_header_that_is_not_the_text_token_its_type_reads_is_rejected() {
-    let mut app = router().into_axum();
+    let mut app = built(router());
     accepted(&mut app, header_request("/flagged", "x-debug", "true"));
     rejected(
         &mut app,
@@ -706,7 +756,7 @@ fn a_header_that_is_not_the_text_token_its_type_reads_is_rejected() {
 
 #[test]
 fn the_default_body_limit_still_guards_the_body_the_validator_reads() {
-    let mut app = router().into_axum();
+    let mut app = built(router());
     let oversized = format!(
         r#"{{"slug":"ada","retries":2,"tags":["{}"]}}"#,
         "x".repeat(3_000_000)
@@ -721,7 +771,7 @@ fn the_default_body_limit_still_guards_the_body_the_validator_reads() {
 
 #[test]
 fn a_request_that_satisfies_the_contract_reaches_the_handler() {
-    let mut app = router().into_axum();
+    let mut app = built(router());
     for request in [
         json_request("/users", r#"{"slug":"ada","retries":2,"tags":["x","y"]}"#),
         get_request("/search?slug=ada&limit=5"),
@@ -808,7 +858,7 @@ fn a_text_body_is_published_as_text_and_is_never_rejected() {
     assert_eq!(note.body.as_ref().unwrap().content, ContentKind::Text);
     assert!(note.errors.is_empty());
 
-    let mut app = router().into_axum();
+    let mut app = built(router());
     for body in ["", "anything at all"] {
         accepted(&mut app, request("/note", "text/plain", body));
     }
@@ -832,7 +882,7 @@ fn a_preserve_opaque_body_checks_its_fields_and_admits_it_accepts_unknown_proper
         ObjectOpenness::PreserveOpaque
     );
 
-    let mut app = router().into_axum();
+    let mut app = built(router());
     accepted(
         &mut app,
         json_request("/open-users", r#"{"slug":"ada","nickname":"ada"}"#),
@@ -864,7 +914,7 @@ fn a_preserve_typed_body_checks_the_extra_properties_it_declares() {
         })
     ));
 
-    let mut app = router().into_axum();
+    let mut app = built(router());
     accepted(
         &mut app,
         json_request("/typed-open", r#"{"slug":"ada","extra":2}"#),
@@ -902,13 +952,13 @@ fn a_type_the_document_does_not_publish_is_refused_instead_of_served_unvalidated
     );
     assert!(
         refused_build(unpublished_router()).contains("unpublished::Type#input"),
-        "a router that would check a request against a type it never publishes must not be built"
+        "into_axum returns the errors instead of panicking at startup on a document that does not validate"
     );
 }
 
 #[test]
 fn a_json_body_keeps_the_nullability_a_query_carrier_lowered() {
-    let mut app = carriers().into_axum();
+    let mut app = built(carriers());
 
     accepted(
         &mut app,
@@ -927,7 +977,7 @@ fn a_json_body_keeps_the_nullability_a_query_carrier_lowered() {
 
 #[test]
 fn a_carrier_newtype_reads_the_struct_it_wraps() {
-    let mut app = carriers().into_axum();
+    let mut app = built(carriers());
     accepted(&mut app, get_request("/newtype-query?cursor=2"));
     accepted(
         &mut app,
@@ -955,7 +1005,7 @@ fn a_carrier_newtype_reads_the_struct_it_wraps() {
 
 #[test]
 fn a_newtype_wrapped_flattened_member_reads_its_own_fields() {
-    let mut app = carriers().into_axum();
+    let mut app = built(carriers());
     accepted(&mut app, get_request("/flattened?name=ada&cursor=2"));
     rejected(
         &mut app,
@@ -969,7 +1019,7 @@ fn an_array_field_reads_either_spelling_a_carrier_uses() {
     fn form(body: &str) -> Request<Body> {
         request("/tags-form", "application/x-www-form-urlencoded", body)
     }
-    let mut app = carriers().into_axum();
+    let mut app = built(carriers());
 
     for body in ["tags=1&tags=2", "tags=%5B1%2C2%5D", "tags=1"] {
         accepted(&mut app, form(body));
@@ -985,7 +1035,7 @@ fn an_array_field_reads_either_spelling_a_carrier_uses() {
 
 #[test]
 fn a_repeated_field_that_is_not_an_array_is_not_reported_as_a_duplicate_array_item() {
-    let mut app = carriers().into_axum();
+    let mut app = built(carriers());
     rejected(
         &mut app,
         get_request("/newtype-query?cursor=1&cursor=2"),
@@ -1059,19 +1109,14 @@ fn refused(router: Router<()>) -> String {
 }
 
 fn refused_build(router: Router<()>) -> String {
-    let hook = std::panic::take_hook();
-    std::panic::set_hook(Box::new(|_| {}));
-    let failure =
-        std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || router.into_axum()))
-            .err()
-            .map(|payload| {
-                payload
-                    .downcast_ref::<String>()
-                    .cloned()
-                    .unwrap_or_else(|| "a refusal that names nothing".to_owned())
-            });
-    std::panic::set_hook(hook);
-    failure.expect("a router that installs a document which does not validate must not be built")
+    let errors = router
+        .into_axum()
+        .expect_err("a router that installs a document which does not validate must not be built");
+    errors
+        .iter()
+        .map(ToString::to_string)
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 #[test]
@@ -1165,7 +1210,7 @@ fn a_head_operation_declares_the_rejection_without_a_body() {
 
 #[test]
 fn a_body_that_announces_another_content_type_is_rejected() {
-    let mut app = router().into_axum();
+    let mut app = built(router());
     let (status, body) = send(
         &mut app,
         request(
@@ -1184,7 +1229,7 @@ fn a_body_that_announces_another_content_type_is_rejected() {
 
 #[test]
 fn a_body_that_announces_the_published_content_type_is_accepted() {
-    let mut app = router().into_axum();
+    let mut app = built(router());
     for content_type in ["application/json", "application/json; charset=utf-8"] {
         accepted(
             &mut app,
@@ -1206,7 +1251,7 @@ fn every_header_rejection_answers_the_status_the_operation_declares() {
         "a typed header declares the rejection it can serve"
     );
 
-    let mut app = headers().into_axum();
+    let mut app = built(headers());
 
     rejected(
         &mut app,
@@ -1278,7 +1323,7 @@ fn the_runtime_checks_a_request_in_the_order_the_document_publishes() {
         "the published document sorts the fields it publishes"
     );
 
-    let mut app = ordered_router().into_axum();
+    let mut app = built(ordered_router());
     rejected(
         &mut app,
         json_request("/ordered", r#"{"zeta":9,"alpha":9}"#),
@@ -1297,9 +1342,7 @@ fn the_extract_module_reaches_the_extractors_that_check_the_contract() {
         let _ = (body.zeta.0, body.alpha.0);
         axum::Json(User { id: 1 })
     }
-    let mut app = Router::new(info())
-        .route("/module", post(through_the_module))
-        .into_axum();
+    let mut app = built(Router::<()>::new(info()).route("/module", post(through_the_module)));
     accepted(&mut app, json_request("/module", r#"{"zeta":1,"alpha":2}"#));
     rejected(
         &mut app,
@@ -1310,16 +1353,17 @@ fn the_extract_module_reaches_the_extractors_that_check_the_contract() {
 
 #[test]
 fn a_request_that_carries_no_content_type_is_read_rather_than_rejected() {
-    let mut app = Router::<()>::new(info())
-        .route(
-            "/note",
-            get_with(note_body, OperationMeta::new("note.read")),
-        )
-        .route(
-            "/posted",
-            post_with(note_body, OperationMeta::new("note.posted")),
-        )
-        .into_axum();
+    let mut app = built(
+        Router::<()>::new(info())
+            .route(
+                "/note",
+                get_with(note_body, OperationMeta::new("note.read")),
+            )
+            .route(
+                "/posted",
+                post_with(note_body, OperationMeta::new("note.posted")),
+            ),
+    );
 
     let (status, body) = send(&mut app, get_request("/note"));
     assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{body}");
@@ -1422,9 +1466,7 @@ fn a_body_is_accepted_with_the_media_type_its_operation_declares() {
         Some("application/vnd.note+json")
     );
 
-    let mut app = Router::<()>::new(info())
-        .route("/notes", post(vnd_note))
-        .into_axum();
+    let mut app = built(Router::<()>::new(info()).route("/notes", post(vnd_note)));
     accepted(
         &mut app,
         request("/notes", "application/vnd.note+json", r#"{"text":"hi"}"#),
@@ -1459,7 +1501,7 @@ fn the_media_type_of_the_route_the_router_picks_is_the_one_it_enforces() {
         Some("application/vnd.note+json")
     );
 
-    let mut app = router().into_axum();
+    let mut app = built(router());
     accepted(
         &mut app,
         request(
@@ -1490,7 +1532,7 @@ fn both_array_spellings_read_one_element_the_same_way() {
     fn form(body: &str) -> Request<Body> {
         request("/labels-form", "application/x-www-form-urlencoded", body)
     }
-    let mut app = carriers().into_axum();
+    let mut app = built(carriers());
 
     let numbers: &[&str] = &[
         "/labels/0: expected a string, found a number",
@@ -1509,6 +1551,279 @@ fn both_array_spellings_read_one_element_the_same_way() {
         ],
     );
     for body in ["labels=a&labels=b", "labels=%5B%22a%22%2C%22b%22%5D"] {
+        accepted(&mut app, form(body));
+    }
+}
+
+#[test]
+fn the_media_type_of_the_route_the_router_resolves_is_the_one_it_enforces() {
+    fn router() -> Router<()> {
+        Router::<()>::new(info())
+            .route("/{lead}/x/y", post(plain_item))
+            .route("/x/{first}/{second}", post(vnd_note))
+    }
+    let document = router().into_document().unwrap();
+    let ids: Vec<Vec<Vec<String>>> = document
+        .operations
+        .iter()
+        .map(|operation| operation.id.clone())
+        .collect();
+    assert_eq!(
+        ids,
+        [
+            vec![vec!["plain".to_owned(), "item".to_owned()]],
+            vec![vec!["vnd".to_owned(), "note".to_owned()]]
+        ],
+        "the operation ids sort the other way than the routes resolve"
+    );
+
+    let mut app = built(router());
+    accepted(
+        &mut app,
+        request("/x/x/y", "application/vnd.note+json", r#"{"text":"hi"}"#),
+    );
+    let (status, body) = send(
+        &mut app,
+        request("/x/x/y", "application/json", r#"{"text":"hi"}"#),
+    );
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{body}");
+    let report: Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(
+        report["violations"][0]["reason"],
+        "expected application/vnd.note+json, found application/json",
+        "the route axum resolves is the one whose media type is enforced"
+    );
+    accepted(
+        &mut app,
+        request("/z/x/y", "application/json", r#"{"text":"hi"}"#),
+    );
+}
+
+#[test]
+fn a_trailing_path_parameter_matches_every_segment_it_covers() {
+    fn router() -> Router<()> {
+        Router::<()>::new(info()).route("/files/{*rest}", post(vnd_note))
+    }
+    let document = router().document();
+    let files = operation(&document, "files");
+    assert_eq!(
+        files.body.as_ref().unwrap().media_type.as_deref(),
+        Some("application/vnd.note+json"),
+        "the wildcard route publishes the media type the runtime enforces"
+    );
+    assert!(
+        files
+            .diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code == "PONS-W102"),
+        "{:?} warns that the wildcard is one path parameter",
+        files.diagnostics
+    );
+
+    let mut app = built(router());
+    for path in ["/files/one", "/files/one/two", "/files/one/two/three"] {
+        accepted(
+            &mut app,
+            request(path, "application/vnd.note+json", r#"{"text":"hi"}"#),
+        );
+    }
+    let (status, body) = send(
+        &mut app,
+        request("/files/one/two", "application/json", r#"{"text":"hi"}"#),
+    );
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{body}");
+    let report: Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(
+        report["violations"][0]["reason"],
+        "expected application/vnd.note+json, found application/json",
+        "a request the route matches is judged against the media type it publishes"
+    );
+    let (status, _) = send(
+        &mut app,
+        request("/files", "application/vnd.note+json", r#"{"text":"hi"}"#),
+    );
+    assert_eq!(
+        status,
+        StatusCode::NOT_FOUND,
+        "a wildcard matches a segment or more, exactly as the router resolves it"
+    );
+}
+
+#[test]
+fn a_common_error_range_that_covers_the_rejection_is_diagnosed_before_it_is_published() {
+    for (router, covering) in [
+        (
+            Router::<()>::new(info())
+                .common_error::<RangeRejection>()
+                .route("/ranged", post(create_open_user)),
+            "Class(4)",
+        ),
+        (
+            Router::<()>::new(info())
+                .common_error::<DefaultRejection>()
+                .route("/ranged", post(create_open_user)),
+            "Default",
+        ),
+    ] {
+        let document = router.document();
+        let ranged = operation(&document, "ranged");
+        assert!(
+            ranged.diagnostics.iter().any(|diagnostic| {
+                diagnostic.code == "PONS-E102"
+                    && diagnostic.severity == pons_ir::DiagnosticSeverity::Error
+                    && diagnostic.message.contains(covering)
+            }),
+            "{:?} must name the common error {covering} that answers the rejection",
+            ranged.diagnostics
+        );
+
+        let errors = refused_build(router);
+        assert!(
+            errors.contains("PONS-E102") && errors.contains("is inherited"),
+            "{errors} must refuse to install a document that keeps an inherited slot"
+        );
+    }
+}
+
+#[test]
+fn a_common_error_range_that_answers_the_rejection_the_same_way_leaves_the_slot_to_it() {
+    let router = Router::<()>::new(info())
+        .common_error::<RangeRejectionReport>()
+        .route("/ranged", post(create_open_user));
+    let document = router.into_document().unwrap();
+    let ranged = operation(&document, "ranged");
+    assert!(
+        ranged.errors.is_empty(),
+        "{:?} must leave the inherited slot to the common error",
+        ranged.errors
+    );
+    assert!(ranged.diagnostics.is_empty());
+    assert_eq!(document.common_errors[0].status, ErrorStatus::Class(4));
+}
+
+#[test]
+fn a_common_error_that_omits_retryable_does_not_disagree_with_the_rejection() {
+    let document = Router::<()>::new(info())
+        .common_error::<SilentRejectionReport>()
+        .route("/silent", post(create_open_user))
+        .into_document()
+        .expect("a value one side leaves out is not a disagreement");
+    let silent = operation(&document, "silent");
+    assert!(
+        silent.errors.is_empty(),
+        "{:?} leaves the slot to the common error that answers it the same way",
+        silent.errors
+    );
+    assert!(silent.diagnostics.is_empty());
+}
+
+#[test]
+fn a_common_error_that_answers_the_rejection_differently_names_both_error_types() {
+    struct ProblemAndVendor;
+
+    impl ErrorSpec for ProblemAndVendor {
+        fn errors(cx: &mut TypeCx) -> Vec<ErrorResponse> {
+            CommonRejection::errors(cx)
+                .into_iter()
+                .map(|mut error| {
+                    error.name = vec!["problem".into()];
+                    error.content = ErrorContent::ProblemJson;
+                    error.ext.insert("vendor".into(), "acme".into());
+                    error
+                })
+                .collect()
+        }
+    }
+    let document = Router::<()>::new(info())
+        .common_error::<ProblemAndVendor>()
+        .route("/problem", post(create_open_user))
+        .document();
+    let problem = operation(&document, "problem");
+    let diagnostic = problem
+        .diagnostics
+        .iter()
+        .find(|diagnostic| diagnostic.code == "PONS-E102")
+        .expect("a foreign common error at the rejection must be diagnosed");
+    assert!(
+        diagnostic.message.contains("content") && diagnostic.message.contains("extensions"),
+        "{} must report every field the two errors spell differently",
+        diagnostic.message
+    );
+    assert!(
+        diagnostic
+            .message
+            .contains("validation::CommonRejection#output")
+            && diagnostic
+                .message
+                .contains("pons_axum::error::ViolationReport#output"),
+        "{} must name the two error type ids",
+        diagnostic.message
+    );
+}
+
+#[derive(Deserialize, Schema)]
+#[serde(rename_all = "snake_case")]
+enum Level {
+    Info,
+    Warn,
+}
+
+#[derive(Deserialize, Schema)]
+#[serde(deny_unknown_fields)]
+struct Levels {
+    levels: Vec<Level>,
+}
+
+async fn levels(pons_axum::Form(form): pons_axum::Form<Levels>) -> axum::Json<User> {
+    let _ = form.levels;
+    axum::Json(User { id: 1 })
+}
+
+#[test]
+fn a_string_representation_enum_is_read_as_the_array_item_it_is() {
+    let router = || {
+        Router::<()>::new(info())
+            .route("/tags-form", post(tagged_form))
+            .route("/levels-form", post(levels))
+    };
+    let mut app = built(router());
+    let form = |path: &str, body: &str| request(path, "application/x-www-form-urlencoded", body);
+
+    for body in [
+        "levels=info",
+        "levels=info&levels=warn",
+        "levels=%5B%22info%22%5D",
+    ] {
+        accepted(&mut app, form("/levels-form", body));
+    }
+    let (status, body) = send(&mut app, form("/levels-form", "levels=info&levels=nope"));
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{body}");
+    let report: Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(
+        report["violations"][0]["reason"], "unknown enum variant nope",
+        "an item a string enum cannot name is reported against the item"
+    );
+}
+
+#[test]
+fn a_repeated_key_reads_an_empty_value_as_the_item_it_spells() {
+    let form = |body: &str| request("/tags-form", "application/x-www-form-urlencoded", body);
+    let mut app = built(carriers());
+
+    for (body, path) in [
+        ("tags=", "/tags/0"),
+        ("tags=&tags=1", "/tags/0"),
+        ("tags=1&tags=", "/tags/1"),
+    ] {
+        let (status, text) = send(&mut app, form(body));
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{body}: {text}");
+        let report: Value = serde_json::from_str(&text).unwrap();
+        assert_eq!(
+            report["violations"][0]["path"], path,
+            "{body} spells one empty item, which the integer item type refuses"
+        );
+    }
+    for body in ["tags=%5B%5D", "tags=1&tags=2"] {
         accepted(&mut app, form(body));
     }
 }

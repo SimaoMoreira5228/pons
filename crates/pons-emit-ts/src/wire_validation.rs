@@ -256,11 +256,12 @@ function validateEnum(value: any, definition: any, expected: any, mode: "encode"
     if (!isRecord(value)) throw new WirePolicyError("expected enum object");
     const keys = Object.keys(value);
     if (keys.length !== 1) throw new WirePolicyError("expected one enum variant");
-    const variant = variantFor(keys[0]);
+    const wire = keys[0] ?? "";
+    const variant = variantFor(wire);
     if (!variant || !matchesExpected(variant)) {
-      throw new WirePolicyError(`invalid enum variant ${keys[0]}`);
+      throw new WirePolicyError(`invalid enum variant ${wire}`);
     }
-     validateVariantPayload(value[keys[0]], variant, mode, "external", definition.direction, allowUnsafeWideIntegers);
+     validateVariantPayload(value[wire], variant, mode, "external", definition.direction, allowUnsafeWideIntegers);
     return variant;
   }
   if (!isRecord(value)) throw new WirePolicyError("expected enum object");

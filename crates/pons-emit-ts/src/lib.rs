@@ -423,10 +423,25 @@ fn is_integer_number(value: &serde_json::Value) -> bool {
         .is_some_and(|number| number.as_i128().is_some() || number.as_u128().is_some())
 }
 
+const RESERVED_NAMES: &[&str] = &[
+    "Array",
+    "Date",
+    "Error",
+    "Extract",
+    "JSON",
+    "Promise",
+    "ReadonlyArray",
+    "Record",
+    "Uint8Array",
+];
+
 fn unique_names(bases: impl IntoIterator<Item = String>) -> Vec<String> {
     let bases = bases.into_iter().collect::<Vec<_>>();
     let reserved = bases.iter().cloned().collect::<BTreeSet<_>>();
-    let mut assigned = BTreeSet::new();
+    let mut assigned = RESERVED_NAMES
+        .iter()
+        .map(|name| (*name).to_owned())
+        .collect::<BTreeSet<_>>();
     let mut seen = BTreeSet::new();
     bases
         .into_iter()
@@ -1076,6 +1091,23 @@ mod tests {
             error
                 .0
                 .contains("required path parameter cursor cannot be nullable"),
+            "{}",
+            error.0
+        );
+    }
+
+    #[test]
+    fn refuses_a_use_site_whose_type_cannot_cross_the_boundary() {
+        let mut raw: serde_json::Value =
+            serde_json::from_str(include_str!("../../../fixtures/login.json")).unwrap();
+        raw["operations"][0]["body"] =
+            json!({"ty": {"ref": "User"}, "content": "json", "required": true});
+        let document: Document = serde_json::from_value(raw).unwrap();
+        let error = super::emit(&document).unwrap_err();
+        assert!(
+            error.0.contains(
+                "operations[0].body.ty: the request body needs a type of the input or both direction, but User is declared output"
+            ),
             "{}",
             error.0
         );

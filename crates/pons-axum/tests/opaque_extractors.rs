@@ -52,7 +52,7 @@ fn operation<'a>(document: &'a pons_ir::Document, literal: &str) -> &'a pons_ir:
 }
 
 #[test]
-fn raw_extractors_report_opaque_contract_shapes() {
+fn a_document_of_raw_extractors_reports_diagnostics_it_does_not_validate() {
     let router = Router::<()>::new(info())
         .route("/query", get(raw_query))
         .route("/form", post(raw_form))

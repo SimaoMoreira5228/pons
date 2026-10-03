@@ -726,41 +726,52 @@ fn validation_refuses_operation_errors_a_common_error_range_covers() {
 }
 
 #[test]
-fn validation_refuses_two_common_errors_that_claim_one_dispatch_slot() {
+fn validation_refuses_two_common_errors_that_shadow_one_dispatch_slot() {
     let base: Document =
         serde_json::from_str(include_str!("../../../fixtures/login.json")).unwrap();
-    let with_common = |covered: ErrorStatus, claiming: ErrorStatus| {
+    let with_common = |first: ErrorStatus, second: ErrorStatus| {
         let mut document = base.clone();
         let template = document.operations[0].errors[0].clone();
         document.operations[0].errors.clear();
-        for status in [covered, claiming] {
+        for status in [first, second] {
             let mut common = template.clone();
             common.status = status;
             document.common_errors.push(common);
         }
         document
     };
-    let claimed = |document: &Document, claiming: &str| {
+    let shadowed = |document: &Document, shadowing: &str| {
         document.validate().unwrap_err().iter().any(|error| {
             let error = error.to_string();
-            error.contains("error dispatch slot") && error.contains(claiming)
+            error.contains("error dispatch slot")
+                && error.contains("is shadowed")
+                && error.contains(shadowing)
         })
     };
 
-    assert!(claimed(
-        &with_common(ErrorStatus::Exact(422), ErrorStatus::Class(4)),
+    assert!(shadowed(
+        &with_common(ErrorStatus::Class(4), ErrorStatus::Class(4)),
         "Class(4)"
     ));
-    assert!(claimed(
-        &with_common(ErrorStatus::Exact(422), ErrorStatus::Default),
+    assert!(shadowed(
+        &with_common(ErrorStatus::Default, ErrorStatus::Default),
         "Default"
     ));
-    with_common(ErrorStatus::Exact(422), ErrorStatus::Class(5))
-        .validate()
-        .unwrap();
-    with_common(ErrorStatus::Exact(422), ErrorStatus::Exact(422))
-        .validate()
-        .unwrap_err();
+
+    assert!(
+        with_common(ErrorStatus::Exact(422), ErrorStatus::Exact(422))
+            .validate()
+            .unwrap_err()
+            .iter()
+            .any(|error| error.to_string().contains("duplicate error dispatch slot"))
+    );
+    for dispatchable in [
+        with_common(ErrorStatus::Exact(404), ErrorStatus::Class(4)),
+        with_common(ErrorStatus::Exact(422), ErrorStatus::Default),
+        with_common(ErrorStatus::Exact(422), ErrorStatus::Class(5)),
+    ] {
+        dispatchable.validate().unwrap();
+    }
 }
 
 #[test]
@@ -773,6 +784,19 @@ fn an_error_status_covers_the_statuses_a_runtime_can_answer_it_for() {
     assert!(!ErrorStatus::Exact(422).covers(&ErrorStatus::Class(4)));
     assert!(!ErrorStatus::Class(4).covers(&ErrorStatus::Exact(503)));
     assert!(!ErrorStatus::Class(4).covers(&ErrorStatus::Default));
+}
+
+#[test]
+fn an_error_status_shadows_only_the_slots_it_answers_for_the_same() {
+    assert!(ErrorStatus::Class(4).shadows(&ErrorStatus::Class(4)));
+    assert!(ErrorStatus::Default.shadows(&ErrorStatus::Default));
+    assert!(!ErrorStatus::Class(4).shadows(&ErrorStatus::Exact(404)));
+    assert!(!ErrorStatus::Default.shadows(&ErrorStatus::Class(4)));
+    assert!(!ErrorStatus::Default.shadows(&ErrorStatus::Exact(404)));
+    assert!(!ErrorStatus::Exact(404).shadows(&ErrorStatus::Class(4)));
+    assert!(!ErrorStatus::Exact(404).shadows(&ErrorStatus::Default));
+    assert!(!ErrorStatus::Exact(404).shadows(&ErrorStatus::Exact(404)));
+    assert!(!ErrorStatus::Class(4).shadows(&ErrorStatus::Class(5)));
 }
 
 #[test]

@@ -1,5 +1,5 @@
 pub(super) fn render() -> &'static str {
-    r#"type CredentialValue = { value: string | undefined; expiresAt?: number; path?: string; secure?: boolean; host?: string; origin?: string };
+    r#"type CredentialValue = { value: string | undefined; expiresAt?: number | undefined; path?: string | undefined; secure?: boolean | undefined; host?: string | undefined; origin?: string | undefined };
 
 const CREDENTIAL_METADATA_KINDS: ReadonlyArray<readonly [keyof CredentialMetadata, string]> = [["expiresAt", "number"], ["path", "string"], ["secure", "boolean"], ["host", "string"], ["origin", "string"]];
 
@@ -107,7 +107,7 @@ async function credentialValue(client: ConfiguredClient, scheme: string, url: UR
   return { value: undefined };
 }
 
-type CredentialRead = { value: unknown; deleted: boolean; expiresAt?: number; path?: string; secure?: boolean; domain?: string };
+type CredentialRead = { value: unknown; deleted: boolean; expiresAt?: number | undefined; path?: string | undefined; secure?: boolean | undefined; domain?: string | undefined };
 
 function readCredential(
   response: Response,
@@ -178,7 +178,8 @@ async function captureCredential(
     ? normalizeCookiePath(credentialRead.path, credentialUrl.pathname) ?? defaultCookiePath(credentialUrl.pathname)
     : undefined;
   if (provides.value.from === "set_cookie") {
-    const targetName = isCookieAuth(authSchemes[provides.scheme]) ? authSchemes[provides.scheme].name : undefined;
+    const definition = authSchemes[provides.scheme];
+    const targetName = isCookieAuth(definition) ? definition?.name : undefined;
     const prefixNames = targetName === undefined ? [provides.value.name] : [provides.value.name, targetName];
     const invalidPrefix = prefixNames.some((name) =>
       (name.startsWith("__Secure-") && !credentialRead.secure) ||

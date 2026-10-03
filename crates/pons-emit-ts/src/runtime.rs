@@ -20,12 +20,12 @@ class OpaqueCodecError extends Error {
   }
 }
 
-type OpaqueContext = { codecs?: OpaqueCodecRegistry; required: boolean; allowUnsafeWideIntegers?: boolean };
+type OpaqueContext = { codecs?: OpaqueCodecRegistry | undefined; required: boolean; allowUnsafeWideIntegers?: boolean | undefined };
 type CredentialLocator =
   | { from: "body"; pointer: string }
   | { from: "header"; name: string }
   | { from: "set_cookie"; name: string };
-type CredentialProvision = { scheme: string; value: CredentialLocator; expiresAt?: CredentialLocator };
+type CredentialProvision = { scheme: string; value: CredentialLocator; expiresAt?: CredentialLocator | undefined };
 type ConfiguredClient = ClientOptions & { authRecords: Record<string, CredentialValue[]>; authInvalidated: Record<string, boolean>; opaque: OpaqueContext };
 const MAX_TIMER_DELAY = 2_147_483_647;
 const MAX_REDIRECTS = 20;
@@ -44,7 +44,8 @@ type AttachedQueryCredential = { scheme: string; params: Array<[string, string]>
 
 function dropCredentialScheme<T extends { scheme: string }>(credentials: T[], scheme: string): void {
   for (let index = credentials.length - 1; index >= 0; index -= 1) {
-    if (credentials[index].scheme === scheme) credentials.splice(index, 1);
+    const credential = credentials[index];
+    if (credential !== undefined && credential.scheme === scheme) credentials.splice(index, 1);
   }
 }
 
@@ -192,7 +193,7 @@ async function request<T, E>(
       return err({ kind: "auth", schemes: authGroups.flat() });
     }
      const attachedCredentialOrigins: Array<{ scheme: string; origin: string }> = [];
-     const attachedCookies: Array<{ scheme: string; path?: string; secure?: boolean; host?: string }> = [];
+     const attachedCookies: Array<{ scheme: string; path?: string | undefined; secure?: boolean | undefined; host?: string | undefined }> = [];
      const attachedCustomCredentials: AttachedCustomCredential[] = [];
      const attachedQueryCredentials: AttachedQueryCredential[] = [];
     for (const scheme of activeGroup ?? []) {
@@ -247,7 +248,9 @@ async function request<T, E>(
       }
       else if (definition.kind === "api_key" && definition.location === "cookie") setCookieHeader(headers, definition.name!, value, scheme);
     }
-     const init: RequestInit = { method, headers, credentials, signal, redirect: "manual" };
+     const init: RequestInit = { method, headers, redirect: "manual" };
+     if (credentials !== undefined) init.credentials = credentials;
+     if (signal !== undefined) init.signal = signal;
     if (encodedBody !== undefined) {
       if (content === "json" || content === "problem_json") {
         headers.set("content-type", mediaType ?? (content === "problem_json" ? "application/problem+json" : "application/json"));
@@ -293,7 +296,7 @@ async function request<T, E>(
     }
     for (const cookie of attachedCookies) {
       const definition = authSchemes[cookie.scheme];
-      if (!isCookieAuth(definition)) continue;
+      if (definition === undefined || !isCookieAuth(definition)) continue;
       if (
         (cookie.host !== undefined && cookie.host !== url.hostname) ||
         (cookie.path !== undefined && !cookiePathMatches(cookie.path, url.pathname)) ||
@@ -484,7 +487,7 @@ async function fetchWithRedirect(
   signal: AbortSignal | undefined,
   credentials: RequestCredentials | undefined,
   attachedCredentialOrigins: Array<{ scheme: string; origin: string }>,
-  attachedCookies: Array<{ scheme: string; path?: string; secure?: boolean; host?: string }>,
+  attachedCookies: Array<{ scheme: string; path?: string | undefined; secure?: boolean | undefined; host?: string | undefined }>,
   attachedCustomCredentials: AttachedCustomCredential[],
   attachedQueryCredentials: AttachedQueryCredential[],
 ): Promise<{ response: Response; url: URL; init: RequestInit }> {
@@ -572,7 +575,7 @@ function validateRedirectCredentials(
   init: RequestInit,
   credentials: RequestCredentials | undefined,
   attachedCredentialOrigins: Array<{ scheme: string; origin: string }>,
-  attachedCookies: Array<{ scheme: string; path?: string; secure?: boolean; host?: string }>,
+  attachedCookies: Array<{ scheme: string; path?: string | undefined; secure?: boolean | undefined; host?: string | undefined }>,
   attachedCustomCredentials: AttachedCustomCredential[],
 ): void {
   const originChanged = nextUrl.origin !== currentUrl.origin;
@@ -607,7 +610,7 @@ async function applyCapturedCredential(
   init: RequestInit,
   method: string,
   authScopes: Record<string, readonly string[]>,
-  attachedCookies: Array<{ scheme: string; path?: string; secure?: boolean; host?: string }>,
+  attachedCookies: Array<{ scheme: string; path?: string | undefined; secure?: boolean | undefined; host?: string | undefined }>,
   attachedCustomCredentials: AttachedCustomCredential[],
   attachedQueryCredentials: AttachedQueryCredential[],
 ): Promise<RequestInit> {
@@ -680,7 +683,8 @@ async function applyCapturedCredential(
       }
       setCookieHeader(headers, name, value, provides.scheme);
       const scope = { scheme: provides.scheme, path, secure, host };
-      if (cookieIndex >= 0) Object.assign(attachedCookies[cookieIndex], scope);
+      const existing = attachedCookies[cookieIndex];
+      if (existing !== undefined) Object.assign(existing, scope);
       else attachedCookies.push(scope);
     }
   }
@@ -744,7 +748,7 @@ function encodePathSegment(value: string): string {
 }
 
 function mediaTypeBase(value: string): string {
-  return value.split(";", 1)[0].trim().toLowerCase();
+  return (value.split(";", 1)[0] ?? "").trim().toLowerCase();
 }
 
 function responseMediaTypeMatches(actual: string, expected: string): boolean {
@@ -753,7 +757,7 @@ function responseMediaTypeMatches(actual: string, expected: string): boolean {
 
 function normalizeMediaParameter(part: string): [string, string] {
   const [key, ...value] = part.split("=");
-  return [key.trim().toLowerCase(), value.join("=").trim().toLowerCase()];
+  return [(key ?? "").trim().toLowerCase(), value.join("=").trim().toLowerCase()];
 }
 
 function mediaTypeMatches(actual: string, expected: string): boolean {
@@ -1199,16 +1203,17 @@ function parseJson(text: string, preserveWideIntegers: boolean): unknown {
   }
   let marker = "\u0000pons-bigint:";
   while (strings.some((value) => value.startsWith(marker))) marker += "\u0000";
+  const at = (position: number): string => text[position] ?? "";
   let output = "";
   let index = 0;
   let inString = false;
   while (index < text.length) {
-    const character = text[index];
+    const character = at(index);
     if (inString) {
       output += character;
       if (character === "\\") {
         index += 1;
-        if (index < text.length) output += text[index];
+        if (index < text.length) output += at(index);
       } else if (character === "\"") {
         inString = false;
       }
@@ -1224,15 +1229,15 @@ function parseJson(text: string, preserveWideIntegers: boolean): unknown {
     if (character === "-" || (character >= "0" && character <= "9")) {
       const start = index;
       if (character === "-") index += 1;
-      while (index < text.length && text[index] >= "0" && text[index] <= "9") index += 1;
-      if (text[index] === ".") {
+      while (index < text.length && at(index) >= "0" && at(index) <= "9") index += 1;
+      if (at(index) === ".") {
         index += 1;
-        while (index < text.length && text[index] >= "0" && text[index] <= "9") index += 1;
+        while (index < text.length && at(index) >= "0" && at(index) <= "9") index += 1;
       }
-      if (text[index] === "e" || text[index] === "E") {
+      if (at(index) === "e" || at(index) === "E") {
         index += 1;
-        if (text[index] === "+" || text[index] === "-") index += 1;
-        while (index < text.length && text[index] >= "0" && text[index] <= "9") index += 1;
+        if (at(index) === "+" || at(index) === "-") index += 1;
+        while (index < text.length && at(index) >= "0" && at(index) <= "9") index += 1;
       }
       const token = text.slice(start, index);
       const exactInteger = exactIntegerToken(token);
@@ -1506,7 +1511,7 @@ function transformEnum(value: any, definition: any, mode: "encode" | "decode", s
   if (repr.kind === "string") return value;
   if (repr.kind === "external") {
     if (typeof value === "string") return value;
-    const wire = Object.keys(value)[0];
+    const wire = Object.keys(value)[0] ?? "";
     variant = definition.variants.find((entry: any) => entry.wire === wire);
     payload = value[wire];
   } else if (repr.kind === "internal") {
@@ -1622,7 +1627,7 @@ function setCookieHeader(headers: Headers, name: string, value: string, scheme: 
   headers.set("cookie", cookies.join("; "));
 }
 
-function cookieValue(header: string | null, name: string): { value: string; deleted: boolean; expiresAt?: number; path?: string; secure?: boolean; domain?: string } | undefined {
+function cookieValue(header: string | null, name: string): { value: string; deleted: boolean; expiresAt?: number | undefined; path?: string | undefined; secure?: boolean | undefined; domain?: string | undefined } | undefined {
   const parts = header?.split(";").map((part) => part.trim()) ?? [];
   const cookie = parts.find((part) => part.startsWith(`${name}=`));
   if (cookie === undefined) return undefined;

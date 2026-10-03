@@ -31,25 +31,58 @@ pub(super) fn emit(
 }
 
 fn newtype_cycle(id: &str, inner: &TypeRef, document: &Document) -> bool {
-    let mut current = inner;
-    let mut visited = BTreeSet::new();
-    while let TypeRef::Named(named) = current {
-        if named.id == id {
-            return true;
+    reenters(id, inner, document, &mut BTreeSet::new())
+}
+
+fn reenters(
+    id: &str,
+    reference: &TypeRef,
+    document: &Document,
+    visited: &mut BTreeSet<String>,
+) -> bool {
+    match reference {
+        TypeRef::Named(named) => {
+            if named.id == id {
+                return true;
+            }
+            if !visited.insert(named.id.clone()) {
+                return false;
+            }
+            let Some(definition) = document
+                .types
+                .get(&named.id)
+                .map(|definition| &definition.definition)
+            else {
+                return false;
+            };
+            let next: Vec<&TypeRef> = match definition {
+                TypeKind::Newtype { inner } => vec![inner],
+                TypeKind::Enum { variants, .. } => match named
+                    .variant
+                    .as_deref()
+                    .and_then(|variant| variants.iter().find(|entry| entry.wire == variant))
+                {
+                    Some(Variant {
+                        payload: VariantPayload::Newtype { ty },
+                        ..
+                    }) => vec![ty],
+                    _ => return false,
+                },
+                TypeKind::Struct { .. } => return false,
+            };
+            next.into_iter()
+                .any(|reference| reenters(id, reference, document, visited))
         }
-        if !visited.insert(named.id.clone()) {
-            return false;
+        TypeRef::Inline(InlineType::Nullable { inner }) => reenters(id, inner, document, visited),
+        TypeRef::Inline(InlineType::Array { item, .. }) => reenters(id, item, document, visited),
+        TypeRef::Inline(InlineType::Map { key, value }) => {
+            reenters(id, key, document, visited) || reenters(id, value, document, visited)
         }
-        let Some(TypeKind::Newtype { inner }) = document
-            .types
-            .get(&named.id)
-            .map(|definition| &definition.definition)
-        else {
-            return false;
-        };
-        current = inner;
+        TypeRef::Inline(InlineType::Tuple { items }) => items
+            .iter()
+            .any(|item| reenters(id, item, document, visited)),
+        _ => false,
     }
-    false
 }
 
 fn definition_type(
@@ -65,6 +98,9 @@ fn definition_type(
             openness,
         } => {
             let flattened_types = flattened_field_types(flattened, document, names, mode)?;
+            if let Some(carrier) = flattened_opaque(flattened, document) {
+                return local_type_ref(carrier, document, names, mode);
+            }
             let fields = fields
                 .iter()
                 .filter(|field| field_is_visible(field, definition.direction))
@@ -76,7 +112,17 @@ fn definition_type(
             known_types.extend(flattened_types);
             let mut members = fields
                 .iter()
-                .map(|field| field_type(field, definition.direction, document, names, mode))
+                .map(|field| {
+                    field_type(
+                        field,
+                        definition.direction,
+                        document,
+                        names,
+                        mode,
+                        false,
+                        &mut BTreeSet::new(),
+                    )
+                })
                 .collect::<Result<Vec<_>, _>>()?;
             match openness {
                 ObjectOpenness::Reject => {}
@@ -251,12 +297,48 @@ fn not_a_struct_member(ty: &TypeRef) -> EmitError {
     ))
 }
 
+fn flattened_opaque<'a>(references: &'a [TypeRef], document: &Document) -> Option<&'a TypeRef> {
+    let mut visited = BTreeSet::new();
+    references
+        .iter()
+        .find(|reference| resolves_to_opaque(reference, document, &mut visited))
+}
+
+fn resolves_to_opaque(
+    reference: &TypeRef,
+    document: &Document,
+    visited: &mut BTreeSet<String>,
+) -> bool {
+    let TypeRef::Named(named) = reference else {
+        return matches!(reference, TypeRef::Inline(InlineType::Opaque { .. }));
+    };
+    if named.variant.is_some() || !visited.insert(named.id.clone()) {
+        return false;
+    }
+    let Some(definition) = document
+        .types
+        .get(&named.id)
+        .map(|definition| &definition.definition)
+    else {
+        return false;
+    };
+    match definition {
+        TypeKind::Newtype { inner } => resolves_to_opaque(inner, document, visited),
+        TypeKind::Struct { flattened, .. } => flattened
+            .iter()
+            .any(|reference| resolves_to_opaque(reference, document, visited)),
+        TypeKind::Enum { .. } => false,
+    }
+}
+
 fn field_type(
     field: &Field,
     direction: Direction,
     document: &Document,
     names: &BTreeMap<String, String>,
     mode: EmitMode,
+    qualify: bool,
+    narrowed: &mut BTreeSet<String>,
 ) -> Result<String, EmitError> {
     let key = string(&field.wire);
     let access_specific = matches!(
@@ -270,7 +352,7 @@ fn field_type(
     };
     Ok(format!(
         "{key}{presence}: {}",
-        local_type_ref(&field.ty, document, names, mode)?
+        type_ref_with_namespace(&field.ty, document, names, mode, qualify, narrowed)?
     ))
 }
 
@@ -304,27 +386,16 @@ fn enum_type(
 ) -> Result<String, EmitError> {
     let mut types = Vec::with_capacity(variants.len());
     for variant in variants {
-        let payload = match &variant.payload {
-            VariantPayload::Unit => "null".into(),
-            VariantPayload::Newtype { ty } => local_type_ref(ty, document, names, mode)?,
-            VariantPayload::Tuple { items } => format!(
-                "[{}]",
-                items
-                    .iter()
-                    .map(|item| local_type_ref(item, document, names, mode))
-                    .collect::<Result<Vec<_>, _>>()?
-                    .join(", ")
-            ),
-            VariantPayload::Struct { fields } => format!(
-                "{{ {} }}",
-                fields
-                    .iter()
-                    .filter(|field| field_is_visible(field, direction))
-                    .map(|field| field_type(field, direction, document, names, mode))
-                    .collect::<Result<Vec<_>, _>>()?
-                    .join("; ")
-            ),
-        };
+        let mut narrowed = BTreeSet::new();
+        let payload = payload_type(
+            &variant.payload,
+            direction,
+            document,
+            names,
+            mode,
+            false,
+            &mut narrowed,
+        )?;
         let wire = string(&variant.wire);
         let ty = match repr {
             EnumRepr::String => wire,
@@ -367,13 +438,47 @@ fn enum_type(
     Ok(types.join(" | "))
 }
 
+fn payload_type(
+    payload: &VariantPayload,
+    direction: Direction,
+    document: &Document,
+    names: &BTreeMap<String, String>,
+    mode: EmitMode,
+    qualify: bool,
+    narrowed: &mut BTreeSet<String>,
+) -> Result<String, EmitError> {
+    match payload {
+        VariantPayload::Unit => Ok("null".into()),
+        VariantPayload::Newtype { ty } => {
+            type_ref_with_namespace(ty, document, names, mode, qualify, narrowed)
+        }
+        VariantPayload::Tuple { items } => Ok(format!(
+            "[{}]",
+            items
+                .iter()
+                .map(|item| type_ref_with_namespace(item, document, names, mode, qualify, narrowed))
+                .collect::<Result<Vec<_>, _>>()?
+                .join(", ")
+        )),
+        VariantPayload::Struct { fields } => {
+            let mut members = fields
+                .iter()
+                .filter(|field| field_is_visible(field, direction))
+                .map(|field| field_type(field, direction, document, names, mode, qualify, narrowed))
+                .collect::<Result<Vec<_>, _>>()?;
+            members.push("[key: string]: unknown".into());
+            Ok(format!("{{ {} }}", members.join("; ")))
+        }
+    }
+}
+
 pub(super) fn type_ref(
     reference: &TypeRef,
     document: &Document,
     names: &BTreeMap<String, String>,
     mode: EmitMode,
 ) -> Result<String, EmitError> {
-    type_ref_with_namespace(reference, document, names, mode, true)
+    type_ref_with_namespace(reference, document, names, mode, true, &mut BTreeSet::new())
 }
 
 fn local_type_ref(
@@ -382,7 +487,14 @@ fn local_type_ref(
     names: &BTreeMap<String, String>,
     mode: EmitMode,
 ) -> Result<String, EmitError> {
-    type_ref_with_namespace(reference, document, names, mode, false)
+    type_ref_with_namespace(
+        reference,
+        document,
+        names,
+        mode,
+        false,
+        &mut BTreeSet::new(),
+    )
 }
 
 fn type_ref_with_namespace(
@@ -391,6 +503,7 @@ fn type_ref_with_namespace(
     names: &BTreeMap<String, String>,
     mode: EmitMode,
     qualify: bool,
+    narrowed: &mut BTreeSet<String>,
 ) -> Result<String, EmitError> {
     match reference {
         TypeRef::Named(reference) => {
@@ -405,11 +518,31 @@ fn type_ref_with_namespace(
             let Some(variant) = &reference.variant else {
                 return Ok(name);
             };
-            let filter = match document
-                .types
-                .get(&reference.id)
-                .map(|definition| &definition.definition)
+            let definition = document.types.get(&reference.id);
+            if let Some(TypeKind::Enum {
+                repr: EnumRepr::Untagged,
+                variants,
+            }) = definition.map(|definition| &definition.definition)
             {
+                if !narrowed.insert(format!("{}\u{1}{variant}", reference.id)) {
+                    return Ok(name);
+                }
+                let Some(entry) = variants.iter().find(|entry| entry.wire == *variant) else {
+                    return Ok(name);
+                };
+                let direction =
+                    definition.map_or(Direction::Both, |definition| definition.direction);
+                return payload_type(
+                    &entry.payload,
+                    direction,
+                    document,
+                    names,
+                    mode,
+                    qualify,
+                    narrowed,
+                );
+            }
+            let filter = match definition.map(|definition| &definition.definition) {
                 Some(TypeKind::Enum {
                     repr: EnumRepr::String,
                     ..
@@ -460,21 +593,23 @@ fn type_ref_with_namespace(
             InlineType::Opaque { .. } => Ok("unknown".into()),
             InlineType::Nullable { inner } => Ok(format!(
                 "{} | null",
-                type_ref_with_namespace(inner, document, names, mode, qualify)?
+                type_ref_with_namespace(inner, document, names, mode, qualify, narrowed)?
             )),
             InlineType::Array { item, .. } => Ok(format!(
                 "Array<{}>",
-                type_ref_with_namespace(item, document, names, mode, qualify)?
+                type_ref_with_namespace(item, document, names, mode, qualify, narrowed)?
             )),
             InlineType::Map { value, .. } => Ok(format!(
                 "Record<string, {}>",
-                type_ref_with_namespace(value, document, names, mode, qualify)?
+                type_ref_with_namespace(value, document, names, mode, qualify, narrowed)?
             )),
             InlineType::Tuple { items } => Ok(format!(
                 "[{}]",
                 items
                     .iter()
-                    .map(|item| type_ref_with_namespace(item, document, names, mode, qualify))
+                    .map(|item| {
+                        type_ref_with_namespace(item, document, names, mode, qualify, narrowed)
+                    })
                     .collect::<Result<Vec<_>, _>>()?
                     .join(", ")
             )),
@@ -497,6 +632,32 @@ mod tests {
 
     fn newtype(name: &str, inner: &str) -> Value {
         json!({"kind":"newtype","name":[name],"direction":"both","inner":{"ref":inner}})
+    }
+
+    fn newtype_over(name: &[&str], inner: Value) -> Value {
+        json!({"kind":"newtype","name":name,"direction":"both","inner":inner})
+    }
+
+    fn cycle_error(types: Value) -> String {
+        crate::emit(&document(types))
+            .map(|_| String::from("the document was accepted"))
+            .unwrap_err()
+            .0
+    }
+
+    fn untagged_variant(wire: &str, payload: Value) -> Value {
+        json!({"wire": wire, "ident": [wire], "payload": payload})
+    }
+
+    fn assert_cycle(error: &str, members: &[&str]) {
+        for member in members {
+            let expected =
+                format!("the type {member} cannot be resolved because newtypes form a cycle");
+            if error.contains(&expected) {
+                return;
+            }
+        }
+        panic!("{error}");
     }
 
     #[test]
@@ -524,6 +685,85 @@ mod tests {
             }
         }
         panic!("{}", error.0);
+    }
+
+    #[test]
+    fn rejects_a_newtype_that_returns_to_itself_through_an_inline_arm() {
+        assert_cycle(
+            &cycle_error(json!({
+                "Loop": newtype_over(&["loop"], json!({"kind": "nullable", "inner": {"ref": "Loop"}}))
+            })),
+            &["Loop"],
+        );
+
+        assert_cycle(
+            &cycle_error(json!({
+                "Loop": newtype_over(
+                    &["loop"],
+                    json!({"kind": "map", "key": {"kind": "string"}, "value": {"ref": "Loop"}})
+                )
+            })),
+            &["Loop"],
+        );
+    }
+
+    #[test]
+    fn rejects_two_newtypes_that_return_to_one_another_through_an_inline_arm() {
+        assert_cycle(
+            &cycle_error(json!({
+                "A": newtype_over(&["a"], json!({"kind": "nullable", "inner": {"ref": "B"}})),
+                "B": newtype_over(&["b"], json!({"kind": "nullable", "inner": {"ref": "A"}}))
+            })),
+            &["A", "B"],
+        );
+    }
+
+    #[test]
+    fn rejects_a_newtype_that_reaches_itself_through_an_untagged_variant() {
+        assert_cycle(
+            &cycle_error(json!({
+                "Loop": newtype_over(&["loop"], json!({"ref": "Kinds", "variant": "again"})),
+                "Kinds": {
+                    "kind": "enum", "name": ["kinds"], "direction": "both", "repr": {"kind": "untagged"},
+                    "variants": [
+                        untagged_variant("stop", json!({"kind": "unit"})),
+                        untagged_variant(
+                            "again",
+                            json!({"kind": "newtype", "ty": {"kind": "nullable", "inner": {"ref": "Loop"}}})
+                        )
+                    ]
+                }
+            })),
+            &["Loop", "Kinds"],
+        );
+    }
+
+    #[test]
+    fn a_narrowed_untagged_variant_that_names_itself_keeps_the_whole_enum() {
+        let document = document(json!({
+            "Tree": {
+                "kind": "enum", "name": ["tree"], "direction": "both", "repr": {"kind": "untagged"},
+                "variants": [
+                    {"wire": "leaf", "ident": ["leaf"], "payload": {"kind": "unit"}},
+                    {
+                        "wire": "node",
+                        "ident": ["node"],
+                        "payload": {
+                            "kind": "newtype",
+                            "ty": {"kind": "array", "item": {"ref": "Tree", "variant": "node"}}
+                        }
+                    }
+                ]
+            },
+            "Root": newtype_over(&["root"], json!({"ref": "Tree", "variant": "node"}))
+        }));
+        let types = crate::emit(&document)
+            .unwrap()
+            .into_iter()
+            .find(|file| file.path == "types.ts")
+            .unwrap()
+            .content;
+        assert!(types.contains("export type Root = Array<Tree>;"), "{types}");
     }
 
     #[test]

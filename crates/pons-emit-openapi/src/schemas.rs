@@ -1,10 +1,18 @@
 use pons_ir::{
-    Access, ByteEncoding, DecimalWire, Document, EnumRepr, FieldDefault, InlineType, IntegerWire,
-    ObjectOpenness, Presence, TypeDef, TypeKind, TypeRef, Variant, VariantPayload,
+    Access, ByteEncoding, DecimalWire, Document, EnumRepr, Field, FieldDefault, InlineType,
+    IntegerWire, ObjectOpenness, Presence, TypeDef, TypeKind, TypeRef, Variant, VariantPayload,
 };
 use serde_json::{Map, Value, json};
 
 use crate::{Builder, EmitError};
+
+const BASE64_PATTERN: &str = r"^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$";
+const BASE64URL_PATTERN: &str =
+    r"^(?:[A-Za-z0-9_-]{4})*(?:[A-Za-z0-9_-]{2}(?:==)?|[A-Za-z0-9_-]{3}=?)?$";
+const HEX_PATTERN: &str = "^(?:[0-9a-fA-F]{2})*$";
+const DECIMAL_PATTERN: &str = r"^-?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?$";
+const SIGNED_INTEGER_PATTERN: &str = "^-?(0|[1-9][0-9]*)$";
+const UNSIGNED_INTEGER_PATTERN: &str = "^(0|[1-9][0-9]*)$";
 
 fn reference(name: &str) -> Value {
     json!({"$ref": format!("#/components/schemas/{}", name.replace('~', "~0").replace('/', "~1"))})
@@ -120,13 +128,7 @@ impl<'a> Builder<'a> {
                 openness,
             } => {
                 let mut object = fields_schema_with(self, fields)?;
-                let additional = match openness {
-                    ObjectOpenness::Reject => json!(false),
-                    ObjectOpenness::PreserveTyped { value } => {
-                        self.type_schema(openness_value(value, self.document))?
-                    }
-                    ObjectOpenness::PreserveOpaque => json!(true),
-                };
+                let additional = self.openness_schema(openness)?;
                 if flattened.is_empty() {
                     object["additionalProperties"] = additional;
                     Ok(object)
@@ -236,13 +238,13 @@ impl<'a> Builder<'a> {
             } => {
                 if *wire == IntegerWire::String {
                     let pattern = if *signed {
-                        "^-?(0|[1-9][0-9]*)$"
+                        SIGNED_INTEGER_PATTERN
                     } else {
-                        "^(0|[1-9][0-9]*)$"
+                        UNSIGNED_INTEGER_PATTERN
                     };
                     json!({
                         "type":"string",
-                        "pattern":pattern,
+                        "pattern":stated_pattern(pattern)?,
                         "x-pons-integer":{
                             "bits":bits,
                             "signed":signed,
@@ -290,7 +292,7 @@ impl<'a> Builder<'a> {
                     "type":if *wire == DecimalWire::String {"string"} else {"number"},
                 });
                 if *wire == DecimalWire::String {
-                    schema["pattern"] = json!(r"^-?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?$");
+                    schema["pattern"] = stated_pattern(DECIMAL_PATTERN)?;
                 }
                 schema["x-pons-decimal-wire"] = json!(wire);
                 schema
@@ -312,14 +314,25 @@ impl<'a> Builder<'a> {
                     schema["maxLength"] = json!(maximum);
                 }
                 if let Some(pattern) = pattern {
-                    schema["pattern"] = json!(pattern);
+                    schema["pattern"] = stated_pattern(pattern)?;
                 }
                 schema
             }
             InlineType::Bytes { encoding } => match encoding {
-                ByteEncoding::Base64 => json!({"type":"string","contentEncoding":"base64"}),
-                ByteEncoding::Base64url => json!({"type":"string","contentEncoding":"base64url"}),
-                ByteEncoding::Hex => json!({"type":"string","pattern":"^(?:[0-9a-fA-F]{2})*$"}),
+                ByteEncoding::Base64 => json!({
+                    "type":"string",
+                    "contentEncoding":"base64",
+                    "pattern":stated_pattern(BASE64_PATTERN)?,
+                }),
+                ByteEncoding::Base64url => json!({
+                    "type":"string",
+                    "contentEncoding":"base64url",
+                    "pattern":stated_pattern(BASE64URL_PATTERN)?,
+                }),
+                ByteEncoding::Hex => json!({
+                    "type":"string",
+                    "pattern":stated_pattern(HEX_PATTERN)?,
+                }),
                 ByteEncoding::Array => {
                     json!({"type":"array","items":{"type":"integer","minimum":0,"maximum":255}})
                 }
@@ -422,14 +435,13 @@ impl<'a> Builder<'a> {
             EnumRepr::Internal { tag } => match &variant.payload {
                 VariantPayload::Unit => tagged_schema(tag, &variant.wire),
                 VariantPayload::Struct { fields } => {
-                    let mut schema = fields_schema_with(self, fields)?;
-                    schema["properties"][tag] = json!({"const":variant.wire});
-                    if schema.get("required").is_none() {
-                        schema["required"] = json!([]);
-                    }
-                    schema["required"].as_array_mut().unwrap().push(json!(tag));
-                    schema
+                    tagged(fields_schema_with(self, fields)?, tag, &variant.wire)
                 }
+
+                VariantPayload::Newtype { ty } => match self.inlined_object(ty)? {
+                    Some(object) => tagged(object, tag, &variant.wire),
+                    None => json!({"allOf":[tagged_schema(tag, &variant.wire),payload]}),
+                },
                 _ => json!({"allOf":[tagged_schema(tag, &variant.wire),payload]}),
             },
             EnumRepr::Adjacent { tag, content } => {
@@ -469,6 +481,180 @@ impl<'a> Builder<'a> {
             VariantPayload::Struct { fields } => fields_schema_with(self, fields),
         }
     }
+
+    fn inlined_object(&self, ty: &TypeRef) -> Result<Option<Value>, EmitError> {
+        let Some((fields, openness)) = self.object_fields(ty, &mut Vec::new())? else {
+            return Ok(None);
+        };
+        let mut object = fields_schema_with(self, fields)?;
+        object["additionalProperties"] = self.openness_schema(&openness)?;
+        Ok(Some(object))
+    }
+
+    pub(super) fn object_fields<'b>(
+        &'b self,
+        ty: &'b TypeRef,
+        visiting: &mut Vec<String>,
+    ) -> Result<Option<(Vec<&'b Field>, ObjectOpenness)>, EmitError> {
+        let TypeRef::Named(named) = ty else {
+            return Ok(None);
+        };
+        if named.variant.is_some() || visiting.contains(&named.id) {
+            return Ok(None);
+        }
+        let Some(definition) = self.document.types.get(&named.id) else {
+            return Err(EmitError(format!("unknown type {}", named.id)));
+        };
+        visiting.push(named.id.clone());
+        let result = match &definition.definition {
+            TypeKind::Newtype { inner } => self.object_fields(inner, visiting),
+            TypeKind::Enum { .. } => Ok(None),
+            TypeKind::Struct {
+                fields,
+                flattened,
+                openness,
+            } => {
+                let mut collected = fields.iter().collect::<Vec<_>>();
+                for member in flattened {
+                    let Some((inner, _)) = self.object_fields(member, visiting)? else {
+                        return Err(not_a_struct_member(member));
+                    };
+                    collected.extend(inner);
+                }
+                Ok(Some((collected, openness.clone())))
+            }
+        };
+        visiting.pop();
+        result
+    }
+
+    fn openness_schema(&self, openness: &ObjectOpenness) -> Result<Value, EmitError> {
+        Ok(match openness {
+            ObjectOpenness::Reject => json!(false),
+            ObjectOpenness::PreserveTyped { value } => {
+                self.type_schema(openness_value(value, self.document))?
+            }
+            ObjectOpenness::PreserveOpaque => json!(true),
+        })
+    }
+
+    pub(super) fn wire_form(
+        &self,
+        ty: &TypeRef,
+        place: Place,
+    ) -> Result<Option<WireForm>, EmitError> {
+        self.wire_form_of(ty, place, &mut Vec::new())
+    }
+
+    fn wire_form_of(
+        &self,
+        ty: &TypeRef,
+        place: Place,
+        visiting: &mut Vec<String>,
+    ) -> Result<Option<WireForm>, EmitError> {
+        let inline = match ty {
+            TypeRef::Inline(inline) => inline,
+            TypeRef::Named(named) => {
+                let definition = self
+                    .document
+                    .types
+                    .get(&named.id)
+                    .ok_or_else(|| EmitError(format!("unknown type {}", named.id)))?;
+                if let Some(wire) = &named.variant {
+                    let TypeKind::Enum { variants, .. } = &definition.definition else {
+                        return Err(EmitError(format!("type {} is not an enum", named.id)));
+                    };
+                    let Some(variant) = variants.iter().find(|one| &one.wire == wire) else {
+                        return Err(EmitError(format!("unknown variant {wire}")));
+                    };
+                    return match &variant.payload {
+                        VariantPayload::Unit => Ok(Some(WireForm::Text)),
+                        VariantPayload::Newtype { ty } => self.wire_form_of(ty, place, visiting),
+                        VariantPayload::Struct { .. } | VariantPayload::Tuple { .. } => {
+                            Ok(Some(WireForm::Json))
+                        }
+                    };
+                }
+                if visiting.contains(&named.id) {
+                    return Err(EmitError(format!(
+                        "the type {} cannot be resolved because newtypes form a cycle",
+                        named.id
+                    )));
+                }
+                visiting.push(named.id.clone());
+                let result = match &definition.definition {
+                    TypeKind::Newtype { inner } => self.wire_form_of(inner, place, visiting),
+                    TypeKind::Struct { .. } => Ok(Some(WireForm::Json)),
+                    TypeKind::Enum { repr, .. } => Ok(match repr {
+                        EnumRepr::String => Some(WireForm::Text),
+
+                        EnumRepr::External => None,
+                        EnumRepr::Internal { .. }
+                        | EnumRepr::Adjacent { .. }
+                        | EnumRepr::Untagged => Some(WireForm::Json),
+                    }),
+                };
+                visiting.pop();
+                return result;
+            }
+        };
+        Ok(Some(match inline {
+            InlineType::String { .. }
+            | InlineType::Int {
+                wire: IntegerWire::String,
+                ..
+            }
+            | InlineType::Decimal {
+                wire: DecimalWire::String,
+            }
+            | InlineType::Bytes {
+                encoding: ByteEncoding::Base64 | ByteEncoding::Base64url | ByteEncoding::Hex,
+            } => WireForm::Text,
+
+            InlineType::Bool
+            | InlineType::Int {
+                wire: IntegerWire::Number,
+                ..
+            }
+            | InlineType::Float { .. }
+            | InlineType::Decimal {
+                wire: DecimalWire::Number,
+            }
+            | InlineType::Any => match place {
+                Place::Header => WireForm::Text,
+                Place::Part { .. } => WireForm::Json,
+            },
+
+            InlineType::Opaque { .. } | InlineType::Null => return Ok(None),
+            InlineType::Nullable { inner } => {
+                return match place {
+                    Place::Part { required: true } => Ok(None),
+                    place => self.wire_form_of(inner, place, visiting),
+                };
+            }
+            InlineType::Array { .. } | InlineType::Map { .. } | InlineType::Tuple { .. } => {
+                WireForm::Json
+            }
+
+            InlineType::Bytes {
+                encoding: ByteEncoding::Array,
+            } => WireForm::Json,
+        }))
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum WireForm {
+    Text,
+
+    Json,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum Place {
+    Header,
+
+    Part { required: bool },
 }
 
 fn newtype_cycle(id: &str, inner: &TypeRef, document: &Document) -> bool {
@@ -492,6 +678,124 @@ fn newtype_cycle(id: &str, inner: &TypeRef, document: &Document) -> bool {
         current = inner;
     }
     false
+}
+
+fn stated_pattern(pattern: &str) -> Result<Value, EmitError> {
+    if compiles(pattern) {
+        Ok(json!(pattern))
+    } else {
+        Err(EmitError(format!(
+            "the pattern {pattern:?} cannot be stated because it is not a regular expression the document and the TypeScript client can both compile"
+        )))
+    }
+}
+
+fn compiles(pattern: &str) -> bool {
+    let chars = pattern.chars().collect::<Vec<_>>();
+    let mut groups: Vec<char> = Vec::new();
+    let mut at = 0;
+
+    let mut repeatable = false;
+    while at < chars.len() {
+        match chars[at] {
+            '\\' => {
+                at += 1;
+                if at == chars.len() {
+                    return false;
+                }
+                at += 1;
+                repeatable = true;
+            }
+            '[' => {
+                at += 1;
+                if chars.get(at) == Some(&'^') {
+                    at += 1;
+                }
+                loop {
+                    match chars.get(at) {
+                        None => return false,
+                        Some(']') => {
+                            at += 1;
+                            break;
+                        }
+                        Some('\\') => {
+                            at += 1;
+                            if at == chars.len() {
+                                return false;
+                            }
+                            at += 1;
+                        }
+                        Some(_) => at += 1,
+                    }
+                }
+                repeatable = true;
+            }
+            '(' => {
+                at += 1;
+                if chars.get(at) == Some(&'?')
+                    && matches!(chars.get(at + 1), Some(':' | '=' | '!' | '<' | 'P'))
+                {
+                    at += 2;
+                }
+                groups.push('(');
+                repeatable = false;
+            }
+            ')' => {
+                if groups.pop() != Some('(') {
+                    return false;
+                }
+                at += 1;
+                repeatable = true;
+            }
+            '{' => {
+                if !repeatable {
+                    return false;
+                }
+                at += 1;
+                let digits = at;
+                while chars.get(at).is_some_and(char::is_ascii_digit) {
+                    at += 1;
+                }
+                if at == digits {
+                    return false;
+                }
+                if chars.get(at) == Some(&',') {
+                    at += 1;
+                    while chars.get(at).is_some_and(char::is_ascii_digit) {
+                        at += 1;
+                    }
+                }
+                if chars.get(at) != Some(&'}') {
+                    return false;
+                }
+                at += 1;
+                if chars.get(at) == Some(&'?') {
+                    at += 1;
+                }
+                repeatable = false;
+            }
+            '}' => return false,
+            '*' | '+' | '?' => {
+                if !repeatable {
+                    return false;
+                }
+                at += 1;
+                if chars.get(at) == Some(&'?') {
+                    at += 1;
+                }
+                repeatable = false;
+            }
+            '|' => {
+                at += 1;
+                repeatable = false;
+            }
+            _ => {
+                at += 1;
+                repeatable = true;
+            }
+        }
+    }
+    groups.is_empty()
 }
 
 fn not_a_struct_member(ty: &TypeRef) -> EmitError {
@@ -536,16 +840,28 @@ fn tagged_schema(tag: &str, variant: &str) -> Value {
     json!({"type":"object","properties":properties,"required":[tag]})
 }
 
-fn fields_schema_with(
+fn tagged(mut object: Value, tag: &str, variant: &str) -> Value {
+    object["properties"][tag] = json!({"const":variant});
+    if object.get("required").is_none() {
+        object["required"] = json!([]);
+    }
+    object["required"].as_array_mut().unwrap().push(json!(tag));
+    object
+}
+
+fn fields_schema_with<'a>(
     builder: &Builder<'_>,
-    fields: &[pons_ir::Field],
+    fields: impl IntoIterator<Item = &'a Field>,
 ) -> Result<Value, EmitError> {
     let mut properties = Map::new();
     let mut required = Vec::new();
     for field in fields {
         let mut schema = builder.field_schema(field)?;
         properties.insert(field.wire.clone(), schema.take());
-        if field.presence == Presence::Required {
+
+        if field.presence == Presence::Required
+            && !matches!(field.access, Some(Access::ReadOnly | Access::WriteOnly))
+        {
             required.push(field.wire.clone());
         }
     }
@@ -559,8 +875,8 @@ fn fields_schema_with(
 #[cfg(test)]
 mod tests {
     use pons_ir::{
-        DecimalWire, Direction, EnumRepr, Field, InlineType, IntegerWire, NamedRef, ObjectOpenness,
-        Presence, TypeDef, TypeKind, TypeRef, Variant, VariantPayload,
+        Access, ByteEncoding, DecimalWire, Direction, EnumRepr, Field, InlineType, IntegerWire,
+        NamedRef, ObjectOpenness, Presence, TypeDef, TypeKind, TypeRef, Variant, VariantPayload,
     };
     use serde_json::{Value, json};
 
@@ -673,6 +989,51 @@ mod tests {
             key: Box::new(string()),
             value: Box::new(string()),
         })
+    }
+
+    fn bytes(encoding: ByteEncoding) -> TypeRef {
+        TypeRef::Inline(InlineType::Bytes { encoding })
+    }
+
+    fn patterned(pattern: &str) -> TypeRef {
+        TypeRef::Inline(InlineType::String {
+            format: None,
+            min_length: None,
+            max_length: None,
+            pattern: Some(pattern.into()),
+        })
+    }
+
+    fn directional(wire: &str, access: Access) -> Field {
+        Field {
+            access: Some(access),
+            ..field(wire, string())
+        }
+    }
+
+    fn internal(name: &str, tag: &str, variants: Vec<(&str, VariantPayload)>) -> TypeDef {
+        TypeDef {
+            name: vec![name.into()],
+            direction: Direction::Both,
+            definition: TypeKind::Enum {
+                repr: EnumRepr::Internal { tag: tag.into() },
+                variants: variants
+                    .into_iter()
+                    .map(|(wire, payload)| Variant {
+                        wire: wire.into(),
+                        ident: vec![wire.into()],
+                        payload,
+                        doc: None,
+                        diagnostics: Vec::new(),
+                        ext: Default::default(),
+                    })
+                    .collect(),
+            },
+            origin: None,
+            doc: None,
+            diagnostics: Vec::new(),
+            ext: Default::default(),
+        }
     }
 
     #[test]
@@ -1068,6 +1429,238 @@ mod tests {
         assert_eq!(
             properties["signed"]["maximum"].to_string(),
             "170141183460469231731687303715884105727"
+        );
+    }
+
+    #[test]
+    fn a_directional_field_is_never_required_of_the_payload_that_drops_it() {
+        let mut document = fixture();
+        document.types.insert(
+            "Account".into(),
+            closed(
+                "account",
+                vec![
+                    directional("id", Access::ReadOnly),
+                    directional("secret", Access::WriteOnly),
+                    field("name", string()),
+                ],
+                Vec::new(),
+            ),
+        );
+        document.types.insert(
+            "Envelope".into(),
+            closed(
+                "envelope",
+                vec![field("kind", string())],
+                vec![named("Account")],
+            ),
+        );
+        let output: Value = serde_json::from_str(&crate::emit(&document).unwrap()).unwrap();
+        let account = &output["components"]["schemas"]["Account"];
+        assert_eq!(account["required"], json!(["name"]));
+        assert_eq!(account["properties"]["id"]["readOnly"], true);
+        assert_eq!(account["properties"]["secret"]["writeOnly"], true);
+        let all_of = output["components"]["schemas"]["Envelope"]["allOf"]
+            .as_array()
+            .unwrap();
+        assert_eq!(all_of[1]["required"], json!(["name"]));
+
+        for instance in [
+            json!({"name":"ada"}),
+            json!({"id":"7","name":"ada"}),
+            json!({"secret":"s","name":"ada"}),
+            json!({"id":"7","secret":"s","name":"ada"}),
+        ] {
+            assert!(
+                validates(&document, "Account", instance.clone()),
+                "the document rejects {instance}"
+            );
+        }
+        assert!(!validates(&document, "Account", json!({"id":"7"})));
+        assert!(!validates(
+            &document,
+            "Account",
+            json!({"name":"ada","id":7})
+        ));
+        assert!(validates(
+            &document,
+            "Envelope",
+            json!({"kind":"k","name":"ada"})
+        ));
+        assert!(!validates(
+            &document,
+            "Envelope",
+            json!({"kind":"k","id":"7"})
+        ));
+    }
+
+    #[test]
+    fn an_internally_tagged_newtype_payload_composes_with_its_tag() {
+        for (id, definition) in [
+            (
+                "Detail",
+                closed("detail", vec![field("reason", string())], Vec::new()),
+            ),
+            (
+                "Typed",
+                struct_type(
+                    "typed",
+                    vec![field("reason", string())],
+                    Vec::new(),
+                    ObjectOpenness::PreserveTyped { value: string() },
+                ),
+            ),
+            (
+                "Open",
+                struct_type(
+                    "open",
+                    vec![field("reason", string())],
+                    Vec::new(),
+                    ObjectOpenness::PreserveOpaque,
+                ),
+            ),
+        ] {
+            let mut document = fixture();
+            document.types.insert(id.into(), definition);
+            document.types.insert(
+                "Notice".into(),
+                internal(
+                    "notice",
+                    "code",
+                    vec![
+                        ("stop", VariantPayload::Newtype { ty: named(id) }),
+                        ("quiet", VariantPayload::Unit),
+                    ],
+                ),
+            );
+
+            let output: Value = serde_json::from_str(&crate::emit(&document).unwrap()).unwrap();
+            let branches = output["components"]["schemas"]["Notice"]["oneOf"]
+                .as_array()
+                .unwrap();
+            let stop = branches
+                .iter()
+                .find(|schema| schema["properties"]["code"]["const"] == "stop")
+                .unwrap();
+            assert!(stop.get("allOf").is_none(), "{stop:#}");
+            assert!(stop.get("$ref").is_none(), "{stop:#}");
+            assert_eq!(stop["properties"]["reason"]["type"], "string");
+            assert_eq!(stop["required"], json!(["reason", "code"]));
+
+            assert!(validates(
+                &document,
+                "Notice",
+                json!({"reason":"x","code":"stop"})
+            ));
+            assert!(validates(&document, "Notice", json!({"code":"quiet"})));
+            assert!(
+                !validates(&document, "Notice", json!({"code":"stop"})),
+                "the payload fields are still required"
+            );
+            assert_eq!(
+                validates(
+                    &document,
+                    "Notice",
+                    json!({"reason":"x","code":"stop","extra":1})
+                ),
+                id == "Open",
+                "the payload's own openness still judges the keys beside the tag"
+            );
+        }
+    }
+
+    #[test]
+    fn states_the_padding_rule_the_client_enforces_for_each_byte_encoding() {
+        let mut document = fixture();
+        document.types.insert(
+            "Blobs".into(),
+            closed(
+                "blobs",
+                vec![
+                    field("standard", bytes(ByteEncoding::Base64)),
+                    field("url", bytes(ByteEncoding::Base64url)),
+                    field("hex", bytes(ByteEncoding::Hex)),
+                ],
+                Vec::new(),
+            ),
+        );
+        let output: Value = serde_json::from_str(&crate::emit(&document).unwrap()).unwrap();
+        let properties = &output["components"]["schemas"]["Blobs"]["properties"];
+        assert_eq!(properties["standard"]["contentEncoding"], "base64");
+        assert_eq!(
+            properties["standard"]["pattern"],
+            json!("^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$")
+        );
+        assert_eq!(properties["url"]["contentEncoding"], "base64url");
+        assert_eq!(
+            properties["url"]["pattern"],
+            json!("^(?:[A-Za-z0-9_-]{4})*(?:[A-Za-z0-9_-]{2}(?:==)?|[A-Za-z0-9_-]{3}=?)?$")
+        );
+        assert_eq!(properties["hex"]["pattern"], json!("^(?:[0-9a-fA-F]{2})*$"));
+
+        let instance = |wire: &str, value: &str| {
+            let mut instance = json!({"standard":"QQ==","url":"QQ","hex":"00"});
+            instance[wire] = json!(value);
+            instance
+        };
+        for (wire, accepted, rejected) in [
+            (
+                "standard",
+                vec!["", "QQ==", "QUE=", "QUJD", "QUJDRA==", "a+b/"],
+                vec!["QQ", "QUJDQ", "QQ=", "a-b_", "===="],
+            ),
+            (
+                "url",
+                vec!["", "QQ", "QQ==", "QUE", "QUE=", "QUJD", "QUJDRA", "a-b_"],
+                vec!["QQ=", "QQ===", "QUJDQ", "a+b/", "+", "===="],
+            ),
+            (
+                "hex",
+                vec!["", "00", "0a1B", "deadBEEF"],
+                vec!["0", "abc", "0g", "0 0"],
+            ),
+        ] {
+            for value in accepted {
+                assert!(
+                    validates(&document, "Blobs", instance(wire, value)),
+                    "the document rejects {wire} {value:?}"
+                );
+            }
+            for value in rejected {
+                assert!(
+                    !validates(&document, "Blobs", instance(wire, value)),
+                    "the document accepts {wire} {value:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn refuses_a_pattern_the_document_cannot_compile() {
+        fn id_pattern(document: &mut pons_ir::Document, pattern: &str) {
+            let TypeKind::Struct { fields, .. } =
+                &mut document.types.get_mut("User").unwrap().definition
+            else {
+                unreachable!()
+            };
+            fields[0].ty = patterned(pattern);
+        }
+        let mut document = fixture();
+
+        id_pattern(&mut document, "[a-");
+        let error = crate::emit(&document).unwrap_err().0;
+        assert!(error.contains("[a-"), "{error}");
+
+        id_pattern(&mut document, "a{");
+        assert!(document.validate().is_ok(), "the document itself is legal");
+        let error = crate::emit(&document).unwrap_err().0;
+        assert!(error.contains("a{"), "{error}");
+
+        id_pattern(&mut document, "^[a-z0-9_-]{2,}$");
+        let output: Value = serde_json::from_str(&crate::emit(&document).unwrap()).unwrap();
+        assert_eq!(
+            output["components"]["schemas"]["User"]["properties"]["id"]["pattern"],
+            json!("^[a-z0-9_-]{2,}$")
         );
     }
 }

@@ -6,6 +6,7 @@ use pons_ir::{
 };
 use serde_json::{Map, Value, json};
 
+use crate::schemas::{Place, WireForm};
 use crate::{Builder, EmitError};
 
 impl Builder<'_> {
@@ -167,12 +168,53 @@ impl Builder<'_> {
         } else {
             self.type_schema(&body.ty)?
         };
+        let content = match body.content {
+            ContentKind::Form | ContentKind::Multipart => {
+                let mut entry = Map::new();
+                entry.insert("schema".into(), schema);
+                entry.insert("encoding".into(), self.form_encoding(&body.ty)?);
+                let mut content = Map::new();
+                content.insert(media, Value::Object(entry));
+                Value::Object(content)
+            }
+            _ => media_content(media, schema),
+        };
         Ok(json!({
             "required":body.required,
-            "content":media_content(media, schema),
+            "content":content,
             "x-pons":{"ty":body.ty,"required":body.required,"content":body.content,"media_type":body.media_type,"ext":body.ext}
         }))
     }
+
+    fn form_encoding(&self, ty: &TypeRef) -> Result<Value, EmitError> {
+        let Some((fields, _)) = self.object_fields(ty, &mut Vec::new())? else {
+            return Err(EmitError(
+                "a form or multipart body must be a struct, because the client writes one value per key and OpenAPI states an encoding per property".into(),
+            ));
+        };
+        let mut encoding = Map::new();
+        for field in fields {
+            let form = self
+                .wire_form(&field.ty, Place::Part {
+                    required: field.presence == Presence::Required,
+                })?
+                .ok_or_else(|| {
+                    EmitError(format!(
+                        "the form or multipart field {:?} has no encoding this emitter can state, because the client writes no single value the document can name",
+                        field.wire
+                    ))
+                })?;
+            encoding.insert(
+                field.wire.clone(),
+                json!({"contentType":match form {
+                    WireForm::Text => "text/plain",
+                    WireForm::Json => "application/json",
+                }}),
+            );
+        }
+        Ok(Value::Object(encoding))
+    }
+
     fn responses(&self, operation: &Operation) -> Result<Value, EmitError> {
         let mut responses = Map::new();
         for response in &operation.responses {
@@ -254,10 +296,10 @@ impl Builder<'_> {
             insert_response(&mut responses, status, value)?;
         }
         if responses.is_empty() {
-            responses.insert(
-                "default".into(),
-                json!({"description":"Unspecified response"}),
-            );
+            return Err(EmitError(format!(
+                "the operation {} declares no responses and no errors, so every status the client sees would be a protocol error",
+                operation_id(operation)
+            )));
         }
         Ok(Value::Object(responses))
     }
@@ -491,14 +533,27 @@ fn add_response_headers(
                 header.wire
             )));
         }
-        response_headers.insert(
-            header.wire.clone(),
-            json!({
-                "required": header.presence == Presence::Required,
-                "schema": builder.type_schema(&header.ty)?,
-                "x-pons": {"presence": header.presence, "ext": header.ext}
-            }),
-        );
+        let schema = builder.type_schema(&header.ty)?;
+        let mut entry = json!({
+            "required": header.presence == Presence::Required,
+            "x-pons": {"presence": header.presence, "ext": header.ext}
+        });
+
+        match builder.wire_form(&header.ty, Place::Header)? {
+            Some(WireForm::Json) => {
+                entry["content"] = media_content("application/json".into(), schema);
+            }
+            Some(WireForm::Text) => {
+                entry["schema"] = schema;
+            }
+            None => {
+                return Err(EmitError(format!(
+                    "{kind} header {} has no header encoding this emitter can state, because the client reads it in a shape no keyword names",
+                    header.wire
+                )));
+            }
+        }
+        response_headers.insert(header.wire.clone(), entry);
     }
     value["headers"] = Value::Object(response_headers);
     Ok(())
@@ -535,11 +590,240 @@ fn insert_response(
 
 #[cfg(test)]
 mod tests {
-    use pons_ir::PathSegment;
-    use serde_json::Value;
+    use pons_ir::{ContentKind, PathSegment};
+    use serde_json::{Value, json};
 
     fn fixture() -> pons_ir::Document {
         serde_json::from_str(include_str!("../../../fixtures/login.json")).unwrap()
+    }
+
+    fn with_body(types: Value, ty: Value, content: ContentKind) -> pons_ir::Document {
+        let mut raw = serde_json::to_value(fixture()).unwrap();
+        for (name, definition) in types.as_object().unwrap() {
+            raw["types"][name.as_str()] = definition.clone();
+        }
+        raw["operations"][0]["body"] = json!({"ty":ty,"content":content,"required":true});
+        serde_json::from_value(raw).unwrap()
+    }
+
+    fn body_encoding(document: &pons_ir::Document, media: &str) -> Value {
+        let output: Value = serde_json::from_str(&crate::emit(document).unwrap()).unwrap();
+        output["paths"]["/auth/login"]["post"]["requestBody"]["content"][media]["encoding"].clone()
+    }
+
+    #[test]
+    fn states_the_one_value_per_key_encoding_the_client_writes() {
+        let types = json!({
+            "Profile": {
+                "kind": "struct", "name": ["profile"], "direction": "both",
+                "openness": "reject",
+                "fields": [{
+                    "wire": "nickname", "ident": ["nickname"],
+                    "ty": {"kind": "string"}, "presence": "required"
+                }]
+            },
+            "Seal": {
+                "kind": "struct", "name": ["seal"], "direction": "both",
+                "openness": "reject",
+                "fields": [
+                    {"wire": "kind", "ident": ["kind"], "ty": {"kind": "string"}, "presence": "required"},
+                    {"wire": "blob", "ident": ["blob"], "ty": {"kind": "bytes", "encoding": "base64url"}, "presence": "optional"}
+                ]
+            },
+            "Upload": {
+                "kind": "struct", "name": ["upload"], "direction": "both",
+                "openness": "reject",
+                "flattened": [{"ref": "Seal"}],
+                "fields": [
+                    {"wire": "title", "ident": ["title"], "ty": {"kind": "string"}, "presence": "required"},
+                    {"wire": "tags", "ident": ["tags"], "ty": {"kind": "array", "item": {"kind": "string"}}, "presence": "optional"},
+                    {"wire": "profile", "ident": ["profile"], "ty": {"ref": "Profile"}, "presence": "required"},
+                    {"wire": "visits", "ident": ["visits"], "ty": {"kind": "int", "bits": 32, "signed": false, "wire": "number"}, "presence": "optional"},
+                    {"wire": "code", "ident": ["code"], "ty": {"kind": "int", "bits": 32, "signed": false, "wire": "string"}, "presence": "optional"}
+                ]
+            }
+        });
+        let multipart = with_body(
+            types.clone(),
+            json!({"ref": "Upload"}),
+            ContentKind::Multipart,
+        );
+        let encoding = body_encoding(&multipart, "multipart/form-data");
+        assert_eq!(encoding["title"]["contentType"], "text/plain");
+        assert_eq!(encoding["code"]["contentType"], "text/plain");
+        assert_eq!(encoding["tags"]["contentType"], "application/json");
+        assert_eq!(encoding["profile"]["contentType"], "application/json");
+        assert_eq!(encoding["visits"]["contentType"], "application/json");
+        assert_eq!(
+            encoding["kind"]["contentType"], "text/plain",
+            "a flattened member writes its own keys in the same namespace"
+        );
+        assert_eq!(encoding["blob"]["contentType"], "text/plain");
+
+        let flat = json!({
+            "Signup": {
+                "kind": "struct", "name": ["signup"], "direction": "both",
+                "openness": "reject",
+                "fields": [
+                    {"wire": "email", "ident": ["email"], "ty": {"kind": "string"}, "presence": "required"},
+                    {"wire": "tags", "ident": ["tags"], "ty": {"kind": "array", "item": {"kind": "string"}}, "presence": "optional"}
+                ]
+            }
+        });
+        let form = with_body(flat, json!({"ref": "Signup"}), ContentKind::Form);
+        let encoding = body_encoding(&form, "application/x-www-form-urlencoded");
+        assert_eq!(
+            encoding,
+            json!({"email":{"contentType":"text/plain"},"tags":{"contentType":"application/json"}})
+        );
+    }
+
+    #[test]
+    fn refuses_a_form_body_the_encoding_cannot_describe() {
+        let opaque = json!({
+            "Signed": {
+                "kind": "struct", "name": ["signed"], "direction": "both",
+                "openness": "reject",
+                "fields": [{
+                    "wire": "seal", "ident": ["seal"],
+                    "ty": {"kind": "opaque", "codec": "example.seal", "wire": "json"},
+                    "presence": "required"
+                }]
+            }
+        });
+        let document = with_body(opaque, json!({"ref": "Signed"}), ContentKind::Multipart);
+        let error = crate::emit(&document).unwrap_err().0;
+        assert!(error.contains("\"seal\""), "{error}");
+        assert!(
+            error.contains("no encoding this emitter can state"),
+            "{error}"
+        );
+
+        let required_nullable = json!({
+            "Signed": {
+                "kind": "struct", "name": ["signed"], "direction": "both",
+                "openness": "reject",
+                "fields": [{
+                    "wire": "note", "ident": ["note"],
+                    "ty": {"kind": "nullable", "inner": {"kind": "string"}},
+                    "presence": "required"
+                }]
+            }
+        });
+        let document = with_body(
+            required_nullable,
+            json!({"ref": "Signed"}),
+            ContentKind::Multipart,
+        );
+        let error = crate::emit(&document).unwrap_err().0;
+        assert!(error.contains("\"note\""), "{error}");
+        assert!(
+            error.contains("no encoding this emitter can state"),
+            "{error}"
+        );
+
+        for ty in [
+            json!({"kind": "map", "key": {"kind": "string"}, "value": {"kind": "string"}}),
+            json!({"kind": "array", "item": {"kind": "string"}}),
+            json!({"kind": "string"}),
+        ] {
+            let document = with_body(json!({}), ty, ContentKind::Form);
+            let error = crate::emit(&document).unwrap_err().0;
+            assert!(
+                error.contains("a form or multipart body must be a struct"),
+                "{error}"
+            );
+        }
+    }
+
+    #[test]
+    fn states_a_structured_response_header_as_json_content() {
+        let string = || json!({"kind": "string"});
+        let mut raw = serde_json::to_value(fixture()).unwrap();
+        raw["operations"][1]["responses"][0]["headers"] = json!([
+            {"wire": "X-Items", "ty": {"kind": "array", "item": string()}, "presence": "required"},
+            {"wire": "X-Pair", "ty": {"kind": "tuple", "items": [string()]}, "presence": "required"},
+            {"wire": "X-Trace-ID", "ty": string(), "presence": "required"}
+        ]);
+        let document: pons_ir::Document = serde_json::from_value(raw).unwrap();
+        let output: Value = serde_json::from_str(&crate::emit(&document).unwrap()).unwrap();
+        let headers = &output["paths"]["/events/{cursor}"]["get"]["responses"]["200"]["headers"];
+
+        assert_eq!(
+            headers["X-Items"]["content"]["application/json"]["schema"]["type"],
+            "array"
+        );
+        assert_eq!(
+            headers["X-Pair"]["content"]["application/json"]["schema"]["maxItems"],
+            1
+        );
+        for wire in ["X-Items", "X-Pair"] {
+            assert!(headers[wire].get("schema").is_none(), "{headers:#}");
+            assert_eq!(headers[wire]["required"], true);
+        }
+        assert_eq!(headers["X-Trace-ID"]["schema"]["type"], "string");
+        assert!(
+            headers["X-Trace-ID"].get("content").is_none(),
+            "{headers:#}"
+        );
+    }
+
+    #[test]
+    fn refuses_a_response_header_no_encoding_states() {
+        for (ty, expected) in [
+            (
+                json!({"kind": "opaque", "codec": "example.seal", "wire": "bytes"}),
+                "no header encoding this emitter can state",
+            ),
+            (
+                json!({"ref": "Choice"}),
+                "no header encoding this emitter can state",
+            ),
+        ] {
+            let mut raw = serde_json::to_value(fixture()).unwrap();
+            raw["types"]["Choice"] = json!({
+                "kind": "enum", "name": ["choice"], "direction": "both",
+                "repr": {"kind": "external"},
+                "variants": [
+                    {"wire": "quiet", "ident": ["quiet"], "payload": {"kind": "unit"}},
+                    {
+                        "wire": "loud", "ident": ["loud"],
+                        "payload": {"kind": "newtype", "ty": {"kind": "map", "key": {"kind": "string"}, "value": {"kind": "string"}}}
+                    }
+                ]
+            });
+            raw["operations"][1]["responses"][0]["headers"] = json!([{
+                "wire": "X-Choice", "ty": ty, "presence": "required"
+            }]);
+            let document: pons_ir::Document = serde_json::from_value(raw).unwrap();
+            let error = crate::emit(&document).unwrap_err().0;
+            assert!(error.contains("X-Choice"), "{error}");
+            assert!(error.contains(expected), "{error}");
+        }
+    }
+
+    #[test]
+    fn refuses_an_operation_that_declares_no_response_at_all() {
+        let mut document = fixture();
+        let operation = document
+            .operations
+            .iter_mut()
+            .find(|operation| operation.id[0][0] == "auth")
+            .unwrap();
+        operation.responses.clear();
+        operation.errors.clear();
+        let error = crate::emit(&document).unwrap_err().0;
+        assert!(error.contains("auth.login"), "{error}");
+        assert!(
+            error.contains("declares no responses and no errors"),
+            "{error}"
+        );
+
+        let mut document = fixture();
+        document.common_errors = document.operations[0].errors.clone();
+        document.operations[0].errors.clear();
+        let output: Value = serde_json::from_str(&crate::emit(&document).unwrap()).unwrap();
+        assert!(output["paths"]["/auth/login"]["post"]["responses"]["4XX"].is_object());
     }
 
     #[test]

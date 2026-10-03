@@ -41,8 +41,7 @@
           "wire": "email",
           "ident": ["email"],
           "ty": {"kind": "string", "format": "email"},
-          "presence": "required",
-          "default": null
+          "presence": "required"
         }
       ]
     },

@@ -25,11 +25,7 @@ impl Builder<'_> {
                     json!({"type":"apiKey","in":"cookie","name":cookie})
                 }
                 AuthScheme::OAuth2 { flows } => self.oauth_flows(id, flows)?,
-                AuthScheme::Custom { .. } if self.is_required(id) => {
-                    return Err(EmitError(format!(
-                        "custom auth scheme {id} cannot be represented in OpenAPI"
-                    )));
-                }
+
                 AuthScheme::Custom { .. } => continue,
             };
             schemes.insert(self.security_names[id].clone(), value);
@@ -51,6 +47,15 @@ impl Builder<'_> {
                     let Some(definition) = self.document.auth_schemes.get(scheme) else {
                         return Err(EmitError(format!("unknown auth scheme {scheme}")));
                     };
+                    if matches!(definition, AuthScheme::Custom { .. }) {
+
+                        if !operation.auth.optional {
+                            return Err(EmitError(format!(
+                                "custom auth scheme {scheme} cannot be represented in OpenAPI"
+                            )));
+                        }
+                        continue;
+                    }
                     let scopes = match definition {
                         AuthScheme::OAuth2 { flows } => {
                             let scopes =
@@ -143,16 +148,6 @@ impl Builder<'_> {
             result.insert(name.into(), Value::Object(value));
         }
         Ok(json!({"type":"oauth2","flows":result}))
-    }
-
-    fn is_required(&self, id: &str) -> bool {
-        self.document.operations.iter().any(|operation| {
-            operation
-                .auth
-                .alternatives
-                .iter()
-                .any(|group| group.iter().any(|scheme| scheme == id))
-        })
     }
 }
 
@@ -249,6 +244,40 @@ mod tests {
         assert_eq!(scopes("Session"), json!([]));
         assert_eq!(scopes("Tenant"), json!([]));
         assert_eq!(scopes("Oauth"), json!(["events:read"]));
+    }
+
+    #[test]
+    fn an_optional_custom_scheme_is_the_anonymous_alternative_and_a_required_one_stops() {
+        let mut document = fixture();
+        document.auth_schemes.insert(
+            "custom".into(),
+            AuthScheme::Custom {
+                description: "custom auth".into(),
+                ext: Default::default(),
+            },
+        );
+        let events = &mut document.operations[1];
+        events.auth.alternatives = vec![vec!["custom".into()], vec!["tenant".into()]];
+        events.auth.optional = true;
+        let output: Value = serde_json::from_str(&crate::emit(&document).unwrap()).unwrap();
+
+        assert_eq!(
+            output["paths"]["/events/{cursor}"]["get"]["security"],
+            json!([{}, {"Tenant": []}]),
+            "the optional custom scheme is the anonymous alternative the client may take"
+        );
+        assert!(
+            output["components"]["securitySchemes"]
+                .get("Custom")
+                .is_none(),
+            "no Security Scheme Object describes a custom scheme"
+        );
+
+        document.operations[1].auth.optional = false;
+        assert_eq!(
+            crate::emit(&document).unwrap_err().0,
+            "custom auth scheme custom cannot be represented in OpenAPI"
+        );
     }
 
     #[test]

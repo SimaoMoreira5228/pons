@@ -1,5 +1,4 @@
 use std::any::type_name;
-use std::cmp::Reverse;
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex, OnceLock};
 
@@ -63,21 +62,19 @@ pub(crate) fn declared_media_type<'a>(
         .filter(|operation| {
             operation.method == method && path_matches(&operation.path, request.uri().path())
         })
-        .min_by_key(|operation| specificity(&operation.path))
+        .min_by_key(|operation| resolution_order(&operation.path))
         .and_then(|operation| operation.body.as_ref()?.media_type.as_deref())
         .unwrap_or(default)
 }
 
-fn specificity(segments: &[pons_ir::PathSegment]) -> (Reverse<usize>, usize) {
-    let literals = segments
+fn resolution_order(segments: &[pons_ir::PathSegment]) -> Vec<u8> {
+    segments
         .iter()
-        .filter(|segment| matches!(segment, pons_ir::PathSegment::Literal { .. }))
-        .count();
-    let parameters = segments
-        .iter()
-        .filter(|segment| matches!(segment, pons_ir::PathSegment::Param { .. }))
-        .count();
-    (Reverse(literals), parameters)
+        .map(|segment| match segment {
+            pons_ir::PathSegment::Literal { .. } => 0,
+            pons_ir::PathSegment::Param { .. } => 1,
+        })
+        .collect()
 }
 
 fn method(method: &axum::http::Method) -> Option<pons_ir::Method> {
@@ -95,14 +92,16 @@ fn method(method: &axum::http::Method) -> Option<pons_ir::Method> {
 
 fn path_matches(segments: &[pons_ir::PathSegment], path: &str) -> bool {
     let mut parts = path.split('/').filter(|part| !part.is_empty());
-    segments
-        .iter()
-        .all(|segment| match (segment, parts.next()) {
-            (pons_ir::PathSegment::Param { .. }, Some(_)) => true,
-            (pons_ir::PathSegment::Literal { lit }, Some(part)) => lit == part,
-            _ => false,
-        })
-        && parts.next().is_none()
+    for (index, segment) in segments.iter().enumerate() {
+        let last = index + 1 == segments.len();
+        match (segment, parts.next()) {
+            (pons_ir::PathSegment::Param { .. }, Some(_)) if last => return true,
+            (pons_ir::PathSegment::Param { .. }, Some(_)) => {}
+            (pons_ir::PathSegment::Literal { lit }, Some(part)) if lit == part => {}
+            _ => return false,
+        }
+    }
+    parts.next().is_none()
 }
 
 pub(crate) fn check(
@@ -162,7 +161,7 @@ pub(crate) fn object_value(
             .find(|(name, _)| name == &wire)
             .map(|(_, field)| *field);
         let value = match field.map(|field| (field, array_item(document, field))) {
-            Some((field, Some(_))) => array_value(document, field, &wire, &texts, &mut violations),
+            Some((field, Some(_))) => array_value(document, field, &texts),
             Some((field, _)) if texts.len() > 1 => {
                 violations.push(Violation::Type {
                     path: pointer(&wire),
@@ -179,29 +178,8 @@ pub(crate) fn object_value(
     (Value::Object(entries), violations)
 }
 
-fn array_value(
-    document: &Document,
-    field: &TypeRef,
-    wire: &str,
-    texts: &[String],
-    violations: &mut Vec<Violation>,
-) -> Value {
+fn array_value(document: &Document, field: &TypeRef, texts: &[String]) -> Value {
     let item = array_item(document, field).expect("an array field spells its item");
-    let unspellable = if texts.iter().any(|text| text.is_empty()) {
-        Some("an empty value")
-    } else if nested(document, item) && texts.iter().any(|text| spells_array(text).is_none()) {
-        Some("an item that is itself an array")
-    } else {
-        None
-    };
-    if let Some(found) = unspellable {
-        violations.push(Violation::Type {
-            path: pointer(wire),
-            expected: "a value a repeated key can carry".to_owned(),
-            found: found.to_owned(),
-        });
-        return Value::Array(Vec::new());
-    }
     Value::Array(
         texts
             .iter()
@@ -224,19 +202,6 @@ fn spells_array(text: &str) -> Option<Vec<Value>> {
     match serde_json::from_str::<Value>(text) {
         Ok(Value::Array(items)) => Some(items),
         _ => None,
-    }
-}
-
-fn nested(document: &Document, ty: &TypeRef) -> bool {
-    match ty {
-        TypeRef::Inline(InlineType::Array { .. }) => true,
-        TypeRef::Inline(InlineType::Nullable { inner }) => nested(document, inner),
-        TypeRef::Named(named) => match document.types.get(&named.id).map(|found| &found.definition)
-        {
-            Some(TypeKind::Newtype { inner }) => nested(document, inner),
-            _ => false,
-        },
-        _ => false,
     }
 }
 
@@ -519,23 +484,6 @@ mod tests {
                     "kind": "newtype",
                     "inner": {"ref": "Page#input"},
                 },
-                "Nested#input": {
-                    "name": ["nested"],
-                    "direction": "input",
-                    "kind": "struct",
-                    "openness": "reject",
-                    "fields": [
-                        {
-                            "wire": "labels",
-                            "ident": ["labels"],
-                            "ty": {
-                                "kind": "array",
-                                "item": {"kind": "array", "item": {"kind": "string"}},
-                            },
-                            "presence": "required",
-                        },
-                    ],
-                },
                 "Objects#input": {
                     "name": ["objects"],
                     "direction": "input",
@@ -756,47 +704,6 @@ mod tests {
                 "{sent} is routable but no operation can publish it, so it reads no operation's body"
             );
         }
-    }
-
-    #[test]
-    fn a_repeated_key_cannot_carry_an_item_that_is_itself_an_array() {
-        let contract = contract();
-        assert_eq!(
-            reported(
-                &contract,
-                &named("Nested#input"),
-                &[("labels", r#"[["a"],["b"]]"#)]
-            ),
-            Ok(json!({"labels": [["a"], ["b"]]})),
-            "one token that is a JSON array carries the whole nested field"
-        );
-        for pairs in [
-            vec![("labels", "a"), ("labels", "b")],
-            vec![("labels", "a")],
-        ] {
-            assert_eq!(
-                reported(&contract, &named("Nested#input"), &pairs),
-                Err("/labels: expected a value a repeated key can carry, found an item that is itself an array".to_owned()),
-                "{pairs:?} is reported instead of being read as a flatter array"
-            );
-        }
-    }
-
-    #[test]
-    fn a_repeated_key_cannot_carry_an_empty_array() {
-        let contract = contract();
-        assert_eq!(
-            reported(&contract, &filter(), &[("slug", "ada"), ("tags", "[]")]),
-            Ok(json!({"slug": "ada", "tags": []})),
-            "an empty JSON array spells an empty array"
-        );
-        assert_eq!(
-            reported(&contract, &filter(), &[("slug", "ada"), ("tags", "")]),
-            Err(
-                "/tags: expected a value a repeated key can carry, found an empty value".to_owned()
-            ),
-            "a key with no value spells one empty item, which the field does not declare"
-        );
     }
 
     #[test]

@@ -119,22 +119,13 @@ where
         }
     }
 
-    pub fn into_axum(mut self) -> axum::Router<S> {
+    pub fn into_axum(mut self) -> Result<axum::Router<S>, Vec<ValidationError>> {
         for layer in std::mem::take(&mut self.pending_layers) {
             self.inner = self.inner.layer(layer);
         }
         let inner = std::mem::take(&mut self.inner);
-        let document = checked(self.into_document_value()).unwrap_or_else(|errors| {
-            panic!(
-                "the document Router::into_axum installs does not validate:\n{}",
-                errors
-                    .iter()
-                    .map(ToString::to_string)
-                    .collect::<Vec<_>>()
-                    .join("\n")
-            )
-        });
-        inner.layer(Extension(Arc::new(document)))
+        let document = checked(self.into_document_value())?;
+        Ok(inner.layer(Extension(Arc::new(document))))
     }
 
     pub fn document(&self) -> Document {
@@ -321,47 +312,95 @@ fn reuse_inherited_slots(common: &[ErrorResponse], operations: &mut [pons_ir::Op
             }
             let Some(inherited) = common
                 .iter()
-                .find(|inherited| inherited.status == error.status)
+                .find(|inherited| inherited.status.covers(&error.status))
             else {
                 return true;
             };
-            match wire_difference(inherited, error) {
-                None => false,
-                Some(difference) => {
-                    collisions.push((error.status.clone(), inherited.name.clone(), difference));
-                    true
-                }
+            let differences = wire_differences(inherited, error);
+            if differences.is_empty() {
+                return false;
             }
-        });
-        collisions
-            .into_iter()
-            .for_each(|(status, name, difference)| {
-                operation_cx::push_diagnostic(
-                    &mut operation.diagnostics,
-                    "PONS-E102",
-                    format!(
-                        "a request is rejected as {status:?}, but the common error {name:?} answers that status with a different {difference}"
-                    ),
-                );
+            collisions.push(Collision {
+                status: error.status.clone(),
+                name: inherited.name.clone(),
+                inherited_status: inherited.status.clone(),
+                declared_type: error_type_id(error),
+                inherited_type: error_type_id(inherited),
+                differences: differences.join(" and "),
             });
+            true
+        });
+        collisions.into_iter().for_each(|collision| {
+            operation_cx::push_diagnostic(
+                &mut operation.diagnostics,
+                "PONS-E102",
+                collision.message(),
+            );
+        });
     }
 }
 
-fn wire_difference(inherited: &ErrorResponse, declared: &ErrorResponse) -> Option<&'static str> {
+struct Collision {
+    status: pons_ir::ErrorStatus,
+    name: Vec<String>,
+    inherited_status: pons_ir::ErrorStatus,
+    declared_type: String,
+    inherited_type: String,
+    differences: String,
+}
+
+impl Collision {
+    fn message(&self) -> String {
+        format!(
+            "a request is rejected as {:?} by the error of type {}, but the common error {:?} of type {} answers {:?} with a different {}",
+            self.status,
+            self.declared_type,
+            self.name,
+            self.inherited_type,
+            self.inherited_status,
+            self.differences
+        )
+    }
+}
+
+fn error_type_id(error: &ErrorResponse) -> String {
+    match &error.body {
+        Some(TypeRef::Named(named)) => named.id.clone(),
+        _ => "no body type".to_owned(),
+    }
+}
+
+fn wire_differences(inherited: &ErrorResponse, declared: &ErrorResponse) -> Vec<&'static str> {
     [
-        ("body", inherited.body != declared.body),
+        (
+            "body",
+            differs(inherited.body.as_ref(), declared.body.as_ref()),
+        ),
         ("content", inherited.content != declared.content),
-        ("media type", inherited.media_type != declared.media_type),
+        (
+            "media type",
+            differs(inherited.media_type.as_ref(), declared.media_type.as_ref()),
+        ),
         (
             "response headers",
             !same_headers(&inherited.headers, &declared.headers),
         ),
-        ("retryable", inherited.retryable != declared.retryable),
+        (
+            "retryable",
+            differs(inherited.retryable.as_ref(), declared.retryable.as_ref()),
+        ),
         ("extensions", inherited.ext != declared.ext),
     ]
     .into_iter()
-    .find(|(_, differs)| *differs)
-    .map(|(field, _)| field)
+    .filter_map(|(field, differing)| differing.then_some(field))
+    .collect()
+}
+
+fn differs<T: PartialEq>(inherited: Option<&T>, declared: Option<&T>) -> bool {
+    match (inherited, declared) {
+        (Some(inherited), Some(declared)) => inherited != declared,
+        _ => false,
+    }
 }
 
 fn same_headers(inherited: &[ResponseHeader], declared: &[ResponseHeader]) -> bool {

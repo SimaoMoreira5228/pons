@@ -9,8 +9,8 @@ use crate::operation::{
     ErrorStatus, Method, OAuthFlowKind, Operation, PathSegment, ResponseStatus, StreamKind,
 };
 use crate::types::{
-    Access, Diagnostic, DiagnosticSeverity, Direction, EnumRepr, Field, InlineType, IntegerWire,
-    ObjectOpenness, OpaqueWire, Presence, TypeDef, TypeKind, TypeRef, VariantPayload,
+    Access, Diagnostic, DiagnosticSeverity, Direction, EnumRepr, Field, FieldDefault, InlineType,
+    IntegerWire, ObjectOpenness, OpaqueWire, Presence, TypeDef, TypeKind, TypeRef, VariantPayload,
 };
 use crate::violation::direction_name;
 
@@ -341,19 +341,19 @@ impl Document {
                     message: format!("duplicate error dispatch slot {:?}", error.status),
                 });
             }
-            if let Some(covering) =
+            if let Some(shadowing) =
                 self.common_errors
                     .iter()
                     .enumerate()
                     .find(|(other, candidate)| {
-                        *other != index && candidate.status.covers(&error.status)
+                        *other != index && candidate.status.shadows(&error.status)
                     })
             {
                 errors.push(ValidationError::InvalidValue {
                     path: "common_errors".into(),
                     message: format!(
-                        "error dispatch slot {:?} is already claimed: the common error {:?} covers it",
-                        error.status, covering.1.status
+                        "error dispatch slot {:?} is shadowed: the common error {:?} already answers for it",
+                        error.status, shadowing.1.status
                     ),
                 });
             }
@@ -765,11 +765,58 @@ impl Document {
             }
         }
         self.validate_directions(&mut errors);
+        self.validate_credential_carriers(&mut errors);
 
         if errors.is_empty() {
             Ok(())
         } else {
             Err(errors)
+        }
+    }
+
+    fn validate_credential_carriers(&self, errors: &mut Vec<ValidationError>) {
+        for (id, scheme) in &self.auth_schemes {
+            let AuthScheme::ApiKey { location, name } = scheme else {
+                continue;
+            };
+            for (index, operation) in self.operations.iter().enumerate() {
+                let mut claims = Vec::new();
+                if matches!(location, ApiKeyLocation::Header) {
+                    claims.extend(
+                        operation
+                            .headers
+                            .iter()
+                            .filter(|header| header.wire.eq_ignore_ascii_case(name))
+                            .map(|header| {
+                                (
+                                    format!("operations[{index}].headers"),
+                                    format!("request header {}", header.wire),
+                                )
+                            }),
+                    );
+                }
+                if matches!(location, ApiKeyLocation::Query)
+                    && let Some(query) = &operation.query
+                    && let Ok(fields) = crate::query::query_fields(self, query)
+                {
+                    claims.extend(fields.into_iter().filter(|field| field.wire == *name).map(
+                        |field| {
+                            (
+                                format!("operations[{index}].query"),
+                                format!("query field {:?}", field.wire),
+                            )
+                        },
+                    ));
+                }
+                for (path, claim) in claims {
+                    errors.push(ValidationError::InvalidValue {
+                        path,
+                        message: format!(
+                            "the {claim} is also the {id} apiKey carrier name, so the credential overwrites it"
+                        ),
+                    });
+                }
+            }
         }
     }
 
@@ -930,7 +977,7 @@ impl Document {
         &self,
         reference: &TypeRef,
         boundary: Boundary,
-        visited: &mut BTreeSet<String>,
+        visited: &mut BTreeSet<(String, Option<String>)>,
     ) -> Option<String> {
         let TypeRef::Named(named) = reference else {
             return match reference {
@@ -957,7 +1004,7 @@ impl Document {
                 direction_name(definition.direction)
             ));
         }
-        if !visited.insert(named.id.clone()) {
+        if !visited.insert((named.id.clone(), named.variant.clone())) {
             return None;
         }
         match &definition.definition {
@@ -1197,6 +1244,23 @@ impl Document {
                     message: format!("duplicate field {}", field.wire),
                 });
             }
+            if let FieldDefault::Value(default) = &field.default
+                && let Err(contradictions) =
+                    crate::value::validate_value(self, &field.ty, Direction::Both, default)
+            {
+                errors.push(ValidationError::InvalidValue {
+                    path: format!("{owner}.fields.{}", field.wire),
+                    message: format!(
+                        "the default for field {} contradicts its type: {}",
+                        field.wire,
+                        contradictions
+                            .iter()
+                            .map(|violation| violation.reason())
+                            .collect::<Vec<_>>()
+                            .join("; ")
+                    ),
+                });
+            }
         }
     }
 
@@ -1312,13 +1376,29 @@ impl Document {
                 });
             }
             InlineType::String {
-                min_length: Some(minimum),
-                max_length: Some(maximum),
+                min_length,
+                max_length,
+                pattern,
                 ..
-            } if minimum > maximum => errors.push(ValidationError::InvalidValue {
-                path: owner.into(),
-                message: "string min_length exceeds max_length".into(),
-            }),
+            } => {
+                if min_length
+                    .zip(*max_length)
+                    .is_some_and(|(minimum, maximum)| minimum > maximum)
+                {
+                    errors.push(ValidationError::InvalidValue {
+                        path: owner.into(),
+                        message: "string min_length exceeds max_length".into(),
+                    });
+                }
+                if let Some(pattern) = pattern
+                    && let Err(reason) = crate::pattern::compiles(pattern)
+                {
+                    errors.push(ValidationError::InvalidValue {
+                        path: owner.into(),
+                        message: format!("string pattern {pattern:?} is not a usable regular expression because {reason}"),
+                    });
+                }
+            }
             InlineType::Opaque { codec, .. } if codec.trim().is_empty() => {
                 errors.push(ValidationError::InvalidValue {
                     path: owner.into(),

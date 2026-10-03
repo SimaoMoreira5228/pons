@@ -1,8 +1,8 @@
 use std::collections::BTreeSet;
 
 use crate::{
-    ByteEncoding, Document, EnumRepr, Field, InlineType, ObjectOpenness, Presence, TypeKind,
-    TypeRef,
+    Access, ByteEncoding, Document, EnumRepr, Field, InlineType, ObjectOpenness, Presence,
+    TypeKind, TypeRef,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -15,6 +15,7 @@ pub enum QueryRejection {
     NotAStruct(String),
     NonScalarField,
     RequiredNullable(String),
+    ReadOnly(String),
     DuplicateField(String),
 }
 
@@ -34,6 +35,9 @@ impl QueryRejection {
             }
             Self::RequiredNullable(wire) => format!(
                 "query field {wire:?} is required and nullable; a query string has no encoding for a present null, so make the field optional or drop the nullable wrapper"
+            ),
+            Self::ReadOnly(wire) => format!(
+                "query field {wire:?} is read_only, but an OpenAPI query parameter has no read/write direction: the client drops the field on encode and every server built from the document waits for a parameter the client cannot send"
             ),
             Self::DuplicateField(wire) => {
                 format!("query field {wire:?} is declared more than once")
@@ -118,6 +122,9 @@ fn is_query_field(
     field: &Field,
     visited: &mut Vec<String>,
 ) -> Result<(), QueryRejection> {
+    if field.access == Some(Access::ReadOnly) {
+        return Err(QueryRejection::ReadOnly(field.wire.clone()));
+    }
     match &field.ty {
         TypeRef::Inline(InlineType::Nullable { inner })
             if !encodes_nullable_as_absence(document, field) =>

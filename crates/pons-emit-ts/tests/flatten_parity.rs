@@ -127,8 +127,27 @@ fn only_the_typescript_emitter_accepts_a_flattened_opaque_member() {
         .find(|file| file.path == "types.ts")
         .unwrap()
         .content;
+    assert!(types.contains("export type Outer = unknown;"), "{types}");
+}
+
+#[test]
+fn a_named_flattened_opaque_carrier_types_the_struct_as_its_codec_value() {
+    let document = document(json!({
+        "OpaqueAlias": {
+            "kind": "newtype", "name": ["opaque", "alias"], "direction": "both",
+            "inner": {"kind": "opaque", "codec": "flatten.codec", "wire": "json"}
+        },
+        "Outer": struct_type("outer", "a", json!([{"ref": "OpaqueAlias"}])),
+    }));
+    assert!(pons_emit_openapi::emit(&document).is_err());
+    let types = pons_emit_ts::emit(&document)
+        .unwrap()
+        .into_iter()
+        .find(|file| file.path == "types.ts")
+        .unwrap()
+        .content;
     assert!(
-        types.contains("export type Outer = { \"a\": string } & unknown;"),
+        types.contains("export type Outer = OpaqueAlias;"),
         "{types}"
     );
 }

@@ -402,13 +402,21 @@ fn walk_repeat(
     may_stop && bounds.greedy && next(at)
 }
 
-pub(crate) fn matches(pattern: &str, value: &str) -> Result<bool, String> {
+fn parse(pattern: &str) -> Result<Node, String> {
     let chars = pattern.chars().collect::<Vec<_>>();
-    let node = Parser {
+    Parser {
         chars: &chars,
         at: 0,
     }
-    .parse()?;
+    .parse()
+}
+
+pub(crate) fn compiles(pattern: &str) -> Result<(), String> {
+    parse(pattern).map(drop)
+}
+
+pub(crate) fn matches(pattern: &str, value: &str) -> Result<bool, String> {
+    let node = parse(pattern)?;
     let input = value.chars().collect::<Vec<_>>();
     Ok((0..=input.len()).any(|at| walk(&node, &input, at, &mut |_| true)))
 }

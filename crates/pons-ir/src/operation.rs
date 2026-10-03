@@ -413,6 +413,14 @@ impl ErrorStatus {
             _ => false,
         }
     }
+
+    pub fn shadows(&self, other: &Self) -> bool {
+        match (self, other) {
+            (Self::Default, Self::Default) => true,
+            (Self::Class(shadowing), Self::Class(class)) => shadowing == class,
+            _ => false,
+        }
+    }
 }
 
 impl JsonSchema for ErrorStatus {
