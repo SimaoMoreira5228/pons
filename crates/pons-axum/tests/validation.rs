@@ -1600,52 +1600,96 @@ fn the_media_type_of_the_route_the_router_resolves_is_the_one_it_enforces() {
 }
 
 #[test]
-fn a_trailing_path_parameter_matches_every_segment_it_covers() {
+fn a_wildcard_path_segment_is_refused_instead_of_published_as_one_parameter() {
     fn router() -> Router<()> {
         Router::<()>::new(info()).route("/files/{*rest}", post(vnd_note))
     }
     let document = router().document();
     let files = operation(&document, "files");
+    let diagnostic = files
+        .diagnostics
+        .iter()
+        .find(|diagnostic| diagnostic.code == "PONS-E102")
+        .expect("a wildcard segment cannot be described, so it must be diagnosed");
     assert_eq!(
-        files.body.as_ref().unwrap().media_type.as_deref(),
-        Some("application/vnd.note+json"),
-        "the wildcard route publishes the media type the runtime enforces"
+        diagnostic.severity,
+        pons_ir::DiagnosticSeverity::Error,
+        "{diagnostic:?} must be an error, not a warning about a route nobody reads"
     );
     assert!(
-        files
-            .diagnostics
-            .iter()
-            .any(|diagnostic| diagnostic.code == "PONS-W102"),
-        "{:?} warns that the wildcard is one path parameter",
-        files.diagnostics
+        diagnostic.message.contains("wildcard"),
+        "{} must name the wildcard it cannot publish",
+        diagnostic.message
+    );
+
+    let errors = refused(router());
+    assert!(
+        errors.contains("PONS-E102") && errors.contains("wildcard"),
+        "{errors} must refuse a route the IR cannot express"
+    );
+    assert!(
+        refused_build(router()).contains("PONS-E102"),
+        "a router that would install a document lying about its own routes must refuse to be built"
+    );
+}
+
+#[test]
+fn a_path_parameter_is_not_the_operation_beyond_its_own_segment() {
+    fn router() -> Router<()> {
+        Router::<()>::new(info())
+            .route("/assets/{id}", post(vnd_note))
+            .route("/assets/{id}/raw", post(plain_item))
+    }
+    let document = router().into_document().unwrap();
+    let published: BTreeMap<String, Option<String>> = document
+        .operations
+        .iter()
+        .map(|operation| {
+            let path = operation
+                .path
+                .iter()
+                .map(|segment| match segment {
+                    PathSegment::Literal { lit } => lit.clone(),
+                    PathSegment::Param { param, .. } => format!("{{{param}}}"),
+                })
+                .collect::<Vec<_>>()
+                .join("/");
+            (
+                path,
+                operation
+                    .body
+                    .as_ref()
+                    .and_then(|body| body.media_type.clone()),
+            )
+        })
+        .collect();
+    assert_eq!(
+        published.get("assets/{id}"),
+        Some(&Some("application/vnd.note+json".to_owned()))
+    );
+    assert_eq!(
+        published.get("assets/{id}/raw"),
+        Some(&None),
+        "a body that names no media type answers the content kind's, application/json"
     );
 
     let mut app = built(router());
-    for path in ["/files/one", "/files/one/two", "/files/one/two/three"] {
-        accepted(
-            &mut app,
-            request(path, "application/vnd.note+json", r#"{"text":"hi"}"#),
-        );
-    }
-    let (status, body) = send(
+    accepted(
         &mut app,
-        request("/files/one/two", "application/json", r#"{"text":"hi"}"#),
+        request("/assets/1", "application/vnd.note+json", r#"{"text":"hi"}"#),
     );
-    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{body}");
-    let report: Value = serde_json::from_str(&body).unwrap();
-    assert_eq!(
-        report["violations"][0]["reason"],
-        "expected application/vnd.note+json, found application/json",
-        "a request the route matches is judged against the media type it publishes"
-    );
-    let (status, _) = send(
+    accepted(
         &mut app,
-        request("/files", "application/vnd.note+json", r#"{"text":"hi"}"#),
+        request("/assets/1/raw", "application/json", r#"{"text":"hi"}"#),
     );
-    assert_eq!(
-        status,
-        StatusCode::NOT_FOUND,
-        "a wildcard matches a segment or more, exactly as the router resolves it"
+    rejected(
+        &mut app,
+        request(
+            "/assets/1/raw",
+            "application/vnd.note+json",
+            r#"{"text":"hi"}"#,
+        ),
+        &[": expected application/json, found application/vnd.note+json"],
     );
 }
 
@@ -1715,6 +1759,59 @@ fn a_common_error_that_omits_retryable_does_not_disagree_with_the_rejection() {
         silent.errors
     );
     assert!(silent.diagnostics.is_empty());
+}
+
+#[test]
+fn a_common_error_that_answers_the_rejection_as_another_media_type_does_not_own_the_slot() {
+    struct VendorRejectionReport;
+
+    impl ErrorSpec for VendorRejectionReport {
+        fn errors(cx: &mut TypeCx) -> Vec<ErrorResponse> {
+            pons_axum::ViolationReport::errors(cx)
+                .into_iter()
+                .map(|mut error| {
+                    error.media_type = Some("application/problem+json".into());
+                    error.name = vec!["vendor".into()];
+                    error
+                })
+                .collect()
+        }
+    }
+
+    fn router() -> Router<()> {
+        Router::<()>::new(info())
+            .common_error::<VendorRejectionReport>()
+            .route("/vendored", post(create_open_user))
+    }
+    let document = router().document();
+    let rejection = declared_rejection(&document, "vendored")
+        .expect("/vendored declares the rejection the runtime can serve");
+    assert_eq!(
+        rejection.media_type, None,
+        "the runtime answers the rejection as the content kind spells it, application/json"
+    );
+    assert_eq!(
+        document.common_errors[0].media_type.as_deref(),
+        Some("application/problem+json")
+    );
+    let diagnostic = operation(&document, "vendored")
+        .diagnostics
+        .iter()
+        .find(|diagnostic| diagnostic.code == "PONS-E102")
+        .expect(
+            "a common error that answers the rejection as another media type must be diagnosed",
+        );
+    assert!(
+        diagnostic.message.contains("media type"),
+        "{} must name the field the two errors spell differently",
+        diagnostic.message
+    );
+
+    let errors = refused(router());
+    assert!(
+        errors.contains("PONS-E102") && errors.contains("media type"),
+        "{errors} must refuse a document whose inherited slot answers a media type the runtime never sends"
+    );
 }
 
 #[test]

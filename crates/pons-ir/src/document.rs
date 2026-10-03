@@ -88,6 +88,13 @@ fn field_crosses(field: &Field, boundary: Boundary) -> bool {
     )
 }
 
+fn carrier_key(location: ApiKeyLocation, name: &str) -> String {
+    match location {
+        ApiKeyLocation::Header => name.to_ascii_lowercase(),
+        ApiKeyLocation::Query | ApiKeyLocation::Cookie => name.to_owned(),
+    }
+}
+
 fn scan_opaque_references(
     references: &[TypeRef],
     pending: &mut Vec<(String, Option<String>)>,
@@ -401,6 +408,16 @@ impl Document {
                             message: format!("required path parameter {param} cannot be nullable"),
                         });
                     }
+                    if let Some(wire) = crate::query::required_read_only(self, ty) {
+                        errors.push(ValidationError::InvalidValue {
+                            path: owner.clone(),
+                            message: crate::query::read_only_message(
+                                "path parameter",
+                                "a path segment",
+                                &wire,
+                            ),
+                        });
+                    }
                 }
             }
             let mut header_names = BTreeSet::new();
@@ -457,6 +474,18 @@ impl Document {
                         path: owner.clone(),
                         message: "form bodies must be a flat record of scalars and arrays of scalars, because a urlencoded form cannot carry nested objects"
                             .into(),
+                    });
+                }
+                if body.content == ContentKind::Form
+                    && let Some(wire) = crate::query::required_read_only(self, &body.ty)
+                {
+                    errors.push(ValidationError::InvalidValue {
+                        path: owner.clone(),
+                        message: crate::query::read_only_message(
+                            "form body field",
+                            "a urlencoded form field",
+                            &wire,
+                        ),
                     });
                 }
             }
@@ -704,12 +733,12 @@ impl Document {
                     && let Some(common) = self
                         .common_errors
                         .iter()
-                        .find(|common| common.status.covers(&error.status))
+                        .find(|common| common.status.shadows(&error.status))
                 {
                     errors.push(ValidationError::InvalidValue {
                         path: owner.clone(),
                         message: format!(
-                            "error dispatch slot {:?} is inherited: the common error {:?} already covers it",
+                            "error dispatch slot {:?} is inherited: the common error {:?} already answers for it",
                             error.status, common.status
                         ),
                     });
@@ -775,46 +804,61 @@ impl Document {
     }
 
     fn validate_credential_carriers(&self, errors: &mut Vec<ValidationError>) {
-        for (id, scheme) in &self.auth_schemes {
-            let AuthScheme::ApiKey { location, name } = scheme else {
-                continue;
-            };
-            for (index, operation) in self.operations.iter().enumerate() {
-                let mut claims = Vec::new();
-                if matches!(location, ApiKeyLocation::Header) {
-                    claims.extend(
-                        operation
-                            .headers
-                            .iter()
-                            .filter(|header| header.wire.eq_ignore_ascii_case(name))
-                            .map(|header| {
-                                (
-                                    format!("operations[{index}].headers"),
-                                    format!("request header {}", header.wire),
-                                )
-                            }),
-                    );
-                }
-                if matches!(location, ApiKeyLocation::Query)
-                    && let Some(query) = &operation.query
-                    && let Ok(fields) = crate::query::query_fields(self, query)
-                {
-                    claims.extend(fields.into_iter().filter(|field| field.wire == *name).map(
-                        |field| {
-                            (
-                                format!("operations[{index}].query"),
-                                format!("query field {:?}", field.wire),
-                            )
-                        },
-                    ));
-                }
-                for (path, claim) in claims {
-                    errors.push(ValidationError::InvalidValue {
-                        path,
-                        message: format!(
-                            "the {claim} is also the {id} apiKey carrier name, so the credential overwrites it"
-                        ),
-                    });
+        for (index, operation) in self.operations.iter().enumerate() {
+            for group in &operation.auth.alternatives {
+                let mut carriers: Vec<((ApiKeyLocation, String), &str)> = Vec::new();
+                for id in group {
+                    let Some((location, name)) = self
+                        .auth_schemes
+                        .get(id)
+                        .and_then(AuthScheme::credential_carrier)
+                    else {
+                        continue;
+                    };
+                    let key = (location, carrier_key(location, name));
+                    if let Some((_, first)) = carriers.iter().find(|(other, _)| other == &key) {
+                        errors.push(ValidationError::InvalidValue {
+                            path: format!("operations[{index}].auth"),
+                            message: format!(
+                                "the {id} and {first} schemes of one auth alternative both write the {location:?} carrier {name:?}, so the credential the client attaches last overwrites the other"
+                            ),
+                        });
+                    } else {
+                        carriers.push((key, id));
+                    }
+                    match location {
+                        ApiKeyLocation::Header => {
+                            for header in operation
+                                .headers
+                                .iter()
+                                .filter(|header| header.wire.eq_ignore_ascii_case(name))
+                            {
+                                errors.push(ValidationError::InvalidValue {
+                                    path: format!("operations[{index}].headers"),
+                                    message: format!(
+                                        "the request header {} is also the {id} apiKey carrier name, so the credential overwrites it",
+                                        header.wire
+                                    ),
+                                });
+                            }
+                        }
+                        ApiKeyLocation::Query => {
+                            if let Some(query) = &operation.query
+                                && let Ok(fields) = crate::query::query_fields(self, query)
+                            {
+                                for field in fields.into_iter().filter(|field| field.wire == name) {
+                                    errors.push(ValidationError::InvalidValue {
+                                        path: format!("operations[{index}].query"),
+                                        message: format!(
+                                            "the query field {:?} is also the {id} apiKey carrier name, so the credential overwrites it",
+                                            field.wire
+                                        ),
+                                    });
+                                }
+                            }
+                        }
+                        ApiKeyLocation::Cookie => {}
+                    }
                 }
             }
         }
@@ -1120,23 +1164,63 @@ impl Document {
                         EnumRepr::Adjacent { tag, content } => vec![tag.as_str(), content.as_str()],
                         _ => Vec::new(),
                     };
-                    if let VariantPayload::Struct { fields } = &variant.payload
-                        && fields
-                            .iter()
-                            .any(|field| reserved.contains(&field.wire.as_str()))
+                    if let VariantPayload::Struct { fields } = &variant.payload {
+                        self.validate_fields(&owner, fields, errors);
+                    }
+                    if !reserved.is_empty()
+                        && self.payload_uses_reserved(
+                            &variant.payload,
+                            &reserved,
+                            &mut BTreeSet::new(),
+                        )
                     {
                         errors.push(ValidationError::InvalidValue {
                             path: owner.clone(),
                             message: format!("variant {} uses a reserved enum field", variant.wire),
                         });
                     }
-                    if let VariantPayload::Struct { fields } = &variant.payload {
-                        self.validate_fields(&owner, fields, errors);
-                    }
                 }
             }
             TypeKind::Newtype { .. } => {}
         }
+    }
+
+    fn payload_uses_reserved(
+        &self,
+        payload: &VariantPayload,
+        reserved: &[&str],
+        seen: &mut BTreeSet<String>,
+    ) -> bool {
+        match payload {
+            VariantPayload::Struct { fields } => fields
+                .iter()
+                .any(|field| reserved.contains(&field.wire.as_str())),
+            VariantPayload::Newtype { ty } => self.named_uses_reserved(ty, reserved, seen),
+            VariantPayload::Unit | VariantPayload::Tuple { .. } => false,
+        }
+    }
+
+    fn named_uses_reserved(
+        &self,
+        ty: &TypeRef,
+        reserved: &[&str],
+        seen: &mut BTreeSet<String>,
+    ) -> bool {
+        let TypeRef::Named(named) = ty else {
+            return false;
+        };
+        if named.variant.is_some() || !seen.insert(named.id.clone()) {
+            return false;
+        }
+        let found = match self.types.get(&named.id).map(|found| &found.definition) {
+            Some(TypeKind::Struct { fields, .. }) => fields
+                .iter()
+                .any(|field| reserved.contains(&field.wire.as_str())),
+            Some(TypeKind::Newtype { inner }) => self.named_uses_reserved(inner, reserved, seen),
+            _ => false,
+        };
+        seen.remove(&named.id);
+        found
     }
 
     pub(crate) fn is_nullable_type(&self, ty: &TypeRef, visited: &mut BTreeSet<String>) -> bool {

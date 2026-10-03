@@ -48,7 +48,12 @@ impl Builder<'_> {
                         return Err(EmitError(format!("unknown auth scheme {scheme}")));
                     };
                     if matches!(definition, AuthScheme::Custom { .. }) {
-
+                        if group.len() > 1 {
+                            return Err(EmitError(format!(
+                                "the auth alternative {} cannot be represented in OpenAPI, because one requirement states every scheme in it at once and no Security Scheme Object describes the custom auth scheme {scheme}",
+                                group.join(" or ")
+                            )));
+                        }
                         if !operation.auth.optional {
                             return Err(EmitError(format!(
                                 "custom auth scheme {scheme} cannot be represented in OpenAPI"
@@ -277,6 +282,35 @@ mod tests {
         assert_eq!(
             crate::emit(&document).unwrap_err().0,
             "custom auth scheme custom cannot be represented in OpenAPI"
+        );
+    }
+
+    #[test]
+    fn refuses_an_alternative_that_mixes_a_custom_scheme_with_another() {
+        let mut document = fixture();
+        document.auth_schemes.insert(
+            "custom".into(),
+            AuthScheme::Custom {
+                description: "custom auth".into(),
+                ext: Default::default(),
+            },
+        );
+        let events = &mut document.operations[1];
+        events.auth.alternatives = vec![vec!["custom".into(), "tenant".into()]];
+        events.auth.optional = true;
+        let error = crate::emit(&document).unwrap_err().0;
+        assert!(error.contains("custom or tenant"), "{error}");
+        assert!(
+            error.contains("cannot be represented in OpenAPI"),
+            "{error}"
+        );
+
+        document.operations[1].auth.alternatives = vec![vec!["custom".into()]];
+        let output: Value = serde_json::from_str(&crate::emit(&document).unwrap()).unwrap();
+        assert_eq!(
+            output["paths"]["/events/{cursor}"]["get"]["security"],
+            json!([{}]),
+            "one custom scheme in its own alternative is the anonymous alternative alone"
         );
     }
 

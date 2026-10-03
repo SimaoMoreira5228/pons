@@ -92,16 +92,14 @@ fn method(method: &axum::http::Method) -> Option<pons_ir::Method> {
 
 fn path_matches(segments: &[pons_ir::PathSegment], path: &str) -> bool {
     let mut parts = path.split('/').filter(|part| !part.is_empty());
-    for (index, segment) in segments.iter().enumerate() {
-        let last = index + 1 == segments.len();
-        match (segment, parts.next()) {
-            (pons_ir::PathSegment::Param { .. }, Some(_)) if last => return true,
-            (pons_ir::PathSegment::Param { .. }, Some(_)) => {}
-            (pons_ir::PathSegment::Literal { lit }, Some(part)) if lit == part => {}
-            _ => return false,
-        }
-    }
-    parts.next().is_none()
+    segments
+        .iter()
+        .all(|segment| match (segment, parts.next()) {
+            (pons_ir::PathSegment::Param { .. }, Some(_)) => true,
+            (pons_ir::PathSegment::Literal { lit }, Some(part)) => lit == part,
+            _ => false,
+        })
+        && parts.next().is_none()
 }
 
 pub(crate) fn check(
@@ -552,6 +550,49 @@ mod tests {
                     .collect()
             })
             .unwrap_or_default()
+    }
+
+    fn segments(path: &str) -> Vec<pons_ir::PathSegment> {
+        path.split('/')
+            .map(|segment| match segment.strip_prefix('{') {
+                Some(param) => pons_ir::PathSegment::Param {
+                    param: param.trim_end_matches('}').to_owned(),
+                    ty: TypeRef::Inline(InlineType::String {
+                        format: None,
+                        min_length: None,
+                        max_length: None,
+                        pattern: None,
+                    }),
+                },
+                None => pons_ir::PathSegment::Literal {
+                    lit: segment.to_owned(),
+                },
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_path_parameter_matches_one_segment_and_no_more() {
+        let assets = segments("assets/{id}");
+        assert!(path_matches(&assets, "/assets/1"));
+        assert!(
+            path_matches(&assets, "/assets/1/"),
+            "empty segments are none"
+        );
+        assert!(
+            !path_matches(&assets, "/assets/1/raw"),
+            "a parameter covers one segment, so a deeper path is another operation's"
+        );
+        assert!(!path_matches(&assets, "/assets"));
+        assert!(!path_matches(&assets, "/other/1"));
+        assert!(
+            path_matches(&[], "/"),
+            "the root operation matches only the root"
+        );
+
+        let raw = segments("assets/{id}/raw");
+        assert!(path_matches(&raw, "/assets/1/raw"));
+        assert!(!path_matches(&raw, "/assets/1"));
     }
 
     #[test]

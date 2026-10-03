@@ -698,31 +698,53 @@ fn validation_rejects_duplicate_error_dispatch_slots() {
 }
 
 #[test]
-fn validation_refuses_operation_errors_a_common_error_range_covers() {
+fn validation_refuses_an_operation_error_a_common_error_already_answers_for() {
     let base: Document =
         serde_json::from_str(include_str!("../../../fixtures/login.json")).unwrap();
-    let with_common = |common: ErrorStatus| {
+    let with_common = |operation: ErrorStatus, common: ErrorStatus| {
         let mut document = base.clone();
         let rejected = &mut document.operations[0].errors[0];
-        rejected.status = ErrorStatus::Exact(422);
+        rejected.status = operation;
         rejected.name = vec!["request".into(), "rejected".into()];
         let mut inherited = rejected.clone();
         inherited.status = common;
         document.common_errors.push(inherited);
         document
     };
-    let inherited = |document: &Document, covering: &str| {
+    let inherited = |document: &Document, shadowing: &str| {
         document.validate().unwrap_err().iter().any(|error| {
             let error = error.to_string();
-            error.contains("error dispatch slot Exact(422) is inherited")
-                && error.contains(covering)
+            error.contains("error dispatch slot")
+                && error.contains("is inherited")
+                && error.contains(shadowing)
         })
     };
 
-    assert!(inherited(&with_common(ErrorStatus::Class(4)), "Class(4)"));
-    assert!(inherited(&with_common(ErrorStatus::Default), "Default"));
-    with_common(ErrorStatus::Class(5)).validate().unwrap();
-    with_common(ErrorStatus::Exact(422)).validate().unwrap_err();
+    assert!(inherited(
+        &with_common(ErrorStatus::Class(4), ErrorStatus::Class(4)),
+        "Class(4)"
+    ));
+    assert!(inherited(
+        &with_common(ErrorStatus::Default, ErrorStatus::Default),
+        "Default"
+    ));
+
+    with_common(ErrorStatus::Exact(404), ErrorStatus::Class(4))
+        .validate()
+        .unwrap();
+    with_common(ErrorStatus::Exact(422), ErrorStatus::Default)
+        .validate()
+        .unwrap();
+    with_common(ErrorStatus::Exact(422), ErrorStatus::Class(5))
+        .validate()
+        .unwrap();
+    assert!(
+        with_common(ErrorStatus::Exact(422), ErrorStatus::Exact(422))
+            .validate()
+            .unwrap_err()
+            .iter()
+            .any(|error| error.to_string().contains("is inherited"))
+    );
 }
 
 #[test]

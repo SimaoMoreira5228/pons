@@ -38,14 +38,14 @@ fn reenters(
     id: &str,
     reference: &TypeRef,
     document: &Document,
-    visited: &mut BTreeSet<String>,
+    seen: &mut BTreeSet<(String, Option<String>)>,
 ) -> bool {
     match reference {
         TypeRef::Named(named) => {
             if named.id == id {
                 return true;
             }
-            if !visited.insert(named.id.clone()) {
+            if !seen.insert((named.id.clone(), named.variant.clone())) {
                 return false;
             }
             let Some(definition) = document
@@ -71,16 +71,16 @@ fn reenters(
                 TypeKind::Struct { .. } => return false,
             };
             next.into_iter()
-                .any(|reference| reenters(id, reference, document, visited))
+                .any(|reference| reenters(id, reference, document, seen))
         }
-        TypeRef::Inline(InlineType::Nullable { inner }) => reenters(id, inner, document, visited),
-        TypeRef::Inline(InlineType::Array { item, .. }) => reenters(id, item, document, visited),
+        TypeRef::Inline(InlineType::Nullable { inner }) => reenters(id, inner, document, seen),
+        TypeRef::Inline(InlineType::Array { item, .. }) => reenters(id, item, document, seen),
         TypeRef::Inline(InlineType::Map { key, value }) => {
-            reenters(id, key, document, visited) || reenters(id, value, document, visited)
+            reenters(id, key, document, seen) || reenters(id, value, document, seen)
         }
-        TypeRef::Inline(InlineType::Tuple { items }) => items
-            .iter()
-            .any(|item| reenters(id, item, document, visited)),
+        TypeRef::Inline(InlineType::Tuple { items }) => {
+            items.iter().any(|item| reenters(id, item, document, seen))
+        }
         _ => false,
     }
 }
@@ -98,9 +98,6 @@ fn definition_type(
             openness,
         } => {
             let flattened_types = flattened_field_types(flattened, document, names, mode)?;
-            if let Some(carrier) = flattened_opaque(flattened, document) {
-                return local_type_ref(carrier, document, names, mode);
-            }
             let fields = fields
                 .iter()
                 .filter(|field| field_is_visible(field, definition.direction))
@@ -110,6 +107,18 @@ fn definition_type(
                 .map(|field| local_type_ref(&field.ty, document, names, mode))
                 .collect::<Result<Vec<_>, _>>()?;
             known_types.extend(flattened_types);
+            if let ObjectOpenness::PreserveTyped { value } = openness {
+                let extra = local_type_ref(openness_value(value, document), document, names, mode)?;
+                if known_types.iter().any(|ty| *ty != extra) {
+                    return Err(EmitError(
+                        "TypeScript cannot represent typed object openness when direct or flattened fields have different types"
+                            .into(),
+                    ));
+                }
+            }
+            if let Some(carrier) = flattened_opaque(flattened, document) {
+                return local_type_ref(carrier, document, names, mode);
+            }
             let mut members = fields
                 .iter()
                 .map(|field| {
@@ -129,12 +138,6 @@ fn definition_type(
                 ObjectOpenness::PreserveTyped { value } => {
                     let extra =
                         local_type_ref(openness_value(value, document), document, names, mode)?;
-                    if known_types.iter().any(|ty| *ty != extra) {
-                        return Err(EmitError(
-                            "TypeScript cannot represent typed object openness when direct or flattened fields have different types"
-                                .into(),
-                        ));
-                    }
                     let index_type = if fields.iter().any(|field| {
                         field.presence == pons_ir::Presence::Optional
                             || matches!(
@@ -735,6 +738,42 @@ mod tests {
                 }
             })),
             &["Loop", "Kinds"],
+        );
+    }
+
+    #[test]
+    fn rejects_a_cycle_that_closes_through_a_second_untagged_narrowing() {
+        assert_cycle(
+            &cycle_error(json!({
+                "A": newtype_over(&["a"], json!({"ref": "Kinds", "variant": "left"})),
+                "B": newtype_over(&["b"], json!({"ref": "Kinds", "variant": "right"})),
+                "Kinds": {
+                    "kind": "enum", "name": ["kinds"], "direction": "both", "repr": {"kind": "untagged"},
+                    "variants": [
+                        untagged_variant("left", json!({"kind": "newtype", "ty": {"ref": "B"}})),
+                        untagged_variant("right", json!({"kind": "newtype", "ty": {"ref": "A"}}))
+                    ]
+                }
+            })),
+            &["A", "B"],
+        );
+    }
+
+    #[test]
+    fn rejects_a_cycle_that_closes_through_a_second_narrowing_in_the_other_order() {
+        assert_cycle(
+            &cycle_error(json!({
+                "A": newtype_over(&["a"], json!({"ref": "Kinds", "variant": "right"})),
+                "B": newtype_over(&["b"], json!({"ref": "Kinds", "variant": "left"})),
+                "Kinds": {
+                    "kind": "enum", "name": ["kinds"], "direction": "both", "repr": {"kind": "untagged"},
+                    "variants": [
+                        untagged_variant("left", json!({"kind": "newtype", "ty": {"ref": "A"}})),
+                        untagged_variant("right", json!({"kind": "newtype", "ty": {"ref": "B"}}))
+                    ]
+                }
+            })),
+            &["A", "B"],
         );
     }
 

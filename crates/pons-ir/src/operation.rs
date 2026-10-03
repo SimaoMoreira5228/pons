@@ -549,6 +549,14 @@ impl AuthScheme {
             flows.sort_by_key(|flow| flow.kind);
         }
     }
+
+    pub(crate) fn credential_carrier(&self) -> Option<(ApiKeyLocation, &str)> {
+        match self {
+            Self::ApiKey { location, name } => Some((*location, name)),
+            Self::CookieSession { cookie } => Some((ApiKeyLocation::Cookie, cookie)),
+            _ => None,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]

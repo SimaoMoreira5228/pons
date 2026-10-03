@@ -175,8 +175,8 @@ fn parse_path(
                 if inner.starts_with('*') {
                     push_diagnostic(
                         diagnostics,
-                        "PONS-W102",
-                        "wildcard path parameters match multiple segments and are not representable; the segment is described as a single path parameter",
+                        "PONS-E102",
+                        "a wildcard path parameter matches the remaining segments, which a path parameter of one segment cannot describe; the route cannot be published",
                     );
                 }
                 let param = inner.trim_start_matches('*');

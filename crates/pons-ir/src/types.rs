@@ -78,8 +78,11 @@ impl TypeKind {
 
     pub(crate) fn canonicalize(&mut self) {
         match self {
-            Self::Struct { fields, .. } => {
+            Self::Struct {
+                fields, flattened, ..
+            } => {
                 fields.sort_by(|left, right| left.wire.cmp(&right.wire));
+                flattened.sort_by_cached_key(|ty| serde_json::to_string(ty).unwrap_or_default());
             }
             Self::Enum { variants, .. } => {
                 variants.sort_by(|left, right| left.wire.cmp(&right.wire));

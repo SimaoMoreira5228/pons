@@ -1074,19 +1074,23 @@ fn pending_layers_are_applied_once_each_in_registration_order() {
 }
 
 #[test]
-fn wildcard_path_segments_are_diagnosed_instead_of_claiming_a_plain_param() {
-    let router = Router::<()>::new(info()).route("/files/{*rest}", get(get_file));
-    let document = router.document();
+fn a_wildcard_path_segment_is_refused_instead_of_claiming_a_plain_param() {
+    let document = Router::<()>::new(info())
+        .route("/files/{*rest}", get(get_file))
+        .document();
     let operation = &document.operations[0];
     let PathSegment::Param { param, ty } = &operation.path[1] else {
         panic!();
     };
     assert_eq!(param, "rest");
     assert!(matches!(ty, TypeRef::Inline(InlineType::String { .. })));
-    assert!(operation.diagnostics.iter().any(|diagnostic| {
-        diagnostic.code == "PONS-W102" && diagnostic.message.contains("wildcard")
-    }));
-    assert!(router.into_document().is_ok());
+    assert!(
+        Router::<()>::new(info())
+            .route("/files/{*rest}", get(get_file))
+            .into_document()
+            .is_err(),
+        "a route whose wildcard the IR cannot describe must not be published"
+    );
 }
 
 #[test]

@@ -36,9 +36,9 @@ impl QueryRejection {
             Self::RequiredNullable(wire) => format!(
                 "query field {wire:?} is required and nullable; a query string has no encoding for a present null, so make the field optional or drop the nullable wrapper"
             ),
-            Self::ReadOnly(wire) => format!(
-                "query field {wire:?} is read_only, but an OpenAPI query parameter has no read/write direction: the client drops the field on encode and every server built from the document waits for a parameter the client cannot send"
-            ),
+            Self::ReadOnly(wire) => {
+                read_only_message("query field", "an OpenAPI query parameter", wire)
+            }
             Self::DuplicateField(wire) => {
                 format!("query field {wire:?} is declared more than once")
             }
@@ -117,12 +117,54 @@ pub(crate) fn encodes_nullable_as_absence(document: &Document, field: &Field) ->
         || !document.is_nullable_type(&field.ty, &mut BTreeSet::new())
 }
 
+pub(crate) fn required_read_only(document: &Document, ty: &TypeRef) -> Option<String> {
+    required_read_only_in(document, ty, &mut BTreeSet::new())
+}
+
+fn required_read_only_in(
+    document: &Document,
+    ty: &TypeRef,
+    seen: &mut BTreeSet<String>,
+) -> Option<String> {
+    let TypeRef::Named(named) = ty else {
+        return None;
+    };
+    if named.variant.is_some() || !seen.insert(named.id.clone()) {
+        return None;
+    }
+    let found = match document.types.get(&named.id).map(|found| &found.definition) {
+        Some(TypeKind::Struct {
+            fields, flattened, ..
+        }) => fields
+            .iter()
+            .find(|field| {
+                field.presence == Presence::Required && field.access == Some(Access::ReadOnly)
+            })
+            .map(|field| field.wire.clone())
+            .or_else(|| {
+                flattened
+                    .iter()
+                    .find_map(|member| required_read_only_in(document, member, seen))
+            }),
+        Some(TypeKind::Newtype { inner }) => required_read_only_in(document, inner, seen),
+        _ => None,
+    };
+    seen.remove(&named.id);
+    found
+}
+
+pub(crate) fn read_only_message(carrier: &str, subject: &str, wire: &str) -> String {
+    format!(
+        "{carrier} {wire:?} is read_only, but {subject} has no read/write direction: the client drops the field on encode and every server built from the document waits for a key the client cannot send"
+    )
+}
+
 fn is_query_field(
     document: &Document,
     field: &Field,
     visited: &mut Vec<String>,
 ) -> Result<(), QueryRejection> {
-    if field.access == Some(Access::ReadOnly) {
+    if field.access == Some(Access::ReadOnly) && field.presence == Presence::Required {
         return Err(QueryRejection::ReadOnly(field.wire.clone()));
     }
     match &field.ty {

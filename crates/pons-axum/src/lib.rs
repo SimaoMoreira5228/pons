@@ -374,20 +374,17 @@ fn wire_differences(inherited: &ErrorResponse, declared: &ErrorResponse) -> Vec<
     [
         (
             "body",
-            differs(inherited.body.as_ref(), declared.body.as_ref()),
+            both_spelled_differ(inherited.body.as_ref(), declared.body.as_ref()),
         ),
         ("content", inherited.content != declared.content),
-        (
-            "media type",
-            differs(inherited.media_type.as_ref(), declared.media_type.as_ref()),
-        ),
+        ("media type", inherited.media_type != declared.media_type),
         (
             "response headers",
             !same_headers(&inherited.headers, &declared.headers),
         ),
         (
             "retryable",
-            differs(inherited.retryable.as_ref(), declared.retryable.as_ref()),
+            both_spelled_differ(inherited.retryable.as_ref(), declared.retryable.as_ref()),
         ),
         ("extensions", inherited.ext != declared.ext),
     ]
@@ -396,7 +393,7 @@ fn wire_differences(inherited: &ErrorResponse, declared: &ErrorResponse) -> Vec<
     .collect()
 }
 
-fn differs<T: PartialEq>(inherited: Option<&T>, declared: Option<&T>) -> bool {
+fn both_spelled_differ<T: PartialEq>(inherited: Option<&T>, declared: Option<&T>) -> bool {
     match (inherited, declared) {
         (Some(inherited), Some(declared)) => inherited != declared,
         _ => false,

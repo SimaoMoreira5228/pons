@@ -218,6 +218,27 @@ fn a_flattened_map_is_rejected_by_both() {
 }
 
 #[test]
+fn a_flattened_opaque_carrier_does_not_hide_incompatible_typed_openness() {
+    let mut raw: Value =
+        serde_json::from_str(include_str!("../../../fixtures/login.json")).unwrap();
+    raw["types"]["Metadata"] = json!({
+        "kind": "struct",
+        "name": ["metadata"],
+        "direction": "both",
+        "openness": {"preserve_typed": {"value": map(count())}},
+        "fields": [field("name", string(), "required")],
+        "flattened": [{"kind": "opaque", "codec": "flatten.codec", "wire": "json"}],
+    });
+    let document: Document = serde_json::from_value(raw).unwrap();
+    let error = pons_emit_ts::emit(&document).unwrap_err();
+    assert!(
+        error.0.contains("direct or flattened fields"),
+        "{}",
+        error.0
+    );
+}
+
+#[test]
 fn a_value_that_is_not_a_map_keeps_its_own_type() {
     agree(
         json!({ "preserve_typed": { "value": string() } }),

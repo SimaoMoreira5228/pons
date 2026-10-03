@@ -1,5 +1,6 @@
 use pons_ir::{
-    Direction, Document, ErrorStatus, NamedRef, TypeKind, TypeRef, Violation, validate_value,
+    Direction, Document, ErrorStatus, NamedRef, PathSegment, TypeKind, TypeRef, Violation,
+    validate_value,
 };
 use serde_json::{Value, json};
 
@@ -142,16 +143,35 @@ fn a_common_error_class_and_the_exact_status_inside_it_both_dispatch() {
             ),
         );
     }
+}
 
-    let mut document = template;
-    let inherited = &mut document.operations[0].errors[0];
-    inherited.status = ErrorStatus::Exact(422);
-    let mut common = inherited.clone();
-    common.status = ErrorStatus::Class(4);
-    document.common_errors.push(common);
+#[test]
+fn an_operation_error_outranks_a_common_error_that_answers_the_same_status() {
+    let template = fixture();
+    let document = |operation: ErrorStatus, common: ErrorStatus| {
+        let mut document = template.clone();
+        let error = &mut document.operations[0].errors[0];
+        error.status = operation;
+        let mut inherited = error.clone();
+        inherited.status = common;
+        inherited.name = vec!["common".into()];
+        document.common_errors.push(inherited);
+        document
+    };
+
+    document(ErrorStatus::Exact(404), ErrorStatus::Class(4))
+        .validate()
+        .unwrap();
+    document(ErrorStatus::Exact(422), ErrorStatus::Default)
+        .validate()
+        .unwrap();
     refuses(
-        &document,
-        "error dispatch slot Exact(422) is inherited: the common error Class(4) already covers it",
+        &document(ErrorStatus::Class(4), ErrorStatus::Class(4)),
+        "error dispatch slot Class(4) is inherited: the common error Class(4) already answers for it",
+    );
+    refuses(
+        &document(ErrorStatus::Default, ErrorStatus::Default),
+        "error dispatch slot Default is inherited: the common error Default already answers for it",
     );
 }
 
@@ -243,6 +263,62 @@ fn a_read_only_query_field_is_refused() {
 }
 
 #[test]
+fn a_required_read_only_field_is_refused_in_every_flat_input_carrier() {
+    let carrier_document = |carrier: &str, presence: &str| {
+        let mut document = fixture();
+        document.types.insert(
+            "Carrier".into(),
+            serde_json::from_value(json!({
+                "name": ["carrier"], "direction": "input", "kind": "struct", "openness": "reject",
+                "fields": [{"wire": "tenant", "ident": ["tenant"], "ty": {"kind": "string"}, "presence": presence, "access": "read_only"}]
+            }))
+            .unwrap(),
+        );
+        let carrier_type = TypeRef::Named(NamedRef {
+            id: "Carrier".into(),
+            variant: None,
+        });
+        match carrier {
+            "query" => document.operations[1].query = Some(carrier_type),
+            "form" => {
+                document.operations[0].body = Some(
+                    serde_json::from_value(json!({
+                        "ty": {"ref": "Carrier"}, "content": "form", "required": true
+                    }))
+                    .unwrap(),
+                )
+            }
+            _ => {
+                let PathSegment::Param { ty, .. } = &mut document.operations[1].path[1] else {
+                    panic!("events.watch reads a path parameter")
+                };
+                *ty = carrier_type;
+            }
+        }
+        document
+    };
+
+    for (carrier, message) in [
+        (
+            "query",
+            "query field \"tenant\" is read_only, but an OpenAPI query parameter has no read/write direction",
+        ),
+        (
+            "form",
+            "form body field \"tenant\" is read_only, but a urlencoded form field has no read/write direction",
+        ),
+        (
+            "path",
+            "path parameter \"tenant\" is read_only, but a path segment has no read/write direction",
+        ),
+    ] {
+        refuses(&carrier_document(carrier, "required"), message);
+        carrier_document(carrier, "optional").validate().unwrap();
+    }
+    fixture().validate().unwrap();
+}
+
+#[test]
 fn a_query_parameter_and_a_request_header_cannot_name_an_api_key_carrier() {
     let with_carrier = |location: &str, name: &str, collision: &str| {
         let mut document = fixture();
@@ -285,6 +361,70 @@ fn a_query_parameter_and_a_request_header_cannot_name_an_api_key_carrier() {
             .validate()
             .unwrap();
     }
+}
+
+#[test]
+fn a_credential_carrier_collides_only_where_an_auth_group_names_its_scheme() {
+    let with_scheme = |id: &str, scheme: Value, group: Option<usize>| {
+        let mut document = fixture();
+        document
+            .auth_schemes
+            .insert(id.into(), serde_json::from_value(scheme).unwrap());
+        if let Some(index) = group {
+            document.operations[index].auth.alternatives = vec![vec![id.into()]];
+        }
+        document
+    };
+    let header = |name: &str| json!({"kind": "api_key", "in": "header", "name": name});
+
+    with_scheme("unused", header("X-Request-ID"), None)
+        .validate()
+        .unwrap();
+    with_scheme("unused", header("X-Request-ID"), Some(0))
+        .validate()
+        .unwrap();
+    refuses(
+        &with_scheme("wanted", header("X-Request-ID"), Some(1)),
+        "the request header X-Request-ID is also the wanted apiKey carrier name",
+    );
+
+    let same_carrier = |alternatives: Vec<Vec<&str>>| {
+        let mut document = with_scheme("key", header("x-tenant"), None);
+        document.auth_schemes.insert(
+            "spare".into(),
+            serde_json::from_value(header("X-Other")).unwrap(),
+        );
+        document.operations[1].auth.alternatives = alternatives
+            .into_iter()
+            .map(|group| group.into_iter().map(str::to_owned).collect())
+            .collect();
+        document
+    };
+    refuses(
+        &same_carrier(vec![vec!["tenant", "key"]]),
+        "the key and tenant schemes of one auth alternative both write the Header carrier \"x-tenant\"",
+    );
+    same_carrier(vec![vec!["tenant"], vec!["key"]])
+        .validate()
+        .unwrap();
+    same_carrier(vec![vec!["tenant", "spare"]])
+        .validate()
+        .unwrap();
+
+    let mut cookies = with_scheme(
+        "sid",
+        json!({"kind": "cookie_session", "cookie": "sid"}),
+        None,
+    );
+    cookies.auth_schemes.insert(
+        "key".into(),
+        serde_json::from_value(json!({"kind": "api_key", "in": "cookie", "name": "sid"})).unwrap(),
+    );
+    cookies.operations[1].auth.alternatives = vec![vec!["key".into(), "sid".into()]];
+    refuses(
+        &cookies,
+        "the sid and key schemes of one auth alternative both write the Cookie carrier \"sid\"",
+    );
 }
 
 #[test]
@@ -352,4 +492,66 @@ fn a_default_that_contradicts_its_field_type_is_refused() {
         "the default for field token contradicts its type: expected a string, found a number",
     );
     fixture().validate().unwrap();
+}
+
+#[test]
+fn a_reserved_tag_name_is_refused_through_a_newtype_payload() {
+    let with_payload = |payload: Value| {
+        contract(json!({
+            "Choice": {
+                "kind": "enum", "name": ["choice"], "direction": "both",
+                "repr": {"kind": "internal", "tag": "code"},
+                "variants": [{"wire": "held", "ident": ["held"], "payload": payload}]
+            },
+            "Secret": {
+                "kind": "struct", "name": ["secret"], "direction": "both", "openness": "reject",
+                "fields": [{"wire": "code", "ident": ["code"], "ty": {"kind": "string"}, "presence": "required"}]
+            },
+            "Wrapped": {
+                "kind": "newtype", "name": ["wrapped"], "direction": "both", "inner": {"ref": "Secret"}
+            }
+        }))
+    };
+
+    for held in [json!({"ref": "Secret"}), json!({"ref": "Wrapped"})] {
+        refuses(
+            &with_payload(json!({"kind": "newtype", "ty": held})),
+            "variant held uses a reserved enum field",
+        );
+    }
+    with_payload(json!({"kind": "newtype", "ty": {"kind": "string"}}))
+        .validate()
+        .unwrap();
+}
+
+#[test]
+fn canonicalize_makes_a_reorder_of_flattened_members_the_same_document() {
+    let flattened_document = |members: [&str; 2]| {
+        let document = contract(json!({
+            "Left": {
+                "kind": "struct", "name": ["left"], "direction": "both", "openness": "reject",
+                "fields": [{"wire": "a", "ident": ["a"], "ty": {"kind": "string"}, "presence": "optional"}]
+            },
+            "Right": {
+                "kind": "struct", "name": ["right"], "direction": "both", "openness": "reject",
+                "fields": [{"wire": "b", "ident": ["b"], "ty": {"kind": "string"}, "presence": "optional"}]
+            },
+            "Holder": {
+                "kind": "struct", "name": ["holder"], "direction": "both", "openness": "reject",
+                "flattened": members.map(|id| json!({"ref": id}))
+            }
+        }));
+        document.validate().unwrap();
+        document
+    };
+
+    let mut forwards = flattened_document(["Left", "Right"]);
+    let mut backwards = flattened_document(["Right", "Left"]);
+    forwards.canonicalize();
+    backwards.canonicalize();
+    assert_eq!(
+        serde_json::to_value(&forwards).unwrap(),
+        serde_json::to_value(&backwards).unwrap()
+    );
+    assert!(forwards.diff(&backwards).changes.is_empty());
 }

@@ -1,11 +1,13 @@
-use std::{fs, process::Command};
+use std::{fs, path::PathBuf, process::Command};
 
 use pons_emit_ts::{EmitMode, ErrorStrategy, GeneratedFile, emit_with_strategy};
 use pons_ir::Document;
 use serde_json::Value;
 
-const TSCONFIG: &str = r#"{
-  "compilerOptions": {
+const PROBE: &str = "probe.ts";
+const PROJECT: &str = "tsconfig.json";
+
+const COMPILER_OPTIONS: &str = r#"{
     "target": "es2022",
     "module": "esnext",
     "moduleResolution": "bundler",
@@ -16,10 +18,35 @@ const TSCONFIG: &str = r#"{
     "noUncheckedIndexedAccess": true,
     "skipLibCheck": true,
     "noEmit": true
-  },
-  "files": ["types.ts", "client.ts", "probe.ts"]
+  }"#;
+
+fn tsconfig(checked: &[String]) -> String {
+    format!(
+        r#"{{
+  "compilerOptions": {COMPILER_OPTIONS},
+  "files": [{}]
+}}
+"#,
+        checked
+            .iter()
+            .map(|path| serde_json::to_string(path).unwrap())
+            .collect::<Vec<_>>()
+            .join(", ")
+    )
 }
-"#;
+
+fn checked_files(files: &[GeneratedFile]) -> Vec<String> {
+    let mut checked = files
+        .iter()
+        .map(|file| file.path.clone())
+        .collect::<Vec<_>>();
+    assert!(
+        !checked.iter().any(|path| path == PROBE),
+        "the emitter must not write {PROBE}, which the harness owns"
+    );
+    checked.push(PROBE.into());
+    checked
+}
 
 fn fixture() -> Value {
     serde_json::from_str(include_str!("../../../fixtures/login.json")).unwrap()
@@ -47,32 +74,108 @@ fn client_of(files: &[GeneratedFile]) -> &str {
         .content
 }
 
-fn tsc_command() -> (&'static str, Vec<String>) {
-    for program in ["tsc", "bunx", "npx"] {
-        let mut probe = Command::new(program);
-        if program != "tsc" {
-            probe.arg("tsc");
+#[derive(Clone, Debug)]
+struct Compiler {
+    program: String,
+    arguments: Vec<String>,
+}
+
+fn compiler_candidates() -> Vec<Compiler> {
+    let workspace = workspace_typescript().map(|path| Compiler {
+        program: path.display().to_string(),
+        arguments: Vec::new(),
+    });
+    [
+        workspace,
+        Some(Compiler {
+            program: "tsc".into(),
+            arguments: Vec::new(),
+        }),
+        Some(Compiler {
+            program: "bunx".into(),
+            arguments: ["--package", "typescript", "tsc"]
+                .map(String::from)
+                .to_vec(),
+        }),
+        Some(Compiler {
+            program: "npx".into(),
+            arguments: ["-p", "typescript", "tsc"].map(String::from).to_vec(),
+        }),
+    ]
+    .into_iter()
+    .flatten()
+    .collect()
+}
+
+fn workspace_typescript() -> Option<PathBuf> {
+    let mut directory = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    loop {
+        let candidate = directory.join("node_modules").join(".bin").join("tsc");
+        if candidate.is_file() {
+            return Some(candidate);
         }
-        if let Ok(output) = probe.arg("--version").output()
-            && output.status.success()
-        {
-            return (program, vec!["tsc".into()]);
+        if !directory.pop() {
+            return None;
         }
     }
-    panic!("tsc is required for the generated TypeScript type tests");
+}
+
+fn is_compiler_version(stdout: &str) -> bool {
+    stdout
+        .lines()
+        .any(|line| line.trim_start().starts_with("Version "))
+}
+
+fn tsc_command() -> Compiler {
+    let candidates = compiler_candidates();
+    for candidate in &candidates {
+        let Ok(output) = Command::new(&candidate.program)
+            .args(&candidate.arguments)
+            .arg("--version")
+            .output()
+        else {
+            continue;
+        };
+        if output.status.success() && is_compiler_version(&String::from_utf8_lossy(&output.stdout))
+        {
+            return candidate.clone();
+        }
+    }
+    panic!(
+        "no TypeScript compiler for the generated TypeScript type tests, tried {candidates:?}; the \
+         deprecated npm package named tsc prints a banner instead of compiling, so install the \
+         compiler itself with `npm install --save-dev typescript` or `bun add --dev typescript`"
+    );
 }
 
 fn type_checks(files: &[GeneratedFile], probe: &str) {
-    let (program, arguments) = tsc_command();
+    let compiler = tsc_command();
+    let checked = checked_files(files);
     let directory = tempfile::tempdir().unwrap();
     for file in files {
         fs::write(directory.path().join(&file.path), &file.content).unwrap();
     }
-    fs::write(directory.path().join("tsconfig.json"), TSCONFIG).unwrap();
-    fs::write(directory.path().join("probe.ts"), probe).unwrap();
-    let output = Command::new(program)
-        .args(&arguments)
-        .args(["--project", "tsconfig.json"])
+    fs::write(directory.path().join(PROBE), probe).unwrap();
+    fs::write(directory.path().join(PROJECT), tsconfig(&checked)).unwrap();
+    let mut written = fs::read_dir(directory.path())
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .filter(|path| path.extension().is_some_and(|extension| extension == "ts"))
+        .map(|path| path.file_name().unwrap().to_string_lossy().into_owned())
+        .collect::<Vec<_>>();
+    written.sort();
+    assert_eq!(
+        written,
+        {
+            let mut expected = checked.clone();
+            expected.sort();
+            expected
+        },
+        "the type check must cover every emitted file, listed in {PROJECT}"
+    );
+    let output = Command::new(&compiler.program)
+        .args(&compiler.arguments)
+        .args(["--project", PROJECT])
         .current_dir(directory.path())
         .output()
         .unwrap();
@@ -82,6 +185,85 @@ fn type_checks(files: &[GeneratedFile], probe: &str) {
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );
+}
+
+#[test]
+fn every_candidate_invokes_the_typescript_compiler_and_nothing_else() {
+    let runners = compiler_candidates()
+        .iter()
+        .map(|candidate| (candidate.program.clone(), candidate.arguments.clone()))
+        .collect::<Vec<_>>();
+    let arguments = |program: &str| {
+        runners
+            .iter()
+            .find(|(name, _)| name == program)
+            .map(|(_, arguments)| arguments.clone())
+    };
+    let expected = |arguments: [&str; 3]| arguments.map(String::from).to_vec();
+    assert_eq!(
+        arguments("bunx"),
+        Some(expected(["--package", "typescript", "tsc"])),
+        "bunx tsc resolves the deprecated npm package named tsc"
+    );
+    assert_eq!(
+        arguments("npx"),
+        Some(expected(["-p", "typescript", "tsc"])),
+        "npx tsc resolves the deprecated npm package named tsc"
+    );
+    assert_eq!(
+        arguments("tsc"),
+        Some(Vec::new()),
+        "`tsc tsc --project` mixes a source file with --project, which the compiler refuses as TS5042"
+    );
+    for (program, arguments) in &runners {
+        if program.ends_with("node_modules/.bin/tsc") {
+            assert!(
+                arguments.is_empty(),
+                "{program} is the compiler itself, so `tsc tsc --project` would be TS5042: {arguments:?}"
+            );
+        }
+    }
+}
+
+#[test]
+fn a_program_that_only_prints_a_banner_is_not_a_compiler() {
+    assert!(is_compiler_version("Version 5.9.2\n"));
+    assert!(is_compiler_version("  Version 7.0.2\r\n"));
+    assert!(!is_compiler_version(""));
+    assert!(!is_compiler_version(
+        "This is not the tsc command you are looking for\n\nTo get access to the \
+         TypeScript compiler, tsc, from the command line either:\n\n- Use `npm install \
+         typescript`\n"
+    ));
+}
+
+#[test]
+fn the_check_covers_every_file_the_emitter_produced() {
+    let document: Document = serde_json::from_value(fixture()).unwrap();
+    let files = files(&document);
+    let checked = checked_files(&files);
+    assert!(!files.is_empty());
+    for file in &files {
+        assert!(
+            checked.contains(&file.path),
+            "{} escapes the type check",
+            file.path
+        );
+    }
+    assert_eq!(checked.last().map(String::as_str), Some(PROBE));
+    let config: Value = serde_json::from_str(&tsconfig(&checked)).unwrap();
+    assert_eq!(
+        config["files"],
+        serde_json::to_value(&checked).unwrap(),
+        "{PROJECT} must list the emitted files, not a pinned list"
+    );
+
+    let extra = GeneratedFile {
+        path: "runtime.ts".into(),
+        content: "export const runtime = 1;\n".into(),
+    };
+    let grown = checked_files(&[files, vec![extra]].concat());
+    assert!(grown.contains(&"runtime.ts".to_string()), "{grown:?}");
 }
 
 #[test]

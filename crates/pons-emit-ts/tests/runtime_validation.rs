@@ -5489,74 +5489,31 @@ if (sent.value.good !== 1 || sent.value.other !== 2) throw new Error(`the extras
 }
 
 #[test]
-fn an_invalid_pattern_becomes_a_policy_failure_on_both_directions() {
+fn an_uncompilable_pattern_is_refused_before_any_client_exists() {
     let fixture: pons_ir::Document =
         serde_json::from_str(include_str!("../../../fixtures/login.json")).unwrap();
-    let harness = r#"
-import { createClient } from "./client.ts";
 
-let reply: any = { id: "1", nickname: "nick" };
-const client = createClient({
-  baseUrl: "https://example.test",
-  fetch: async () => new Response(JSON.stringify(reply), { status: 200, headers: { "content-type": "application/json" } }),
-});
-const login = async (body: any) => {
-  let failure: any;
-  try { await client.auth.login({ body }); } catch (cause) { failure = cause; }
-  return failure;
-};
-const rejects = (failure: any, pattern: string) => {
-  if (failure?.kind !== "protocol") throw new Error(`an invalid pattern escaped as ${JSON.stringify(failure)}`);
-  if (!String(failure.message).includes(pattern)) {
-    throw new Error(`the failure did not name the pattern: ${JSON.stringify(failure)}`);
-  }
-};
-"#;
-
-    let mut request: pons_ir::Document = fixture.clone();
-    let TypeKind::Struct { fields, .. } =
-        &mut request.types.get_mut("LoginRequest").unwrap().definition
-    else {
-        unreachable!()
-    };
-    fields[0].ty = TypeRef::Inline(InlineType::String {
-        format: None,
-        min_length: None,
-        max_length: None,
-        pattern: Some("[a-".into()),
-    });
-    request.operations[0].provides = None;
-    let files = emit_with_strategy(&request, EmitMode::Strict, ErrorStrategy::Throw)
-        .unwrap()
-        .files;
-    let mut both = harness.to_string();
-    both.push_str(
-        r#"
-rejects(await login({ email: "person@example.test" }), "[a-");
-"#,
-    );
-    run_bun(&files, &both);
-
-    let mut response = fixture;
-    let TypeKind::Struct { fields, .. } = &mut response.types.get_mut("User").unwrap().definition
-    else {
-        unreachable!()
-    };
-    fields[1].ty = TypeRef::Inline(InlineType::String {
-        format: None,
-        min_length: None,
-        max_length: None,
-        pattern: Some("(?<unclosed".into()),
-    });
-    response.operations[0].provides = None;
-    let files = emit_with_strategy(&response, EmitMode::Strict, ErrorStrategy::Throw)
-        .unwrap()
-        .files;
-    let mut both = harness.to_string();
-    both.push_str(
-        r#"
-rejects(await login({ email: "person@example.test" }), "(?<unclosed");
-"#,
-    );
-    run_bun(&files, &both);
+    for (type_id, field_index, pattern) in [("LoginRequest", 0, "[a-"), ("User", 1, "(?<unclosed")]
+    {
+        let mut document = fixture.clone();
+        let TypeKind::Struct { fields, .. } =
+            &mut document.types.get_mut(type_id).unwrap().definition
+        else {
+            unreachable!()
+        };
+        fields[field_index].ty = TypeRef::Inline(InlineType::String {
+            format: None,
+            min_length: None,
+            max_length: None,
+            pattern: Some(pattern.into()),
+        });
+        let refusal = emit_with_strategy(&document, EmitMode::Strict, ErrorStrategy::Throw)
+            .expect_err("a pattern that cannot compile must stop the emit");
+        assert!(
+            refusal.0.contains("is not a usable regular expression"),
+            "{}",
+            refusal.0
+        );
+        assert!(refusal.0.contains(pattern), "{}", refusal.0);
+    }
 }

@@ -172,7 +172,10 @@ impl Builder<'_> {
             ContentKind::Form | ContentKind::Multipart => {
                 let mut entry = Map::new();
                 entry.insert("schema".into(), schema);
-                entry.insert("encoding".into(), self.form_encoding(&body.ty)?);
+                entry.insert(
+                    "encoding".into(),
+                    self.form_encoding(&body.ty, body.content)?,
+                );
                 let mut content = Map::new();
                 content.insert(media, Value::Object(entry));
                 Value::Object(content)
@@ -186,7 +189,7 @@ impl Builder<'_> {
         }))
     }
 
-    fn form_encoding(&self, ty: &TypeRef) -> Result<Value, EmitError> {
+    fn form_encoding(&self, ty: &TypeRef, content: ContentKind) -> Result<Value, EmitError> {
         let Some((fields, _)) = self.object_fields(ty, &mut Vec::new())? else {
             return Err(EmitError(
                 "a form or multipart body must be a struct, because the client writes one value per key and OpenAPI states an encoding per property".into(),
@@ -194,6 +197,12 @@ impl Builder<'_> {
         };
         let mut encoding = Map::new();
         for field in fields {
+            if encoding.contains_key(&field.wire) {
+                return Err(EmitError(format!(
+                    "the form or multipart field {:?} is declared more than once, because the client writes one value per key",
+                    field.wire
+                )));
+            }
             let form = self
                 .wire_form(&field.ty, Place::Part {
                     required: field.presence == Presence::Required,
@@ -204,13 +213,13 @@ impl Builder<'_> {
                         field.wire
                     ))
                 })?;
-            encoding.insert(
-                field.wire.clone(),
-                json!({"contentType":match form {
-                    WireForm::Text => "text/plain",
-                    WireForm::Json => "application/json",
-                }}),
-            );
+            if content == ContentKind::Multipart && form == WireForm::Json {
+                return Err(EmitError(format!(
+                    "the multipart field {:?} has no part media type this emitter can state, because the client writes the JSON of it as a text/plain string part",
+                    field.wire
+                )));
+            }
+            encoding.insert(field.wire.clone(), json!({"contentType":"text/plain"}));
         }
         Ok(Value::Object(encoding))
     }
@@ -614,14 +623,6 @@ mod tests {
     #[test]
     fn states_the_one_value_per_key_encoding_the_client_writes() {
         let types = json!({
-            "Profile": {
-                "kind": "struct", "name": ["profile"], "direction": "both",
-                "openness": "reject",
-                "fields": [{
-                    "wire": "nickname", "ident": ["nickname"],
-                    "ty": {"kind": "string"}, "presence": "required"
-                }]
-            },
             "Seal": {
                 "kind": "struct", "name": ["seal"], "direction": "both",
                 "openness": "reject",
@@ -636,9 +637,6 @@ mod tests {
                 "flattened": [{"ref": "Seal"}],
                 "fields": [
                     {"wire": "title", "ident": ["title"], "ty": {"kind": "string"}, "presence": "required"},
-                    {"wire": "tags", "ident": ["tags"], "ty": {"kind": "array", "item": {"kind": "string"}}, "presence": "optional"},
-                    {"wire": "profile", "ident": ["profile"], "ty": {"ref": "Profile"}, "presence": "required"},
-                    {"wire": "visits", "ident": ["visits"], "ty": {"kind": "int", "bits": 32, "signed": false, "wire": "number"}, "presence": "optional"},
                     {"wire": "code", "ident": ["code"], "ty": {"kind": "int", "bits": 32, "signed": false, "wire": "string"}, "presence": "optional"}
                 ]
             }
@@ -649,16 +647,16 @@ mod tests {
             ContentKind::Multipart,
         );
         let encoding = body_encoding(&multipart, "multipart/form-data");
-        assert_eq!(encoding["title"]["contentType"], "text/plain");
-        assert_eq!(encoding["code"]["contentType"], "text/plain");
-        assert_eq!(encoding["tags"]["contentType"], "application/json");
-        assert_eq!(encoding["profile"]["contentType"], "application/json");
-        assert_eq!(encoding["visits"]["contentType"], "application/json");
         assert_eq!(
-            encoding["kind"]["contentType"], "text/plain",
-            "a flattened member writes its own keys in the same namespace"
+            encoding,
+            json!({
+                "title": {"contentType": "text/plain"},
+                "code": {"contentType": "text/plain"},
+                "kind": {"contentType": "text/plain"},
+                "blob": {"contentType": "text/plain"}
+            }),
+            "every part is a text/plain string the client writes through FormData.set"
         );
-        assert_eq!(encoding["blob"]["contentType"], "text/plain");
 
         let flat = json!({
             "Signup": {
@@ -674,7 +672,32 @@ mod tests {
         let encoding = body_encoding(&form, "application/x-www-form-urlencoded");
         assert_eq!(
             encoding,
-            json!({"email":{"contentType":"text/plain"},"tags":{"contentType":"application/json"}})
+            json!({
+                "email": {"contentType": "text/plain"},
+                "tags": {"contentType": "text/plain"}
+            }),
+            "a urlencoded body carries every value as text, and its encoding object is advisory"
+        );
+    }
+
+    #[test]
+    fn refuses_a_multipart_field_the_client_writes_as_a_text_part() {
+        let types = json!({
+            "Upload": {
+                "kind": "struct", "name": ["upload"], "direction": "both",
+                "openness": "reject",
+                "fields": [
+                    {"wire": "title", "ident": ["title"], "ty": {"kind": "string"}, "presence": "required"},
+                    {"wire": "tags", "ident": ["tags"], "ty": {"kind": "array", "item": {"kind": "string"}}, "presence": "optional"}
+                ]
+            }
+        });
+        let document = with_body(types, json!({"ref": "Upload"}), ContentKind::Multipart);
+        let error = crate::emit(&document).unwrap_err().0;
+        assert!(error.contains("\"tags\""), "{error}");
+        assert!(
+            error.contains("no part media type this emitter can state"),
+            "{error}"
         );
     }
 
@@ -733,6 +756,36 @@ mod tests {
                 error.contains("a form or multipart body must be a struct"),
                 "{error}"
             );
+        }
+    }
+
+    #[test]
+    fn refuses_a_form_or_multipart_body_with_two_fields_on_one_wire_name() {
+        let types = json!({
+            "Seal": {
+                "kind": "struct", "name": ["seal"], "direction": "both",
+                "openness": "reject",
+                "fields": [{
+                    "wire": "kind", "ident": ["kind"],
+                    "ty": {"kind": "string"}, "presence": "required"
+                }]
+            },
+            "Upload": {
+                "kind": "struct", "name": ["upload"], "direction": "both",
+                "openness": "reject",
+                "flattened": [{"ref": "Seal"}],
+                "fields": [{
+                    "wire": "kind", "ident": ["sealKind"],
+                    "ty": {"kind": "int", "bits": 32, "signed": false, "wire": "string"},
+                    "presence": "required"
+                }]
+            }
+        });
+        for content in [ContentKind::Form, ContentKind::Multipart] {
+            let document = with_body(types.clone(), json!({"ref": "Upload"}), content);
+            let error = crate::emit(&document).unwrap_err().0;
+            assert!(error.contains("\"kind\""), "{error}");
+            assert!(error.contains("is declared more than once"), "{error}");
         }
     }
 

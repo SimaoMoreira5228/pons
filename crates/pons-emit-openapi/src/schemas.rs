@@ -842,10 +842,14 @@ fn tagged_schema(tag: &str, variant: &str) -> Value {
 
 fn tagged(mut object: Value, tag: &str, variant: &str) -> Value {
     object["properties"][tag] = json!({"const":variant});
-    if object.get("required").is_none() {
-        object["required"] = json!([]);
+    match object["required"].as_array_mut() {
+        Some(required) => {
+            if !required.iter().any(|name| name.as_str() == Some(tag)) {
+                required.push(json!(tag));
+            }
+        }
+        None => object["required"] = json!([tag]),
     }
-    object["required"].as_array_mut().unwrap().push(json!(tag));
     object
 }
 
@@ -1566,6 +1570,35 @@ mod tests {
                 id == "Open",
                 "the payload's own openness still judges the keys beside the tag"
             );
+        }
+    }
+
+    #[test]
+    fn a_tag_named_like_a_payload_field_is_refused_before_emission() {
+        for presence in [Presence::Required, Presence::Optional] {
+            let mut detail = field("code", string());
+            detail.presence = presence;
+            let mut document = fixture();
+            document
+                .types
+                .insert("Detail".into(), closed("detail", vec![detail], Vec::new()));
+            document.types.insert(
+                "Notice".into(),
+                internal(
+                    "notice",
+                    "code",
+                    vec![(
+                        "stop",
+                        VariantPayload::Newtype {
+                            ty: named("Detail"),
+                        },
+                    )],
+                ),
+            );
+            let refusal = crate::emit(&document).expect_err(
+                "a tag that collides with a payload field through a newtype must not emit",
+            );
+            assert!(refusal.0.contains("reserved enum field"), "{}", refusal.0);
         }
     }
 
