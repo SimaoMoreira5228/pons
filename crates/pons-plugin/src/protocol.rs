@@ -10,14 +10,20 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 pub const PROTOCOL_VERSION: u32 = 2;
+const STREAM_BODY: &str = "stream_body";
+const STREAMING: &[&str] = &["sse", "ndjson", "bytes", "websocket", STREAM_BODY];
+const ENUM_REPRS: &[&str] = &["string", "external", "internal", "adjacent", "untagged"];
+const OBJECT_OPENNESS: &[&str] = &["reject", "preserve_typed", "preserve_opaque"];
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct VersionRange {
     pub min: String,
     pub max: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct EmitterManifest {
     pub name: String,
     pub version: String,
@@ -28,6 +34,7 @@ pub struct EmitterManifest {
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct EmitterCapabilities {
     #[serde(default)]
     pub streaming: Vec<String>,
@@ -80,6 +87,7 @@ impl Coverage {
 impl<'de> Deserialize<'de> for Coverage {
     fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
         #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
         struct Raw {
             #[serde(default)]
             exact: Vec<String>,
@@ -113,6 +121,7 @@ fn coverage_set<E: de::Error>(level: &str, values: Vec<String>) -> Result<BTreeS
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct EmitRequest<'a> {
     pub protocol: u32,
     pub mode: EmitMode,
@@ -122,6 +131,7 @@ pub struct EmitRequest<'a> {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct GeneratedFile {
     pub path: String,
     pub content: String,
@@ -134,6 +144,7 @@ fn utf8_encoding() -> String {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct PluginDiagnostic {
     pub severity: DiagnosticSeverity,
     pub code: String,
@@ -151,6 +162,7 @@ pub enum DiagnosticSeverity {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct EmitResponse {
     pub protocol: u32,
     #[serde(default)]
@@ -188,6 +200,17 @@ impl EmitterManifest {
                 "emitter {} does not support IR version {ir_version}",
                 self.name
             ));
+        }
+        for (list, values, allowed) in [
+            ("streaming", &self.capabilities.streaming, STREAMING),
+            ("enum_reprs", &self.capabilities.enum_reprs, ENUM_REPRS),
+            (
+                "object_openness",
+                &self.capabilities.object_openness,
+                OBJECT_OPENNESS,
+            ),
+        ] {
+            validate_capability_list(list, values, allowed)?;
         }
         Ok(())
     }
@@ -228,6 +251,22 @@ impl EmitterManifest {
             )));
         }
         for operation in &document.operations {
+            if operation
+                .body
+                .as_ref()
+                .is_some_and(|body| body.content == ContentKind::Stream)
+                && !self
+                    .capabilities
+                    .streaming
+                    .iter()
+                    .any(|value| value == STREAM_BODY)
+            {
+                warnings.push(CapabilityWarning(format!(
+                    "{} does not declare {STREAM_BODY} support in {}",
+                    self.name,
+                    operation_subject(operation)
+                )));
+            }
             for kind in stream_kinds(operation) {
                 if !self
                     .capabilities
@@ -257,7 +296,7 @@ impl EmitterManifest {
                 match definition.direction {
                     pons_ir::Direction::Input => entry.0 = true,
                     pons_ir::Direction::Output => entry.1 = true,
-                    pons_ir::Direction::Both => {}
+                    pons_ir::Direction::Both => *entry = (true, true),
                 }
             }
         }
@@ -320,13 +359,6 @@ impl EmitterManifest {
 
 fn stream_kinds(operation: &pons_ir::Operation) -> Vec<&'static str> {
     let mut kinds = Vec::new();
-    if operation
-        .body
-        .as_ref()
-        .is_some_and(|body| body.content == ContentKind::Stream)
-    {
-        kinds.push("bytes");
-    }
     if let Some(stream) = &operation.stream {
         let kind = match stream.kind {
             StreamKind::Sse { .. } => "sse",
@@ -415,7 +447,7 @@ pub(crate) fn validate_response_for_document(
         let missing = expected.difference(&seen).cloned().collect::<Vec<_>>();
         return Err(format!("emitter coverage is missing subjects {missing:?}"));
     }
-    let canonical = pons_ir::canonical_coverage(document, false)?;
+    let canonical = pons_ir::canonical_coverage(document, mode == EmitMode::Lossy)?;
     for (subject, level) in coverage.levels() {
         if let Some(floor) = canonical.get(&subject)
             && level < *floor
@@ -430,10 +462,33 @@ pub(crate) fn validate_response_for_document(
     if mode == EmitMode::Strict && !opaque_supported && !coverage.opaque.is_empty() {
         return Err("emitter reported opaque coverage without declaring opaque support".into());
     }
-    if mode == EmitMode::Strict
-        && let Some((level, _)) = pons_ir::strict_violations(coverage.levels(), true).first()
-    {
-        return Err(format!("emitter reported {level} coverage in strict mode"));
+    if mode == EmitMode::Strict {
+        let violations: Vec<String> = pons_ir::strict_violations(coverage.levels(), true)
+            .into_iter()
+            .map(|(level, subjects)| {
+                format!("{level} coverage in strict mode: {}", subjects.join(", "))
+            })
+            .collect();
+        if !violations.is_empty() {
+            return Err(format!("emitter reported {}", violations.join("; ")));
+        }
+    }
+    Ok(())
+}
+
+fn validate_capability_list(list: &str, values: &[String], allowed: &[&str]) -> Result<(), String> {
+    let mut seen = BTreeSet::new();
+    for value in values {
+        if !allowed.contains(&value.as_str()) {
+            return Err(format!(
+                "emitter capabilities name an unknown {list} value {value}"
+            ));
+        }
+        if !seen.insert(value) {
+            return Err(format!(
+                "emitter capabilities list {value} more than once in {list}"
+            ));
+        }
     }
     Ok(())
 }
@@ -459,13 +514,10 @@ fn validate_output_path(path: &str) -> Result<(), String> {
     let candidate = Path::new(path);
     if path.is_empty()
         || path.contains('\\')
+        || path.contains(':')
         || path
             .split('/')
-            .any(|part| part.is_empty() || part == "." || part == "..")
-        || path
-            .split('/')
-            .next()
-            .is_some_and(|part| part.contains(':'))
+            .any(|part| part.is_empty() || part == "." || part == ".." || is_reserved_device(part))
         || candidate.is_absolute()
         || candidate
             .components()
@@ -474,6 +526,18 @@ fn validate_output_path(path: &str) -> Result<(), String> {
         return Err(format!("emitter returned unsafe output path {path:?}"));
     }
     Ok(())
+}
+
+fn is_reserved_device(segment: &str) -> bool {
+    let name = segment
+        .split_once('.')
+        .map_or(segment, |(stem, _)| stem)
+        .to_ascii_uppercase();
+    matches!(name.as_str(), "NUL" | "CON" | "PRN" | "AUX")
+        || ["COM", "LPT"].iter().any(|prefix| {
+            name.strip_prefix(prefix)
+                .is_some_and(|n| n.len() == 1 && matches!(n.as_bytes()[0], b'1'..=b'9'))
+        })
 }
 
 fn parse_version(version: &str) -> Result<(u32, u32), String> {
@@ -626,7 +690,7 @@ mod tests {
         streaming_body.validate().unwrap();
         assert_eq!(
             stream_warnings(&sse, &streaming_body),
-            vec!["fixture does not declare support for bytes streams in auth.login"]
+            vec!["fixture does not declare stream_body support in auth.login"]
         );
 
         let mut bytes_only = manifest();
@@ -637,7 +701,7 @@ mod tests {
         );
 
         let mut framed = sse.clone();
-        framed.capabilities.streaming = vec!["sse".into(), "bytes".into()];
+        framed.capabilities.streaming = vec!["sse".into(), "bytes".into(), "stream_body".into()];
         assert!(stream_warnings(&framed, &streaming_body).is_empty());
         assert!(stream_warnings(&framed, &document).is_empty());
 
@@ -655,6 +719,7 @@ mod tests {
         assert_eq!(
             stream_warnings(&bytes_only, &duplex),
             vec![
+                "fixture does not declare stream_body support in auth.login",
                 "fixture does not declare support for sse streams in auth.login",
                 "fixture does not declare support for sse streams in events.watch",
             ],
@@ -662,7 +727,7 @@ mod tests {
         );
         assert_eq!(
             stream_warnings(&sse, &duplex),
-            vec!["fixture does not declare support for bytes streams in auth.login"]
+            vec!["fixture does not declare stream_body support in auth.login"]
         );
         assert!(stream_warnings(&framed, &duplex).is_empty());
 
@@ -711,8 +776,43 @@ mod tests {
             .unsupported_features(document)
             .into_iter()
             .map(|warning| warning.0)
-            .filter(|message| message.contains(" streams in "))
+            .filter(|message| {
+                message.contains(" streams in ")
+                    || message.contains(&format!("{STREAM_BODY} support in "))
+            })
             .collect()
+    }
+
+    #[test]
+    fn a_streamed_request_body_needs_its_own_capability() {
+        let mut value: serde_json::Value =
+            serde_json::from_str(include_str!("../../../fixtures/login.json")).unwrap();
+        value["operations"][0]["body"]["content"] = serde_json::json!("stream");
+        let document: Document = serde_json::from_value(value).unwrap();
+        document.validate().unwrap();
+        let refusal = "fixture does not declare stream_body support in auth.login";
+
+        let mut framed = manifest();
+        framed.capabilities.streaming = vec!["sse".into(), "ndjson".into()];
+        assert_eq!(stream_warnings(&framed, &document), vec![refusal]);
+        framed.capabilities.streaming.push("stream_body".into());
+        assert!(stream_warnings(&framed, &document).is_empty());
+
+        let mut bytes_only = manifest();
+        bytes_only.capabilities.streaming = vec!["bytes".into()];
+        assert_eq!(
+            stream_warnings(&bytes_only, &document),
+            vec![
+                refusal,
+                "fixture does not declare support for sse streams in events.watch"
+            ],
+            "a bytes response capability does not carry a streamed request body"
+        );
+        bytes_only.capabilities.streaming.push("stream_body".into());
+        assert_eq!(
+            stream_warnings(&bytes_only, &document),
+            vec!["fixture does not declare support for sse streams in events.watch"]
+        );
     }
 
     #[test]
@@ -820,6 +920,157 @@ mod tests {
             error: None,
         };
         assert!(validate_response(&response).is_err());
+    }
+
+    fn renamed(value: &serde_json::Value, key: &str, typo: &str) -> serde_json::Value {
+        let mut renamed = value.clone();
+        let object = renamed.as_object_mut().unwrap();
+        let moved = object.remove(key).unwrap();
+        object.insert(typo.into(), moved);
+        renamed
+    }
+
+    fn assert_unknown_field<T: serde::de::DeserializeOwned + std::fmt::Debug>(
+        value: &serde_json::Value,
+        typo: &str,
+        key: &str,
+    ) {
+        let error = serde_json::from_value::<T>(value.clone())
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.contains(&format!("unknown field `{typo}`")),
+            "a misspelled {key} must name the unknown field, got {error}"
+        );
+    }
+
+    #[test]
+    fn a_misspelled_key_is_refused_on_every_wire_struct() {
+        let response = serde_json::json!({
+            "protocol": PROTOCOL_VERSION,
+            "files": [{ "path": "client.ts", "content": "generated", "encoding": "utf8" }],
+            "diagnostics": [{ "severity": "warning", "code": "X-1", "message": "note" }],
+            "coverage": { "exact": [], "opaque": [], "lossy": [], "unsupported": [] },
+            "error": null
+        });
+        for (key, typo) in [
+            ("protocol", "protokol"),
+            ("files", "filesx"),
+            ("diagnostics", "diagnostcs"),
+            ("coverage", "coverag"),
+            ("error", "eror"),
+        ] {
+            assert_unknown_field::<EmitResponse>(&renamed(&response, key, typo), typo, key);
+        }
+        assert_unknown_field::<Coverage>(
+            &renamed(&response["coverage"], "exact", "exactt"),
+            "exactt",
+            "coverage.exact",
+        );
+        assert_unknown_field::<GeneratedFile>(
+            &renamed(&response["files"][0], "content", "conten"),
+            "conten",
+            "files.content",
+        );
+        assert_unknown_field::<PluginDiagnostic>(
+            &renamed(&response["diagnostics"][0], "message", "messag"),
+            "messag",
+            "diagnostics.message",
+        );
+
+        let manifest = serde_json::json!({
+            "name": "fixture",
+            "version": "1.0.0",
+            "protocol": { "min": "2.0", "max": "2.0" },
+            "ir_version": { "min": "0.2", "max": "0.2" },
+            "capabilities": { "streaming": ["sse"] }
+        });
+        for (key, typo) in [
+            ("protocol", "protokol"),
+            ("ir_version", "ir_versoin"),
+            ("capabilities", "capabilties"),
+        ] {
+            assert_unknown_field::<EmitterManifest>(&renamed(&manifest, key, typo), typo, key);
+        }
+        assert_unknown_field::<VersionRange>(
+            &renamed(&manifest["protocol"], "min", "minimum"),
+            "minimum",
+            "protocol.min",
+        );
+        assert_unknown_field::<EmitterCapabilities>(
+            &renamed(&manifest["capabilities"], "streaming", "streamin"),
+            "streamin",
+            "capabilities.streaming",
+        );
+    }
+
+    #[test]
+    fn capability_lists_reject_unknown_values_and_duplicates() {
+        for (list, unknown, duplicate) in [
+            ("streaming", "grpc", "sse"),
+            ("enum_reprs", "internl", "string"),
+            ("object_openness", "preserved", "reject"),
+        ] {
+            let error = manifest_with(list, serde_json::json!([unknown]))
+                .validate("0.2")
+                .unwrap_err();
+            assert_eq!(
+                error,
+                format!("emitter capabilities name an unknown {list} value {unknown}")
+            );
+
+            let error = manifest_with(list, serde_json::json!([duplicate, duplicate]))
+                .validate("0.2")
+                .unwrap_err();
+            assert_eq!(
+                error,
+                format!("emitter capabilities list {duplicate} more than once in {list}")
+            );
+        }
+
+        let every_value = manifest_with(
+            "streaming",
+            serde_json::json!(["sse", "ndjson", "bytes", "websocket", "stream_body"]),
+        );
+        assert!(every_value.validate("0.2").is_ok());
+    }
+
+    fn manifest_with(list: &str, values: serde_json::Value) -> EmitterManifest {
+        let mut value = serde_json::to_value(manifest()).unwrap();
+        value["protocol"] = serde_json::json!({ "min": "2.0", "max": "2.0" });
+        value["capabilities"][list] = values;
+        serde_json::from_value(value).unwrap()
+    }
+
+    #[test]
+    fn a_both_direction_type_needs_a_direction_split_target() {
+        let mut value: serde_json::Value =
+            serde_json::from_str(include_str!("../../../fixtures/login.json")).unwrap();
+        for id in ["User", "LoginRequest"] {
+            value["types"][id]["origin"] = serde_json::json!("account");
+        }
+        value["types"]["User"]["direction"] = serde_json::json!("both");
+        let document: Document = serde_json::from_value(value).unwrap();
+        document.validate().unwrap();
+
+        let mut manifest = manifest();
+        assert_eq!(
+            manifest
+                .unsupported_features(&document)
+                .iter()
+                .map(|warning| warning.0.as_str())
+                .filter(|message| message.contains("direction-split"))
+                .collect::<Vec<_>>(),
+            vec!["fixture does not declare direction-split type support for account"],
+            "a both-direction type uses both sides of its origin group"
+        );
+        manifest.capabilities.direction_split = true;
+        assert!(
+            !manifest
+                .unsupported_features(&document)
+                .iter()
+                .any(|warning| warning.0.contains("direction-split"))
+        );
     }
 
     #[test]
@@ -940,10 +1191,85 @@ mod tests {
         assert_eq!(
             validate_response_for_document(&response, &document, EmitMode::Strict, true)
                 .unwrap_err(),
-            "emitter reported lossy coverage in strict mode"
+            "emitter reported lossy coverage in strict mode: types.User"
         );
         assert!(
             validate_response_for_document(&response, &document, EmitMode::Lossy, true).is_ok()
+        );
+    }
+
+    #[test]
+    fn strict_mode_names_every_violating_class_with_its_subjects() {
+        let document: Document =
+            serde_json::from_str(include_str!("../../../fixtures/login.json")).unwrap();
+        let mut coverage = coverage_for_document(&document, false).unwrap();
+        for (subject, level) in [
+            ("types.EventQuery", CoverageLevel::Lossy),
+            ("types.LoginError", CoverageLevel::Unsupported),
+        ] {
+            coverage.exact.remove(subject);
+            match level {
+                CoverageLevel::Lossy => {
+                    coverage.lossy.insert(subject.into());
+                }
+                _ => {
+                    coverage.unsupported.insert(subject.into());
+                }
+            }
+        }
+        let response = EmitResponse {
+            protocol: PROTOCOL_VERSION,
+            files: Vec::new(),
+            diagnostics: Vec::new(),
+            coverage: Some(coverage),
+            error: None,
+        };
+        assert_eq!(
+            validate_response_for_document(&response, &document, EmitMode::Strict, true)
+                .unwrap_err(),
+            "emitter reported unsupported coverage in strict mode: types.LoginError; lossy \
+             coverage in strict mode: types.EventQuery",
+            "the worst class comes first and every subject is named"
+        );
+        assert!(
+            validate_response_for_document(&response, &document, EmitMode::Lossy, true).is_ok()
+        );
+    }
+
+    #[test]
+    fn the_plugin_floor_follows_the_mode_the_built_in_emits_with() {
+        let mut value: serde_json::Value =
+            serde_json::from_str(include_str!("../../../fixtures/login.json")).unwrap();
+        value["types"]["User"]["fields"][0]["ty"] = serde_json::json!({
+            "kind": "int", "bits": 64, "signed": false, "wire": "number"
+        });
+        let document: Document = serde_json::from_value(value).unwrap();
+        document.validate().unwrap();
+
+        let mut certified = EmitResponse {
+            protocol: PROTOCOL_VERSION,
+            files: Vec::new(),
+            diagnostics: Vec::new(),
+            coverage: Some(coverage_for_document(&document, true).unwrap()),
+            error: None,
+        };
+        assert!(
+            validate_response_for_document(&certified, &document, EmitMode::Lossy, true).is_ok(),
+            "the built-in emitter's own lossy-mode coverage is accepted"
+        );
+        assert!(
+            validate_response_for_document(&certified, &document, EmitMode::Strict, true).is_err(),
+            "the same coverage is lossy in strict mode"
+        );
+
+        let coverage = certified.coverage.as_mut().unwrap();
+        coverage.lossy.remove("types.User");
+        coverage.exact.insert("types.User".into());
+        assert_eq!(
+            validate_response_for_document(&certified, &document, EmitMode::Lossy, true)
+                .unwrap_err(),
+            "emitter reported types.User as exact coverage, better than the canonical lossy \
+             coverage"
         );
     }
 
@@ -988,10 +1314,13 @@ mod tests {
         );
 
         for (level, error) in [
-            ("lossy", "emitter reported lossy coverage in strict mode"),
+            (
+                "lossy",
+                "emitter reported lossy coverage in strict mode: types.EventQuery",
+            ),
             (
                 "unsupported",
-                "emitter reported unsupported coverage in strict mode",
+                "emitter reported unsupported coverage in strict mode: types.EventQuery",
             ),
         ] {
             let mut coverage = coverage.clone();
@@ -1300,6 +1629,16 @@ mod tests {
             "nested/../escape",
             "C:/escape",
             "nested\\escape",
+            "client.ts:hidden",
+            "nested/client.ts:hidden",
+            "NUL",
+            "con",
+            "nested/Prn",
+            "AUX",
+            "COM1",
+            "com1.ts",
+            "nested/LPT9",
+            "nul.ts/nested",
         ] {
             let response = EmitResponse {
                 protocol: PROTOCOL_VERSION,
@@ -1309,6 +1648,23 @@ mod tests {
                 error: None,
             };
             assert!(validate_response(&response).is_err(), "accepted {path:?}");
+        }
+
+        for path in [
+            "client.ts",
+            "console.ts",
+            "nullable/auxiliary.ts",
+            "COM10",
+            "LPT0.ts",
+        ] {
+            let response = EmitResponse {
+                protocol: PROTOCOL_VERSION,
+                files: vec![file(path)],
+                diagnostics: Vec::new(),
+                coverage: None,
+                error: None,
+            };
+            assert!(validate_response(&response).is_ok(), "refused {path:?}");
         }
 
         let response = EmitResponse {

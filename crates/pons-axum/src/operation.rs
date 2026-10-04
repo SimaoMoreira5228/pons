@@ -159,27 +159,26 @@ fn parse_path(
     if path == "/" {
         return Vec::new();
     }
-    let parameter_count = path
-        .split('/')
-        .filter(|segment| segment.starts_with('{') && segment.ends_with('}'))
+    let raw: Vec<Segment<'_>> = path.split('/').skip(1).map(Segment::of).collect();
+    let parameter_count = raw
+        .iter()
+        .filter(|segment| matches!(segment, Segment::Param { .. }))
         .count();
     let mut used_fallback = false;
     let mut parameter_index = 0;
-    let segments = path
-        .split('/')
-        .skip(1)
-        .filter(|segment| !segment.is_empty() || path.ends_with('/'))
-        .map(|segment| {
-            if segment.starts_with('{') && segment.ends_with('}') {
-                let inner = &segment[1..segment.len() - 1];
-                if inner.starts_with('*') {
+    let segments = raw
+        .iter()
+        .enumerate()
+        .map(|(index, segment)| match segment {
+            Segment::Param { name, wildcard } => {
+                if *wildcard {
                     push_diagnostic(
                         diagnostics,
                         "PONS-E102",
                         "a wildcard path parameter matches the remaining segments, which a path parameter of one segment cannot describe; the route cannot be published",
                     );
                 }
-                let param = inner.trim_start_matches('*');
+                let param = name.trim_start_matches('*');
                 let tuple_key = parameter_index.to_string();
                 parameter_index += 1;
                 let ty = path_types.get(param).or_else(|| {
@@ -196,9 +195,22 @@ fn parse_path(
                     param: param.to_owned(),
                     ty,
                 }
-            } else {
+            }
+            Segment::Literal(lit) => PathSegment::Literal {
+                lit: unescape(lit),
+            },
+            Segment::Empty => {
+                if index + 1 < raw.len() {
+                    push_diagnostic(
+                        diagnostics,
+                        "PONS-E102",
+                        format!(
+                            "the route {path} has an empty path segment at position {index}, which axum serves as a segment of its own; a path with no segment there is a different route, so the route cannot be published"
+                        ),
+                    );
+                }
                 PathSegment::Literal {
-                    lit: segment.to_owned(),
+                    lit: String::new(),
                 }
             }
         })
@@ -211,6 +223,44 @@ fn parse_path(
         );
     }
     segments
+}
+
+enum Segment<'a> {
+    Literal(&'a str),
+    Param { name: &'a str, wildcard: bool },
+    Empty,
+}
+
+impl<'a> Segment<'a> {
+    fn of(segment: &'a str) -> Self {
+        if segment.is_empty() {
+            return Segment::Empty;
+        }
+        let braced = segment.starts_with('{') && segment.ends_with('}');
+        if braced && !segment.starts_with("{{") && !segment.ends_with("}}") {
+            let name = &segment[1..segment.len() - 1];
+            return Segment::Param {
+                wildcard: name.starts_with('*'),
+                name,
+            };
+        }
+        Segment::Literal(segment)
+    }
+}
+
+fn unescape(segment: &str) -> String {
+    if !segment.contains("{{") && !segment.contains("}}") {
+        return segment.to_owned();
+    }
+    let mut unescaped = String::with_capacity(segment.len());
+    let mut characters = segment.chars();
+    while let Some(character) = characters.next() {
+        unescaped.push(character);
+        if matches!(character, '{' | '}') && characters.as_str().starts_with(character) {
+            characters.next();
+        }
+    }
+    unescaped
 }
 
 fn string_type() -> TypeRef {

@@ -1,7 +1,12 @@
 use super::*;
 
-pub(super) fn diff_operations(diff: &mut Diff, old: &Document, new: &Document) {
-    let paths = operation_paths(old, new);
+pub(super) fn diff_operations(
+    diff: &mut Diff,
+    used: &mut BTreeSet<String>,
+    old: &Document,
+    new: &Document,
+) {
+    let paths = operation_paths(used, old, new);
     let old: BTreeMap<_, _> = old
         .operations
         .iter()
@@ -33,11 +38,15 @@ pub(super) fn diff_operations(diff: &mut Diff, old: &Document, new: &Document) {
             );
             continue;
         };
-        diff_operation(diff, path, previous, operation);
+        diff_operation(diff, used, path, previous, operation);
     }
 }
 
-fn operation_paths(old: &Document, new: &Document) -> BTreeMap<Vec<Vec<String>>, String> {
+fn operation_paths(
+    used: &mut BTreeSet<String>,
+    old: &Document,
+    new: &Document,
+) -> BTreeMap<Vec<Vec<String>>, String> {
     let ids = old
         .operations
         .iter()
@@ -45,6 +54,7 @@ fn operation_paths(old: &Document, new: &Document) -> BTreeMap<Vec<Vec<String>>,
         .map(|operation| operation.id.clone())
         .collect::<BTreeSet<_>>();
     injective_paths(
+        used,
         ids,
         |id| readable_operation_path(id),
         |id| format!("operations.{}", crate::operation_path(id)),
@@ -62,12 +72,12 @@ fn readable_operation_path(id: &[Vec<String>]) -> String {
 }
 
 fn injective_paths<K: Ord>(
+    used: &mut BTreeSet<String>,
     keys: impl IntoIterator<Item = K>,
     readable: impl Fn(&K) -> String,
     escaped: impl Fn(&K) -> String,
 ) -> BTreeMap<K, String> {
     let mut paths = BTreeMap::new();
-    let mut used = BTreeSet::new();
     for key in keys {
         let read = readable(&key);
         let mut path = read.clone();
@@ -84,7 +94,13 @@ fn injective_paths<K: Ord>(
     paths
 }
 
-fn diff_operation(diff: &mut Diff, path: &str, old: &Operation, new: &Operation) {
+fn diff_operation(
+    diff: &mut Diff,
+    paths: &mut BTreeSet<String>,
+    path: &str,
+    old: &Operation,
+    new: &Operation,
+) {
     if old.method != new.method {
         add(diff, ChangeLevel::Breaking, path, "HTTP method changed");
     }
@@ -174,7 +190,7 @@ fn diff_operation(diff: &mut Diff, path: &str, old: &Operation, new: &Operation)
     if old.responses != new.responses {
         diff_responses(diff, path, old, new);
     }
-    diff_errors(diff, path, &old.errors, &new.errors);
+    diff_errors(diff, paths, path, &old.errors, &new.errors);
     if old.errors_inherit != new.errors_inherit {
         add(
             diff,
@@ -233,6 +249,7 @@ fn diff_operation(diff: &mut Diff, path: &str, old: &Operation, new: &Operation)
         (None, None) => {}
     }
     diff_stream(diff, path, old.stream.as_ref(), new.stream.as_ref());
+    diff_diagnostics(diff, path, &old.diagnostics, &new.diagnostics);
     if old.ext != new.ext {
         add(
             diff,
@@ -344,25 +361,29 @@ fn diff_stream(
                     }
                 }
             }
-            (crate::StreamKind::Ndjson { item: old }, crate::StreamKind::Ndjson { item: new })
-                if old != new =>
-            {
-                add(
-                    diff,
-                    ChangeLevel::Breaking,
-                    format!("{path}.stream.item"),
-                    "stream item type changed",
-                )
+            (crate::StreamKind::Ndjson { item: old }, crate::StreamKind::Ndjson { item: new }) => {
+                if old != new {
+                    add(
+                        diff,
+                        ChangeLevel::Breaking,
+                        format!("{path}.stream.item"),
+                        "stream item type changed",
+                    )
+                }
             }
             (
                 crate::StreamKind::Bytes { content_type: old },
                 crate::StreamKind::Bytes { content_type: new },
-            ) if old != new => add(
-                diff,
-                ChangeLevel::Breaking,
-                format!("{path}.stream.content_type"),
-                "stream content type changed",
-            ),
+            ) => {
+                if old != new {
+                    add(
+                        diff,
+                        ChangeLevel::Breaking,
+                        format!("{path}.stream.content_type"),
+                        "stream content type changed",
+                    )
+                }
+            }
             (
                 crate::StreamKind::Websocket {
                     client: old_client,
@@ -558,11 +579,12 @@ fn error_wire_equivalent(old: &ErrorResponse, new: &ErrorResponse) -> bool {
 
 pub(super) fn diff_errors(
     diff: &mut Diff,
+    used: &mut BTreeSet<String>,
     path: &str,
     old: &[ErrorResponse],
     new: &[ErrorResponse],
 ) {
-    let paths = error_paths(path, old, new);
+    let paths = error_paths(used, path, old, new);
     let old: BTreeMap<_, _> = old
         .iter()
         .map(|error| ((error.status.clone(), error.name.clone()), error))
@@ -619,6 +641,7 @@ pub(super) fn diff_errors(
 }
 
 fn error_paths(
+    used: &mut BTreeSet<String>,
     path: &str,
     old: &[ErrorResponse],
     new: &[ErrorResponse],
@@ -629,6 +652,7 @@ fn error_paths(
         .map(|error| (error.status.clone(), error.name.clone()))
         .collect::<BTreeSet<_>>();
     injective_paths(
+        used,
         keys,
         |(_, name)| format!("{path}.errors.{}", name.join("_")),
         |(status, name)| {

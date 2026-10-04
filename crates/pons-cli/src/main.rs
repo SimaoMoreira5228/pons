@@ -10,7 +10,7 @@ use std::process::ExitCode;
 use pons_emit_ts::ErrorStrategy;
 use pons_ir::{ChangeLevel, Document};
 
-const HELP: &str = "Usage: pons <command> <ir.json> [arguments]\n\nCommands:\n  check <ir.json>                              Validate an IR document\n  fmt <ir.json>                                Rewrite an IR document in canonical form\n  diff <old.json> <new.json>                   Classify changes between two IR documents (exit 1 breaking, exit 3 invalid new contract)\n  emit --target <name> <ir.json> <output-dir> [--strict|--lossy] [--errors <neverthrow|throw>] [--coverage <relative-file>]\n                                                Generate files (built-in: ts, openapi)\n      --strict                                 Reject unsupported/lossy coverage; opaque is allowed on ts/openapi, and on a plugin that declares it (default)\n      --lossy                                  Emit non-exact coverage with warnings\n      --errors <neverthrow|throw>              TypeScript target only: neverthrow (default), throw\n      --coverage <relative-file>               Write emitter coverage as JSON\n";
+const HELP: &str = "Usage: pons <command> <ir.json> [arguments]\n\nCommands:\n  check <ir.json>                              Validate an IR document\n  fmt <ir.json>                                Rewrite an IR document in canonical form\n  diff <old.json> <new.json>                   Classify changes between two IR documents\n  emit --target <name> <ir.json> <output-dir> [--strict|--lossy] [--errors <neverthrow|throw>] [--coverage <relative-file>]\n                                                Generate files (built-in: ts, openapi)\n      --strict                                 Reject unsupported/lossy coverage; opaque is allowed on ts/openapi, and on a plugin that declares it (default)\n      --lossy                                  Emit non-exact coverage with warnings\n      --errors <neverthrow|throw>              TypeScript target only: neverthrow (default), throw\n      --coverage <relative-file>               Write emitter coverage as JSON\n\nExit codes:\n  0  success, and a diff that found no breaking change\n  1  diff only: the new contract has a breaking change\n  2  the arguments are wrong\n  3  diff only: the new contract is invalid\n  4  the tool could not do its job: an unreadable or malformed document, a\n     check/fmt validation failure, or an emit failure\n";
 
 fn main() -> ExitCode {
     match run(env::args_os().skip(1).collect()) {
@@ -19,9 +19,13 @@ fn main() -> ExitCode {
             eprintln!("pons: {message}");
             ExitCode::from(2)
         }
-        Err(CliError::Failure(message)) => {
+        Err(CliError::Breaking(message)) => {
             eprintln!("pons: {message}");
             ExitCode::FAILURE
+        }
+        Err(CliError::Failure(message)) => {
+            eprintln!("pons: {message}");
+            ExitCode::from(4)
         }
         Err(CliError::Invalid(message)) => {
             eprintln!("pons: {message}");
@@ -62,11 +66,11 @@ fn run(args: Vec<OsString>) -> Result<(), CliError> {
             };
             println!("{level} {}: {}", change.path, change.detail);
         }
-        if let Err(message) = validation_errors(&new) {
-            return Err(CliError::Invalid(message));
+        if let Some(errors) = &diff.new_document_errors {
+            return Err(CliError::Invalid(errors.clone()));
         }
         return if diff.worst() == Some(ChangeLevel::Breaking) {
-            Err(CliError::Failure("breaking changes found".into()))
+            Err(CliError::Breaking("breaking changes found".into()))
         } else {
             Ok(())
         };
@@ -263,6 +267,7 @@ fn rewrite_canonical(path: &Path, document: &Document) -> Result<(), CliError> {
 #[derive(Debug)]
 enum CliError {
     Usage(String),
+    Breaking(String),
     Failure(String),
     Invalid(String),
 }

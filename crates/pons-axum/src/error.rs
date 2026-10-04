@@ -13,6 +13,8 @@ use crate::response::WithResponse;
 
 pub(crate) const REJECTED: u16 = 422;
 pub(crate) const REJECTED_NAME: [&str; 2] = ["request", "rejected"];
+pub(crate) const DEGRADED: u16 = 500;
+pub(crate) const DEGRADED_NAME: [&str; 3] = ["response", "header", "invalid"];
 
 #[derive(Debug, serde::Serialize, pons_core::Schema)]
 #[serde(deny_unknown_fields)]
@@ -84,6 +86,34 @@ impl IntoResponse for ViolationReport {
         WithResponse::<Self, JsonResponse<REJECTED>>::new(axum::Json(self).into_response())
             .into_response()
     }
+}
+
+pub(crate) fn degraded_error() -> ErrorResponse {
+    ErrorResponse {
+        status: ErrorStatus::Exact(DEGRADED),
+        name: DEGRADED_NAME.iter().map(|word| (*word).to_owned()).collect(),
+        content: ErrorContent::Empty,
+        media_type: None,
+        body: None,
+        headers: Vec::new(),
+        retryable: Some(false),
+        doc: Some(Doc {
+            summary: Some(
+                "A response header the handler builds from the request is not a header value, so the framework answers 500 with a plain text body this contract does not describe."
+                    .to_owned(),
+            ),
+            description: None,
+            deprecated: None,
+            tags: Vec::new(),
+        }),
+        ext: Default::default(),
+    }
+}
+
+pub(crate) fn enforces_declared_status<E>() -> bool {
+    let name = std::any::type_name::<E>();
+    name.starts_with("pons_axum::error::WithErrorHeader")
+        || name.starts_with("pons_axum::error::WithOptionalErrorHeader")
 }
 
 pub struct WithErrorHeader<S: HeaderSpec, E>(pub E, pub <S as HeaderSpec>::Value);
@@ -212,5 +242,36 @@ where
         ty: header_schema::<S::Value>(cx, Direction::Output, S::NAME),
         presence,
         ext: Default::default(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    struct TraceId;
+
+    impl HeaderSpec for TraceId {
+        type Value = String;
+        const NAME: &'static str = "X-Trace-ID";
+    }
+
+    #[derive(Debug, serde::Serialize, Schema, pons_core::ApiError)]
+    enum Conflict {
+        #[allow(dead_code)]
+        #[pons(status = 409)]
+        Conflict,
+    }
+
+    #[test]
+    fn only_the_wrappers_are_named_as_enforcing_their_error_status() {
+        assert!(enforces_declared_status::<WithErrorHeader<TraceId, Conflict>>());
+        assert!(enforces_declared_status::<
+            WithOptionalErrorHeader<TraceId, Conflict>,
+        >());
+        assert!(
+            !enforces_declared_status::<Conflict>(),
+            "a bare error type writes whatever status its IntoResponse writes"
+        );
     }
 }

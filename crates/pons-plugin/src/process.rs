@@ -21,7 +21,9 @@ pub struct PluginError(pub String);
 
 const PLUGIN_TIMEOUT: Duration = Duration::from_secs(30);
 const PLUGIN_POLL_INTERVAL: Duration = Duration::from_millis(10);
+const PLUGIN_DRAIN_GRACE: Duration = Duration::from_secs(1);
 const MAX_PLUGIN_OUTPUT_BYTES: usize = 16 * 1024 * 1024;
+const MAX_ERROR_LOG_BYTES: usize = 8 * 1024;
 
 impl std::fmt::Display for PluginError {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -87,7 +89,10 @@ pub fn invoke(
         .map(|warning| warning.0)
         .collect();
     if strict && !capability_warnings.is_empty() {
-        return Err(PluginError(capability_warnings.join("\n")));
+        return Err(with_emitter_log(
+            &capability_warnings.join("\n"),
+            &manifest_output.stderr,
+        ));
     }
 
     let mode = if strict {
@@ -112,8 +117,13 @@ pub fn invoke(
             executable.to_string_lossy()
         ))
     })?;
-    validate_response_for_document(&response, ir, mode, manifest.capabilities.opaque)
-        .map_err(PluginError)?;
+    validate_response_for_document(&response, ir, mode, manifest.capabilities.opaque).map_err(
+        |error| {
+            let mut stderr = manifest_output.stderr.clone();
+            stderr.extend(&output.stderr);
+            with_emitter_log(&error, &stderr)
+        },
+    )?;
     let mut logs = manifest_output.stderr;
     logs.extend(output.stderr);
     Ok(PluginResult {
@@ -227,29 +237,40 @@ fn run_command_with_limits(
             executable.to_string_lossy()
         ))
     })?;
-    if let Some(writer) = writer {
-        join_before(writer, deadline, executable, command_name, "stdin writer")?
-            .map_err(|error| PluginError(format!("cannot send request to emitter: {error}")))?;
+    let joined: Result<Output, PluginError> = (|| {
+        if let Some(writer) = writer
+            && let Err(error) =
+                join_before(writer, deadline, executable, command_name, "stdin writer")?
+            && error.kind() != std::io::ErrorKind::BrokenPipe
+        {
+            return Err(PluginError(format!(
+                "cannot send request to emitter: {error}"
+            )));
+        }
+        let stdout = join_before(
+            stdout_reader,
+            deadline,
+            executable,
+            command_name,
+            "stdout reader",
+        )??;
+        let stderr = join_before(
+            stderr_reader,
+            deadline,
+            executable,
+            command_name,
+            "stderr reader",
+        )??;
+        Ok(Output {
+            status,
+            stdout,
+            stderr,
+        })
+    })();
+    if joined.is_err() {
+        terminate(&mut child);
     }
-    let stdout = join_before(
-        stdout_reader,
-        deadline,
-        executable,
-        command_name,
-        "stdout reader",
-    )??;
-    let stderr = join_before(
-        stderr_reader,
-        deadline,
-        executable,
-        command_name,
-        "stderr reader",
-    )??;
-    Ok(Output {
-        status,
-        stdout,
-        stderr,
-    })
+    joined
 }
 
 fn read_output(mut pipe: impl Read, limit: usize) -> Result<Vec<u8>, PluginError> {
@@ -279,7 +300,7 @@ fn join_before<T>(
                 .join()
                 .map_err(|_| PluginError(format!("emitter {name} panicked")));
         }
-        if Instant::now() >= deadline {
+        if Instant::now() >= deadline + PLUGIN_DRAIN_GRACE {
             return Err(timeout_error(executable, command));
         }
         thread::sleep(PLUGIN_POLL_INTERVAL);
@@ -372,6 +393,25 @@ fn ensure_success(
             executable.to_string_lossy()
         )
     }))
+}
+
+fn with_emitter_log(error: &str, logs: &[u8]) -> PluginError {
+    let log = log_tail(String::from_utf8_lossy(logs).trim());
+    if log.is_empty() {
+        PluginError(error.to_owned())
+    } else {
+        PluginError(format!("{error}\nemitter log: {log}"))
+    }
+}
+
+fn log_tail(text: &str) -> String {
+    if text.len() <= MAX_ERROR_LOG_BYTES {
+        return text.to_owned();
+    }
+    let start = (text.len() - MAX_ERROR_LOG_BYTES..text.len())
+        .find(|index| text.is_char_boundary(*index))
+        .unwrap_or(0);
+    format!("...{}", &text[start..])
 }
 
 #[cfg(test)]
@@ -491,5 +531,103 @@ mod tests {
         )
         .unwrap_err();
         assert!(error.0.contains("output exceeded 16 bytes"));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn keeps_the_answer_of_a_target_that_stops_reading_its_stdin() {
+        let output = run_command_with_limits(
+            OsStr::new("sh"),
+            &["-c", r#"printf '{"protocol":2}'; exit 0"#],
+            Some(vec![b'x'; 1024 * 1024]),
+            Duration::from_secs(10),
+            MAX_PLUGIN_OUTPUT_BYTES,
+        )
+        .unwrap();
+        assert_eq!(output.stdout, br#"{"protocol":2}"#);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_reader_that_finishes_after_the_deadline_still_wins() {
+        let output = run_command_with_limits(
+            OsStr::new("sh"),
+            &[
+                "-c",
+                r#"setsid sh -c "sleep 0.3" & printf response; exit 0"#,
+            ],
+            None,
+            Duration::from_millis(50),
+            MAX_PLUGIN_OUTPUT_BYTES,
+        )
+        .unwrap();
+        assert_eq!(output.stdout, b"response");
+    }
+
+    #[cfg(target_os = "linux")]
+    fn stub_emitter(name: &str, script: &str) -> std::path::PathBuf {
+        use std::os::unix::fs::PermissionsExt;
+        use std::process;
+
+        let path = std::env::temp_dir().join(format!("pons-plugin-{name}-{}", process::id()));
+        std::fs::write(&path, script).unwrap();
+        let mut permissions = std::fs::metadata(&path).unwrap().permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(&path, permissions).unwrap();
+        path
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_refusing_emitter_gets_its_own_log_reported() {
+        let document: Document =
+            serde_json::from_str(include_str!("../../../fixtures/login.json")).unwrap();
+
+        let refusing = stub_emitter(
+            "refusing",
+            r#"#!/bin/sh
+printf '%s\n' 'cannot model preserved objects' >&2
+printf '%s' '{"name":"fixture","version":"1.0.0","protocol":{"min":"2.0","max":"2.0"},"ir_version":{"min":"0.2","max":"0.2"},"capabilities":{"streaming":["sse"],"enum_reprs":["string","external","internal","adjacent","untagged"],"direction_split":true,"provides":true,"flattened":true,"object_openness":["reject","preserve_typed","preserve_opaque"]}}'
+"#,
+        );
+        let error = invoke(
+            refusing.as_os_str(),
+            "fixture",
+            &document,
+            BTreeMap::new(),
+            true,
+        )
+        .unwrap_err();
+        assert!(error.0.contains("does not declare opaque value support"));
+        assert!(
+            error.0.contains("cannot model preserved objects"),
+            "{}",
+            error.0
+        );
+        let _ = std::fs::remove_file(&refusing);
+
+        let unclassified = stub_emitter(
+            "unclassified",
+            r#"#!/bin/sh
+if [ "$1" = describe ]; then
+  printf '%s' '{"name":"fixture","version":"1.0.0","protocol":{"min":"2.0","max":"2.0"},"ir_version":{"min":"0.2","max":"0.2"},"capabilities":{"streaming":["sse"],"enum_reprs":["string","external","internal","adjacent","untagged"],"direction_split":true,"provides":true,"flattened":true,"opaque":true,"object_openness":["reject","preserve_typed","preserve_opaque"]}}'
+  exit 0
+fi
+cat > /dev/null
+printf '%s\n' 'gave up on types.User' >&2
+printf '%s' '{"protocol":2,"files":[{"path":"client.ts","content":"generated"}],"coverage":{"exact":["types.EventQuery","types.LoginError"],"opaque":["operations.auth.login","operations.events.watch","types.LoginRequest"],"lossy":[],"unsupported":[]}}'
+"#,
+        );
+        let error = invoke(
+            unclassified.as_os_str(),
+            "fixture",
+            &document,
+            BTreeMap::new(),
+            true,
+        )
+        .unwrap_err();
+        assert!(error.0.contains("missing subjects"), "{}", error.0);
+        assert!(error.0.contains("gave up on types.User"), "{}", error.0);
+        let _ = std::fs::remove_file(&unclassified);
     }
 }

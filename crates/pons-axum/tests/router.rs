@@ -2,7 +2,7 @@ use axum::response::IntoResponse;
 use pons_axum::body::Bytes;
 use pons_axum::extract::{Multipart, State};
 use pons_axum::http::StatusCode;
-use pons_axum::routing::{delete, get, get_with, post, post_with};
+use pons_axum::routing::{delete, get, get_with, head, post, post_with};
 use pons_axum::{
     Auth, DescribeRequest, DocumentedLayer, Header, HeaderSpec, Ndjson, NoContent, OperationCx,
     OperationMeta, OptionalHeader, RawBytes, Router, SessionAuth, WithHeader, WithOptionalHeader,
@@ -234,6 +234,33 @@ async fn authenticated(auth: Auth<Provides>) -> axum::Json<User> {
     })
 }
 
+struct MaybeSession;
+
+impl<S: Send + Sync> pons_axum::extract::FromRequestParts<S> for MaybeSession {
+    type Rejection = std::convert::Infallible;
+
+    async fn from_request_parts(
+        _parts: &mut axum::http::request::Parts,
+        _: &S,
+    ) -> Result<Self, Self::Rejection> {
+        Ok(MaybeSession)
+    }
+}
+
+impl DescribeRequest for MaybeSession {
+    fn describe(cx: &mut OperationCx) {
+        cx.require_all(["session"]);
+        cx.optional_auth();
+    }
+}
+
+async fn maybe_session(_session: MaybeSession) -> axum::Json<User> {
+    axum::Json(User {
+        id: 1,
+        name: "Ada".into(),
+    })
+}
+
 async fn response_headers() -> WithStatus<201, WithHeader<TraceId, axum::Json<User>>> {
     WithStatus::new(WithHeader::new(
         axum::Json(User {
@@ -305,6 +332,50 @@ async fn created_user(
 ) -> Result<WithStatus<201, axum::Json<User>>, UserError> {
     let name = input.name;
     Ok(WithStatus::new(axum::Json(User { id: 1, name })))
+}
+
+struct VendorJson<T>(pub T);
+
+impl<T, S> axum::extract::FromRequest<S> for VendorJson<T>
+where
+    T: Schema + serde::de::DeserializeOwned,
+    S: Send + Sync,
+{
+    type Rejection = pons_axum::ViolationReport;
+
+    async fn from_request(
+        request: pons_axum::extract::Request,
+        state: &S,
+    ) -> Result<Self, Self::Rejection> {
+        pons_axum::Json::<T>::from_request(request, state)
+            .await
+            .map(|pons_axum::Json(input)| VendorJson(input))
+    }
+}
+
+impl<T: Schema> DescribeRequest for VendorJson<T> {
+    fn describe(cx: &mut OperationCx) {
+        cx.request_body_with_media::<T>(
+            ContentKind::Json,
+            Some("application/vnd.user+json".into()),
+        );
+        cx.mark_validated();
+    }
+}
+
+async fn create_vendor_json(VendorJson(input): VendorJson<CreateUser>) -> axum::Json<User> {
+    axum::Json(User {
+        id: 1,
+        name: input.name,
+    })
+}
+
+async fn get_limit_path(Path(limit): Path<u64>) -> axum::Json<User> {
+    let _ = limit;
+    axum::Json(User {
+        id: 1,
+        name: "Ada".into(),
+    })
 }
 
 async fn form_user(Form(input): Form<CreateUser>) -> axum::Json<User> {
@@ -468,6 +539,32 @@ fn get_status(app: &mut axum::Router<()>, path: &str, authorized: bool) -> Statu
     block_on(app.call(request)).unwrap().status()
 }
 
+fn content_length(app: &mut axum::Router<()>, method: &str, path: &str) -> String {
+    let request: pons_axum::extract::Request = pons_axum::http::Request::builder()
+        .method(method)
+        .uri(path)
+        .body(axum::body::Body::empty())
+        .unwrap();
+    let response = block_on(app.call(request)).unwrap();
+    response.headers()["content-length"]
+        .to_str()
+        .unwrap()
+        .to_owned()
+}
+
+fn post_json(app: &mut axum::Router<()>, path: &str, media_type: &str) -> (StatusCode, String) {
+    let request: pons_axum::extract::Request = pons_axum::http::Request::builder()
+        .method("POST")
+        .uri(path)
+        .header("content-type", media_type)
+        .body(axum::body::Body::from(r#"{"name":"Ada"}"#))
+        .unwrap();
+    let response = block_on(app.call(request)).unwrap();
+    let status = response.status();
+    let body = block_on(axum::body::to_bytes(response.into_body(), usize::MAX)).unwrap();
+    (status, String::from_utf8_lossy(&body).into_owned())
+}
+
 async fn raw_headers(_headers: pons_axum::http::HeaderMap) -> axum::Json<User> {
     axum::Json(User {
         id: 1,
@@ -482,6 +579,16 @@ async fn raw_response() -> axum::response::Response {
 async fn dynamic_status() -> (StatusCode, axum::Json<User>) {
     (
         StatusCode::CREATED,
+        axum::Json(User {
+            id: 1,
+            name: "Ada".into(),
+        }),
+    )
+}
+
+async fn teapot() -> (StatusCode, axum::Json<User>) {
+    (
+        StatusCode::IM_A_TEAPOT,
         axum::Json(User {
             id: 1,
             name: "Ada".into(),
@@ -832,7 +939,17 @@ fn dynamic_response_status_preserves_the_body_contract() {
         operation.responses[0].body,
         Some(TypeRef::Named(_))
     ));
-    assert!(operation.diagnostics.is_empty());
+    assert!(
+        operation
+            .diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code == "PONS-W101"
+                && diagnostic
+                    .message
+                    .contains("a (StatusCode, R) response publishes the unknown status")),
+        "{:?} must say that the catch-all status the handler writes is never checked",
+        operation.diagnostics
+    );
 
     let response = (
         StatusCode::CREATED,
@@ -843,6 +960,22 @@ fn dynamic_response_status_preserves_the_body_contract() {
     )
         .into_response();
     assert_eq!(response.status(), StatusCode::CREATED);
+}
+
+#[test]
+fn the_catch_all_status_is_published_and_says_nothing_about_the_status_served() {
+    let mut app = built(Router::<()>::new(info()).route("/teapot", get(teapot)));
+    let document = Router::<()>::new(info())
+        .route("/teapot", get(teapot))
+        .into_document()
+        .unwrap();
+    let operation = &document.operations[0];
+    assert_eq!(operation.responses[0].status, ResponseStatus::Unknown);
+    assert_eq!(
+        get_status(&mut app, "/teapot", false),
+        StatusCode::IM_A_TEAPOT,
+        "the handler writes the status itself, and the catch-all the document publishes never mentions it"
+    );
 }
 
 #[test]
@@ -934,6 +1067,34 @@ fn router_describes_raw_bytes_stream() {
     ));
     assert_eq!(operation.responses[0].content, ContentKind::Stream);
     assert!(operation.responses[0].body.is_none());
+}
+
+#[test]
+fn optional_auth_survives_a_router_that_says_nothing_about_auth() {
+    let document = Router::<AppState>::new(info())
+        .auth_scheme("session", AuthScheme::Bearer { format: None })
+        .route("/maybe", get(maybe_session))
+        .into_document()
+        .unwrap();
+    let operation = &document.operations[0];
+    assert_eq!(
+        operation.auth.alternatives,
+        vec![vec!["session".to_owned()]]
+    );
+    assert!(
+        operation.auth.optional,
+        "a router with no auth layer says nothing about auth, so it must not make the operation required"
+    );
+
+    let document = DocumentedLayer::new(axum::middleware::from_fn(noop_layer), SessionAuth)
+        .layer(Router::<AppState>::new(info()).route("/maybe", get(maybe_session)))
+        .auth_scheme("session", AuthScheme::Bearer { format: None })
+        .into_document()
+        .unwrap();
+    assert!(
+        !document.operations[0].auth.optional,
+        "a layer that requires a session overrides the operation that treats it as optional"
+    );
 }
 
 #[test]
@@ -1091,6 +1252,192 @@ fn a_wildcard_path_segment_is_refused_instead_of_claiming_a_plain_param() {
             .is_err(),
         "a route whose wildcard the IR cannot describe must not be published"
     );
+}
+
+fn literal(lit: &str) -> PathSegment {
+    PathSegment::Literal { lit: lit.into() }
+}
+
+#[test]
+fn a_trailing_slash_route_is_published_at_the_path_axum_serves() {
+    fn router() -> Router<()> {
+        Router::<()>::new(info()).route("/files/", post(create_vendor_json))
+    }
+    assert_eq!(
+        router().into_document().unwrap().operations[0].path,
+        vec![literal("files"), literal("")],
+        "axum serves /files and /files/ as two routes, so the published path keeps the empty segment"
+    );
+
+    let mut app = built(router());
+    let (status, body) = post_json(&mut app, "/files/", "application/vnd.user+json");
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "the media type the operation declares is the one the runtime enforces: {body}"
+    );
+    let (status, body) = post_json(&mut app, "/files/", "application/json");
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{body}");
+    assert_eq!(
+        post_json(&mut built(router()), "/files", "application/vnd.user+json").0,
+        StatusCode::NOT_FOUND,
+        "the route the document publishes is the one the server serves, and no other"
+    );
+}
+
+#[test]
+fn a_trailing_slash_route_and_its_bare_sibling_cannot_be_confused() {
+    fn router() -> Router<()> {
+        Router::<()>::new(info())
+            .route("/files", post(create_user))
+            .route("/files/", post(create_vendor_json))
+    }
+    let document = router().into_document().unwrap();
+    assert_eq!(document.operations[0].path, vec![literal("files")]);
+    assert_eq!(
+        document.operations[1].path,
+        vec![literal("files"), literal("")],
+        "two routes differ by a trailing slash, so they publish different paths"
+    );
+
+    let mut app = built(router());
+    assert_eq!(
+        post_json(&mut app, "/files", "application/json").0,
+        StatusCode::CREATED
+    );
+    assert_eq!(
+        post_json(&mut app, "/files/", "application/vnd.user+json").0,
+        StatusCode::OK
+    );
+    for (path, media_type) in [
+        ("/files", "application/vnd.user+json"),
+        ("/files/", "application/json"),
+    ] {
+        let (status, body) = post_json(&mut app, path, media_type);
+        assert_eq!(
+            status,
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "the runtime resolves {path} to its own operation, which refuses {media_type}: {body}"
+        );
+    }
+}
+
+#[test]
+fn an_interior_empty_segment_is_refused_instead_of_naming_another_route() {
+    let document = Router::<()>::new(info())
+        .route("/a//b", get(first_user))
+        .route("/a/b", get(second_user))
+        .document();
+    let interior = &document.operations[0];
+    assert_eq!(
+        interior.path,
+        vec![literal("a"), literal(""), literal("b")],
+        "the published path still names the route the server serves"
+    );
+    assert!(interior.diagnostics.iter().any(|diagnostic| {
+        diagnostic.code == "PONS-E102"
+            && diagnostic.severity == pons_ir::DiagnosticSeverity::Error
+            && diagnostic.message.contains("/a//b")
+            && diagnostic.message.contains("empty path segment")
+    }));
+    assert_eq!(
+        document.operations[1].path,
+        vec![literal("a"), literal("b")],
+        "the two routes publish different paths, so they cannot collapse onto one"
+    );
+    assert!(
+        Router::<()>::new(info())
+            .route("/a//b", get(first_user))
+            .into_document()
+            .is_err(),
+        "a route whose interior empty segment no published path names must not be published"
+    );
+}
+
+#[test]
+fn an_escaped_brace_segment_is_published_as_the_literal_axum_serves() {
+    fn router() -> Router<()> {
+        Router::<()>::new(info()).route("/{{literal}}/{limit}", get(get_limit_path))
+    }
+    let document = router().into_document().unwrap();
+    let operation = &document.operations[0];
+    assert_eq!(
+        operation.path[0],
+        literal("{literal}"),
+        "matchit unescapes the doubled braces to the static segment a client requests, so it is a literal and not a parameter"
+    );
+    let PathSegment::Param { param, ty } = &operation.path[1] else {
+        panic!("the second segment is a parameter: {:?}", operation.path);
+    };
+    assert_eq!(param, "limit");
+    assert!(
+        matches!(ty, TypeRef::Inline(InlineType::Int { bits: 64, .. })),
+        "the escaped literal is not a parameter, so the one Path extractor still names the one parameter: {ty:?}"
+    );
+    assert!(
+        !operation
+            .diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.message.contains("typed as strings"))
+    );
+
+    assert_eq!(
+        get_status(&mut built(router()), "/{literal}/7", false),
+        StatusCode::OK,
+        "the published path and the path the server serves are the same request"
+    );
+    assert_eq!(
+        get_status(&mut built(router()), "/{{literal}}/7", false),
+        StatusCode::NOT_FOUND
+    );
+}
+
+#[test]
+fn a_route_axum_also_answers_with_head_says_the_document_describes_only_get() {
+    fn head_diagnostic(document: &pons_ir::Document) -> Option<pons_ir::Diagnostic> {
+        document.operations.iter().find_map(|operation| {
+            operation
+                .diagnostics
+                .iter()
+                .find(|entry| entry.code == "PONS-W103")
+                .cloned()
+        })
+    }
+    let get_route = Router::<()>::new(info()).route("/probe", get(first_user));
+    let diagnostic =
+        head_diagnostic(&get_route.document()).expect("a get route is answered with HEAD");
+    assert_eq!(diagnostic.severity, pons_ir::DiagnosticSeverity::Warning);
+    assert!(
+        diagnostic.message.contains("HEAD") && diagnostic.message.contains("GET body"),
+        "the diagnostic names what a HEAD request is served: {}",
+        diagnostic.message
+    );
+
+    let mut app = built(get_route);
+    assert_eq!(
+        content_length(&mut app, "HEAD", "/probe"),
+        content_length(&mut app, "GET", "/probe"),
+        "axum measures the GET body it serves a HEAD request"
+    );
+
+    for document in [
+        Router::<()>::new(info())
+            .route("/probe", head(first_user))
+            .document(),
+        Router::<()>::new(info())
+            .route("/probe", get(first_user).head(second_user))
+            .document(),
+    ] {
+        assert!(
+            head_diagnostic(&document).is_none(),
+            "axum serves the head handler the document describes: {:?}",
+            document
+                .operations
+                .iter()
+                .map(|operation| (operation.method, operation.diagnostics.len()))
+                .collect::<Vec<_>>()
+        );
+    }
 }
 
 #[test]
@@ -1303,10 +1650,11 @@ fn router_describes_path_query_body_response_and_state() {
     assert_eq!(post.body.as_ref().unwrap().content, ContentKind::Json);
     assert_eq!(post.responses[0].status, ResponseStatus::Exact(201));
     assert!(
-        !post
-            .diagnostics
+        post.diagnostics
             .iter()
-            .any(|diagnostic| diagnostic.code == "PONS-W101")
+            .any(|diagnostic| diagnostic.code == "PONS-W101" && diagnostic.message.contains("413")),
+        "{:?} must say the framework rejects a request body it reads before the handler runs",
+        post.diagnostics
     );
     let response = WithStatus::<201, _>::new(axum::Json(User {
         id: 1,

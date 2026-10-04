@@ -1,11 +1,15 @@
+use axum::body::Body;
 use axum::response::IntoResponse;
-use pons_axum::http::StatusCode;
-use pons_axum::routing::post;
-use pons_axum::{HeaderSpec, Info, Router, WithErrorHeader, WithOptionalErrorHeader};
+use pons_axum::http::{Request, StatusCode};
+use pons_axum::routing::{get, post};
+use pons_axum::{HeaderSpec, Info, Query, Router, WithErrorHeader, WithHeader};
+use pons_axum::{WithOptionalErrorHeader, WithOptionalHeader};
 use pons_core::Schema;
-use pons_ir::{ContentKind, ErrorContent, Presence};
-use serde::Serialize;
+use pons_ir::{ContentKind, ErrorContent, ErrorStatus, Presence};
+use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
+use std::future::Future;
+use tower_service::Service;
 
 #[derive(Debug, Serialize, Schema)]
 struct User {
@@ -121,6 +125,46 @@ async fn optional_header()
     Err(optional_error())
 }
 
+#[derive(Debug, Serialize, Schema, pons_core::ApiError)]
+enum MissingError {
+    #[allow(dead_code)]
+    #[pons(status = 404)]
+    Missing,
+}
+
+impl IntoResponse for MissingError {
+    fn into_response(self) -> axum::response::Response {
+        StatusCode::CONFLICT.into_response()
+    }
+}
+
+async fn bare_error() -> Result<axum::Json<User>, MissingError> {
+    Err(MissingError::Missing)
+}
+
+async fn guarded_error() -> Result<axum::Json<User>, WithErrorHeader<TraceId, MissingError>> {
+    Err(WithErrorHeader::new(
+        MissingError::Missing,
+        "trace-1".into(),
+    ))
+}
+
+#[derive(Deserialize, Schema)]
+#[serde(deny_unknown_fields)]
+struct TraceQuery {
+    trace: String,
+}
+
+async fn traced(Query(query): Query<TraceQuery>) -> WithHeader<TraceId, axum::Json<User>> {
+    WithHeader::new(axum::Json(User { id: 1 }), query.trace)
+}
+
+async fn maybe_traced(
+    Query(query): Query<TraceQuery>,
+) -> WithOptionalHeader<TraceId, axum::Json<User>> {
+    WithOptionalHeader::new(axum::Json(User { id: 1 }), Some(query.trace))
+}
+
 fn info() -> Info {
     Info {
         title: "Users".into(),
@@ -129,6 +173,117 @@ fn info() -> Info {
         servers: Vec::new(),
         ext: BTreeMap::new(),
     }
+}
+
+fn block_on<F: Future>(future: F) -> F::Output {
+    struct ThreadWaker(std::thread::Thread);
+
+    impl std::task::Wake for ThreadWaker {
+        fn wake(self: std::sync::Arc<Self>) {
+            self.0.unpark();
+        }
+    }
+
+    let waker = std::task::Waker::from(std::sync::Arc::new(ThreadWaker(std::thread::current())));
+    let mut context = std::task::Context::from_waker(&waker);
+    let mut future = std::pin::pin!(future);
+    loop {
+        match future.as_mut().poll(&mut context) {
+            std::task::Poll::Ready(value) => return value,
+            std::task::Poll::Pending => std::thread::park(),
+        }
+    }
+}
+
+fn send(app: &mut axum::Router<()>, uri: &str) -> (StatusCode, String) {
+    let request: Request<Body> = Request::builder().uri(uri).body(Body::empty()).unwrap();
+    let response = block_on(app.call(request)).unwrap();
+    let status = response.status();
+    let bytes = block_on(axum::body::to_bytes(response.into_body(), usize::MAX)).unwrap();
+    (status, String::from_utf8(bytes.to_vec()).unwrap())
+}
+
+fn served_status(router: Router<()>, uri: &str) -> StatusCode {
+    let mut app = router
+        .into_axum()
+        .expect("the fixture router installs a document that validates");
+    send(&mut app, uri).0
+}
+
+fn router() -> Router<()> {
+    Router::<()>::new(info())
+        .route("/bare", get(bare_error))
+        .route("/guarded", get(guarded_error))
+        .route("/traced", get(traced))
+        .route("/maybe-traced", get(maybe_traced))
+}
+
+fn diagnostic<'a>(operation: &'a pons_ir::Operation, code: &str) -> Option<&'a str> {
+    operation
+        .diagnostics
+        .iter()
+        .find(|diagnostic| diagnostic.code == code)
+        .map(|diagnostic| diagnostic.message.as_str())
+}
+
+#[test]
+fn a_bare_result_says_the_error_status_it_declares_is_not_enforced() {
+    let document = router().into_document().unwrap();
+    let bare = &document.operations[0];
+    assert_eq!(bare.errors[0].status, ErrorStatus::Exact(404));
+
+    let served = served_status(router(), "/bare");
+    assert_eq!(
+        served,
+        StatusCode::CONFLICT,
+        "nothing rewrites the status a bare Result serves, so the document cannot claim 404 alone"
+    );
+    let message = diagnostic(bare, "PONS-W101")
+        .expect("a bare Result must say the statuses it declares are not enforced");
+    assert!(
+        message.contains("Exact(404)") && message.contains("WithErrorHeader"),
+        "{message} must name the status it declares and the wrapper that enforces it"
+    );
+
+    let guarded = &document.operations[1];
+    assert!(
+        diagnostic(guarded, "PONS-W101").is_none(),
+        "{:?} wraps the error, so nothing is left unenforced",
+        guarded.diagnostics
+    );
+    assert_eq!(
+        served_status(router(), "/guarded"),
+        StatusCode::NOT_FOUND,
+        "the wrapper serves the status its error type declares"
+    );
+}
+
+#[test]
+fn a_response_header_that_is_no_header_value_degrades_to_a_status_the_document_declares() {
+    let document = router().into_document().unwrap();
+    for (index, path) in [(2, "traced"), (3, "maybe-traced")] {
+        let operation = &document.operations[index];
+        let degraded = operation
+            .errors
+            .iter()
+            .find(|error| error.status == ErrorStatus::Exact(500))
+            .unwrap_or_else(|| panic!("/{path} declares a response header, so it can degrade"));
+        assert_eq!(degraded.content, ErrorContent::Empty);
+        assert!(degraded.body.is_none());
+    }
+
+    for path in ["/traced", "/maybe-traced"] {
+        let served = served_status(router(), &format!("{path}?trace=bad%0Avalue"));
+        assert_eq!(
+            served,
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "a value the handler read from the request that is not a header value degrades"
+        );
+    }
+    assert_eq!(
+        served_status(router(), "/traced?trace=trace-1"),
+        StatusCode::OK
+    );
 }
 
 #[test]

@@ -91,7 +91,7 @@ fn method(method: &axum::http::Method) -> Option<pons_ir::Method> {
 }
 
 fn path_matches(segments: &[pons_ir::PathSegment], path: &str) -> bool {
-    let mut parts = path.split('/').filter(|part| !part.is_empty());
+    let mut parts = path_segments(path).into_iter();
     segments
         .iter()
         .all(|segment| match (segment, parts.next()) {
@@ -100,6 +100,13 @@ fn path_matches(segments: &[pons_ir::PathSegment], path: &str) -> bool {
             _ => false,
         })
         && parts.next().is_none()
+}
+
+fn path_segments(path: &str) -> Vec<&str> {
+    match path.strip_prefix('/').unwrap_or(path) {
+        "" => Vec::new(),
+        rest => rest.split('/').collect(),
+    }
 }
 
 pub(crate) fn check(
@@ -576,8 +583,8 @@ mod tests {
         let assets = segments("assets/{id}");
         assert!(path_matches(&assets, "/assets/1"));
         assert!(
-            path_matches(&assets, "/assets/1/"),
-            "empty segments are none"
+            !path_matches(&assets, "/assets/1/"),
+            "an empty segment is a segment axum serves, so /assets/1/ is another route"
         );
         assert!(
             !path_matches(&assets, "/assets/1/raw"),
@@ -593,6 +600,13 @@ mod tests {
         let raw = segments("assets/{id}/raw");
         assert!(path_matches(&raw, "/assets/1/raw"));
         assert!(!path_matches(&raw, "/assets/1"));
+
+        let directory = segments("assets/");
+        assert!(path_matches(&directory, "/assets/"));
+        assert!(
+            !path_matches(&directory, "/assets"),
+            "/assets and /assets/ are two routes, and this one is the second"
+        );
     }
 
     #[test]

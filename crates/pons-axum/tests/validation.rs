@@ -3,7 +3,7 @@ use axum::http::StatusCode;
 use axum::response::IntoResponse;
 use pons_axum::extract::Multipart;
 use pons_axum::http::Request;
-use pons_axum::routing::{get, get_with, head, post, post_with};
+use pons_axum::routing::{get, get_with, head, head_with, post, post_with};
 use pons_axum::{
     Header, HeaderSpec, Info, Json, NoContent, OperationMeta, Router, WithErrorHeader,
 };
@@ -354,6 +354,10 @@ async fn head_count(Header(_header): Header<RetriesHeader>) -> NoContent {
     NoContent
 }
 
+async fn ping() -> NoContent {
+    NoContent
+}
+
 async fn unchecked_create_user(Json(_body): Json<CreateUser>) -> axum::Json<User> {
     axum::Json(User { id: 1 })
 }
@@ -395,6 +399,16 @@ async fn get_user(pons_axum::Path(path): pons_axum::Path<UserPath>) -> axum::Jso
 async fn create_form_user(pons_axum::Form(form): pons_axum::Form<SlugForm>) -> axum::Json<User> {
     let _ = form.slug.0;
     axum::Json(User { id: 1 })
+}
+
+async fn form_on_get(pons_axum::Form(form): pons_axum::Form<SlugForm>) -> axum::Json<User> {
+    axum::Json(User {
+        id: form.slug.0.len() as u64,
+    })
+}
+
+async fn raw_form_on_get(pons_axum::extract::RawForm(form): pons_axum::extract::RawForm) -> String {
+    String::from_utf8_lossy(&form).into_owned()
 }
 
 async fn retried(Header(retries): Header<RetriesHeader>) -> axum::Json<User> {
@@ -865,6 +879,115 @@ fn a_text_body_is_published_as_text_and_is_never_rejected() {
 }
 
 #[test]
+fn a_text_body_the_framework_reads_is_published_as_optional_and_says_what_it_rejects() {
+    let document = Router::<()>::new(info())
+        .route("/note", post(note))
+        .into_document()
+        .unwrap();
+    let text = operation(&document, "note");
+    assert!(
+        !text.body.as_ref().unwrap().required,
+        "a request with no body at all reaches the handler as an empty string"
+    );
+    let message = text
+        .diagnostics
+        .iter()
+        .find(|diagnostic| diagnostic.code == "PONS-W101")
+        .map(|diagnostic| diagnostic.message.as_str())
+        .expect("a body the framework reads earns the rejections it can answer");
+    assert!(
+        message.contains("400") && message.contains("413"),
+        "{message} must name the statuses the framework answers before the handler runs"
+    );
+
+    let mut app = built(Router::<()>::new(info()).route("/note", post(note)));
+    let empty: Request<Body> = Request::builder()
+        .method("POST")
+        .uri("/note")
+        .body(Body::empty())
+        .unwrap();
+    let (status, body) = send(&mut app, empty);
+    assert_eq!(status, StatusCode::OK, "{body}");
+
+    let undecodable: Request<Body> = Request::builder()
+        .method("POST")
+        .uri("/note")
+        .body(Body::from(&[0xff, 0xfe][..]))
+        .unwrap();
+    let (status, body) = send(&mut app, undecodable);
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+
+    let oversized: Request<Body> = Request::builder()
+        .method("POST")
+        .uri("/note")
+        .body(Body::from(vec![b'a'; 3_000_000]))
+        .unwrap();
+    let (status, body) = send(&mut app, oversized);
+    assert_eq!(status, StatusCode::PAYLOAD_TOO_LARGE, "{body}");
+}
+
+#[test]
+fn a_form_on_a_get_is_published_as_the_query_the_runtime_reads() {
+    let document = Router::<()>::new(info())
+        .route("/form", get(form_on_get))
+        .into_document()
+        .unwrap();
+    let operation = &document.operations[0];
+    assert!(
+        operation.body.is_none(),
+        "a form on a GET is read from the query, so the document publishes no request body"
+    );
+    let TypeRef::Named(form) = operation.query.as_ref().unwrap() else {
+        panic!("a typed form is published as a named type")
+    };
+    assert!(
+        form.id.ends_with("#form"),
+        "the runtime resolves the carrier the document publishes: {}",
+        form.id
+    );
+
+    let mut app = built(Router::<()>::new(info()).route("/form", get(form_on_get)));
+    let (status, body) = send(&mut app, get_request("/form?slug=ada-lovelace"));
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert!(
+        body.contains("\"id\":12"),
+        "{body} must be read from the query the document publishes"
+    );
+
+    let errors = refused(Router::<()>::new(info()).route("/raw-form", get(raw_form_on_get)));
+    assert!(
+        errors.contains("PONS-E102") && errors.contains("query"),
+        "{errors} must refuse a query this contract cannot publish opaquely"
+    );
+
+    let errors = refused(Router::<()>::new(info()).route(
+        "/head-form",
+        head_with(form_on_get, OperationMeta::new("head.form")),
+    ));
+    assert!(
+        errors.contains("PONS-E102") && errors.contains("HEAD"),
+        "{errors} must refuse a HEAD, where the two form extractors read different places"
+    );
+}
+
+#[test]
+fn a_multipart_body_on_a_get_is_refused_because_axum_answers_400_first() {
+    let errors = refused(Router::<()>::new(info()).route("/upload", get(upload)));
+    assert!(
+        errors.contains("PONS-E102") && errors.contains("boundary"),
+        "{errors} must name the boundary a GET request never carries"
+    );
+
+    let mut app = axum::Router::new().route("/upload", axum::routing::get(upload));
+    let (status, body) = send(&mut app, get_request("/upload"));
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert!(
+        body.contains("boundary"),
+        "{body} is the rejection the refusal names"
+    );
+}
+
+#[test]
 fn a_multipart_body_is_opaque_so_it_is_never_claimed_to_be_checked() {
     let document = router().into_document().unwrap();
     let upload = operation(&document, "upload");
@@ -1099,6 +1222,17 @@ impl ErrorSpec for ProblemRejection {
     }
 }
 
+fn assert_no_collision(operation: &Operation) {
+    assert!(
+        !operation
+            .diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code == "PONS-E102"),
+        "{:?} must report no disagreement with the common error",
+        operation.diagnostics
+    );
+}
+
 fn refused(router: Router<()>) -> String {
     let errors = router.into_document().unwrap_err();
     errors
@@ -1188,7 +1322,7 @@ fn an_inherited_violation_report_leaves_the_slot_to_the_common_error() {
         "{:?} must leave the inherited slot to the common report",
         inherited.errors
     );
-    assert!(inherited.diagnostics.is_empty());
+    assert_no_collision(inherited);
     assert!(document.diagnostics.is_empty());
 }
 
@@ -1206,6 +1340,43 @@ fn a_head_operation_declares_the_rejection_without_a_body() {
         );
         assert!(rejection.media_type.is_none());
     }
+}
+
+#[test]
+fn a_head_operation_does_not_inherit_a_common_error_that_carries_a_body() {
+    fn router() -> Router<()> {
+        Router::new(info())
+            .common_error::<CommonRejection>()
+            .route("/head", head_with(ping, OperationMeta::new("head.ping")))
+            .route("/get", get_with(ping, OperationMeta::new("get.ping")))
+    }
+    let document = router()
+        .into_document()
+        .expect("a common error that carries a body must not unpublish every HEAD route");
+    let head = operation(&document, "head");
+    assert!(
+        !head.errors_inherit,
+        "a HEAD response carries no body, so it inherits no error that spells one"
+    );
+    assert!(
+        head.diagnostics.iter().any(|diagnostic| {
+            diagnostic.code == "PONS-W101" && diagnostic.message.contains("common error")
+        }),
+        "{:?} must say which common error it does not inherit",
+        head.diagnostics
+    );
+    let get = operation(&document, "get");
+    assert!(
+        get.errors_inherit,
+        "a GET answers the common error that carries a body"
+    );
+    assert!(
+        !get.diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.message.contains("common error")),
+        "{:?} inherits the common error, so it cannot say it does not",
+        get.diagnostics
+    );
 }
 
 #[test]
@@ -1741,7 +1912,7 @@ fn a_common_error_range_that_answers_the_rejection_the_same_way_leaves_the_slot_
         "{:?} must leave the inherited slot to the common error",
         ranged.errors
     );
-    assert!(ranged.diagnostics.is_empty());
+    assert_no_collision(ranged);
     assert_eq!(document.common_errors[0].status, ErrorStatus::Class(4));
 }
 
@@ -1778,7 +1949,7 @@ fn a_common_error_that_spells_the_media_type_the_rejection_answers_with_owns_the
         "{:?} must leave the slot to the common error that answers the same media type",
         loud.errors
     );
-    assert!(loud.diagnostics.is_empty());
+    assert_no_collision(loud);
 }
 
 #[test]

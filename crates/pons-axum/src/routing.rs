@@ -9,6 +9,10 @@ use crate::OperationCx;
 use crate::handler::DescribeHandler;
 use crate::metadata::OperationMeta;
 use crate::operation::RouteDescription;
+use crate::operation_cx::push_diagnostic;
+
+const HEAD_OVER_GET: &str = "PONS-W103";
+const HEAD_OVER_GET_TEXT: &str = "axum also answers this route with HEAD, serving the GET body a document describing only the declared method does not describe";
 
 pub struct MethodRoute<S = ()> {
     pub(crate) inner: MethodRouter<S, Infallible>,
@@ -35,6 +39,15 @@ where
         self.inner = self.inner.head(handler);
         self.descriptions
             .push(describe_handler::<H, T, S>(Method::Head));
+        if let Some(get) = self
+            .descriptions
+            .first_mut()
+            .filter(|description| description.method == Method::Get)
+        {
+            get.cx
+                .diagnostics
+                .retain(|entry| entry.code != HEAD_OVER_GET);
+        }
         self
     }
 
@@ -145,6 +158,9 @@ where
 {
     let mut cx = OperationCx::default();
     <H as DescribeHandler<T, S>>::describe(&mut cx);
+    if method == Method::Get {
+        push_diagnostic(&mut cx.diagnostics, HEAD_OVER_GET, HEAD_OVER_GET_TEXT);
+    }
     RouteDescription {
         method,
         id: handler_id::<H>(),

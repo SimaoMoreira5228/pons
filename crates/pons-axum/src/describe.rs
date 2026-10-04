@@ -482,13 +482,13 @@ impl DescribeRequest for axum::http::HeaderMap {
 
 impl DescribeRequest for String {
     fn describe(cx: &mut OperationCx) {
-        cx.request_body::<String>(ContentKind::Text);
+        cx.optional_request_body::<String>(ContentKind::Text);
     }
 }
 
 impl DescribeRequest for axum::body::Bytes {
     fn describe(cx: &mut OperationCx) {
-        cx.request_body::<ByteArray>(ContentKind::Bytes);
+        cx.optional_request_body::<ByteArray>(ContentKind::Bytes);
     }
 }
 
@@ -511,6 +511,10 @@ where
         for response in &mut cx.responses[start..] {
             response.status = ResponseStatus::Unknown;
         }
+        cx.diagnostic(
+            "PONS-W101",
+            "a (StatusCode, R) response publishes the unknown status, a catch-all the status the handler writes is never checked against; wrap the body in WithResponse to publish a status the framework writes itself",
+        );
     }
 }
 
@@ -539,7 +543,21 @@ where
 {
     fn describe(cx: &mut OperationCx) {
         R::describe(cx);
-        cx.errors.extend(E::errors(&mut cx.types));
+        let errors = E::errors(&mut cx.types);
+        if !crate::error::enforces_declared_status::<E>() {
+            let statuses = errors
+                .iter()
+                .map(|error| format!("{:?}", error.status))
+                .collect::<Vec<_>>()
+                .join(", ");
+            cx.diagnostic(
+                "PONS-W101",
+                format!(
+                    "a bare Result declares the error statuses it names ({statuses}) but nothing enforces them at runtime; wrap the error in WithErrorHeader to serve only a status its error type declares"
+                ),
+            );
+        }
+        cx.errors.extend(errors);
     }
 }
 

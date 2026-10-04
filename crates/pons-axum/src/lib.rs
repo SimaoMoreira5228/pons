@@ -35,8 +35,8 @@ pub use ndjson::Ndjson;
 use operation::build;
 pub use pons_ir::Info;
 use pons_ir::{
-    AuthRequirement, AuthScheme, Diagnostic, Document, ErrorContent, ErrorResponse, ResponseHeader,
-    TypeDef, TypeKind, TypeRef, ValidationError,
+    AuthRequirement, AuthScheme, ContentKind, Diagnostic, Document, ErrorContent, ErrorResponse,
+    Method, ResponseHeader, TypeDef, TypeKind, TypeRef, ValidationError,
 };
 pub use raw_bytes::RawBytes;
 pub use request::{Form, Json, Path, Query};
@@ -82,7 +82,8 @@ where
     pub fn route(mut self, path: &str, route: MethodRoute<S>) -> Self {
         self.inner = self.inner.route(path, route.inner);
         for description in route.descriptions {
-            let built = build(path, description);
+            let mut built = build(path, description);
+            declare_runtime_gaps(&mut built.operation);
             self.types.extend(built.types);
             self.carriers.extend(built.carriers);
             self.operations.push(built.operation);
@@ -305,6 +306,15 @@ fn reuse_inherited_slots(common: &[ErrorResponse], operations: &mut [pons_ir::Op
         return;
     }
     for operation in operations {
+        if operation.method == Method::Head && common.iter().any(|error| error.body.is_some()) {
+            operation.errors_inherit = false;
+            operation_cx::push_diagnostic(
+                &mut operation.diagnostics,
+                "PONS-W101",
+                "a HEAD response carries no body, so a common error that carries one is not inherited by a HEAD operation",
+            );
+            continue;
+        }
         let mut collisions = Vec::new();
         operation.errors.retain(|error| {
             if error.name != crate::error::REJECTED_NAME {
@@ -422,6 +432,78 @@ fn same_headers(inherited: &[ResponseHeader], declared: &[ResponseHeader]) -> bo
                     && left.ext == right.ext
             })
         })
+}
+
+fn declare_runtime_gaps(operation: &mut pons_ir::Operation) {
+    resolve_request_body(operation);
+    declare_degraded_header(operation);
+}
+
+fn resolve_request_body(operation: &mut pons_ir::Operation) {
+    let Some(body) = &operation.body else {
+        return;
+    };
+    match (operation.method, body.content) {
+        (Method::Get, ContentKind::Form) if matches!(body.ty, TypeRef::Named(_)) => {
+            let form = operation
+                .body
+                .take()
+                .expect("the operation publishes a body");
+            if operation.query.replace(form.ty).is_some() {
+                operation_cx::push_diagnostic(
+                    &mut operation.diagnostics,
+                    "PONS-W101",
+                    "a form on a GET is read from the query, which the operation already publishes a type for",
+                );
+            }
+        }
+        (Method::Get, ContentKind::Form) => operation_cx::push_diagnostic(
+            &mut operation.diagnostics,
+            "PONS-E102",
+            "a raw form on a GET is read from the query, which this contract can only publish as typed fields; use a typed form",
+        ),
+        (Method::Head, ContentKind::Form) => operation_cx::push_diagnostic(
+            &mut operation.diagnostics,
+            "PONS-E102",
+            "a form on a HEAD is read from the query by Form and from the request body by RawForm, so the document cannot say which; read the query with Query instead",
+        ),
+        (Method::Get | Method::Head, ContentKind::Multipart) => operation_cx::push_diagnostic(
+            &mut operation.diagnostics,
+            "PONS-E102",
+            "a multipart body is read from a request body, and the client of a GET or HEAD operation sends none, so axum answers 400 for the boundary it never receives; the operation cannot be published",
+        ),
+        _ => operation_cx::push_diagnostic(
+            &mut operation.diagnostics,
+            "PONS-W101",
+            "the framework answers a request body it cannot read as 400 and a body over the limit as 413, before the handler runs; neither status is declared",
+        ),
+    }
+}
+
+fn declare_degraded_header(operation: &mut pons_ir::Operation) {
+    let header_wrapped = operation
+        .responses
+        .iter()
+        .any(|response| !response.headers.is_empty());
+    if header_wrapped && !declares_status(operation, crate::error::DEGRADED) {
+        operation.errors.push(crate::error::degraded_error());
+    }
+}
+
+fn declares_status(operation: &pons_ir::Operation, status: u16) -> bool {
+    let exact = pons_ir::ErrorStatus::Exact(status);
+    operation
+        .errors
+        .iter()
+        .any(|error| error.status.covers(&exact))
+        || operation
+            .responses
+            .iter()
+            .any(|response| match response.status {
+                pons_ir::ResponseStatus::Exact(published) => published == status,
+                pons_ir::ResponseStatus::Class(class) => u16::from(class) == status / 100,
+                pons_ir::ResponseStatus::Default | pons_ir::ResponseStatus::Unknown => true,
+            })
 }
 
 #[macro_export]

@@ -267,6 +267,162 @@ fn an_invalid_side_is_reported_once() {
 }
 
 #[test]
+fn a_required_read_only_field_is_breaking_only_where_a_client_must_send_it() {
+    let field = serde_json::json!({
+        "wire": "since",
+        "ident": ["since"],
+        "ty": {"kind": "string"},
+        "presence": "required",
+        "access": "read_only"
+    });
+
+    let mut bidirectional = fixture();
+    bidirectional["types"]["User"]["direction"] = serde_json::json!("both");
+    let old: Document = serde_json::from_value(bidirectional).unwrap();
+    let mut changed = serde_json::to_value(&old).unwrap();
+    changed["types"]["User"]["fields"]
+        .as_array_mut()
+        .unwrap()
+        .push(field.clone());
+    let new: Document = serde_json::from_value(changed).unwrap();
+    new.validate().unwrap();
+    assert_eq!(
+        change_at(&old, &new, "types.User.fields.since").level,
+        ChangeLevel::Breaking
+    );
+
+    let old: Document = serde_json::from_value(fixture()).unwrap();
+    let mut changed = fixture();
+    changed["types"]["LoginRequest"]["fields"]
+        .as_array_mut()
+        .unwrap()
+        .push(field);
+    let new: Document = serde_json::from_value(changed).unwrap();
+    new.validate().unwrap();
+    let change = change_at(&old, &new, "types.LoginRequest.fields.since");
+    assert_eq!(change.level, ChangeLevel::NonBreaking);
+    assert_eq!(change.detail, "field added");
+    assert!(!old.diff(&new).has_breaking_changes());
+}
+
+#[test]
+fn an_added_error_diagnostic_is_reported_once() {
+    let old: Document = serde_json::from_value(fixture()).unwrap();
+    let mut changed = fixture();
+    changed["types"]["User"]["diagnostics"] = serde_json::json!([
+        {"severity": "error", "code": "type.x", "message": "first"},
+        {"severity": "error", "code": "type.x", "message": "second"},
+    ]);
+    let new: Document = serde_json::from_value(changed).unwrap();
+    assert!(new.validate().is_err());
+
+    let diff = old.diff(&new);
+    assert_eq!(diff.changes.len(), 1, "{:#?}", diff.changes);
+    let change = &diff.changes[0];
+    assert_eq!(change.path, "document");
+    assert_eq!(change.level, ChangeLevel::Breaking);
+    assert!(change.detail.starts_with("the new document is invalid: "));
+    assert!(change.detail.contains("error diagnostic type.x: first"));
+    assert!(change.detail.contains("error diagnostic type.x: second"));
+}
+
+#[test]
+fn two_invalid_documents_are_reported_by_both_sides() {
+    let mut contradicted = fixture();
+    contradicted["types"]["User"]["fields"][1]["default"] = serde_json::json!(7);
+    let old: Document = serde_json::from_value(contradicted).unwrap();
+    let mut also_broken = serde_json::to_value(&old).unwrap();
+    also_broken["info"]["title"] = "Renamed".into();
+    also_broken["auth_schemes"]["broken"] = serde_json::json!({
+        "kind": "api_key",
+        "in": "query",
+        "name": ""
+    });
+    let new: Document = serde_json::from_value(also_broken).unwrap();
+    assert!(old.validate().is_err());
+    assert!(new.validate().is_err());
+
+    let diff = old.diff(&new);
+    let change = change_at(&old, &new, "document");
+    assert_eq!(change.level, ChangeLevel::Warning);
+    assert!(change.detail.starts_with("both documents are invalid: "));
+    assert!(change.detail.contains("contradicts its type"));
+    assert!(change.detail.contains("carrier names cannot be empty"));
+    assert_eq!(diff.worst(), Some(ChangeLevel::Warning));
+    let errors = diff.new_document_errors.as_deref().unwrap();
+    assert!(errors.contains("carrier names cannot be empty"), "{errors}");
+}
+
+fn set_diagnostics(diagnostics: &mut Vec<Diagnostic>, severity: Option<DiagnosticSeverity>) {
+    diagnostics.clear();
+    diagnostics.extend(severity.map(|severity| Diagnostic {
+        severity,
+        code: "type.x".into(),
+        message: "unresolved".into(),
+        origin: None,
+        ext: BTreeMap::new(),
+    }));
+}
+
+type DiagnosticSite = (&'static str, fn(&mut Document, Option<DiagnosticSeverity>));
+
+#[test]
+fn diagnostic_changes_are_reported_at_their_own_site() {
+    let old: Document = serde_json::from_value(fixture()).unwrap();
+    let carriers: [DiagnosticSite; 3] = [
+        ("types.User", |document, severity| {
+            set_diagnostics(
+                &mut document.types.get_mut("User").unwrap().diagnostics,
+                severity,
+            )
+        }),
+        ("operations.auth.login", |document, severity| {
+            set_diagnostics(&mut document.operations[0].diagnostics, severity)
+        }),
+        ("document.diagnostics", |document, severity| {
+            set_diagnostics(&mut document.diagnostics, severity)
+        }),
+    ];
+
+    for (path, site) in carriers {
+        let mut warned = old.clone();
+        site(&mut warned, Some(DiagnosticSeverity::Warning));
+        let mut escalated = warned.clone();
+        site(&mut escalated, Some(DiagnosticSeverity::Error));
+
+        let change = change_at(&warned, &escalated, path);
+        assert_eq!(
+            (change.level, change.detail.as_str()),
+            (
+                ChangeLevel::Breaking,
+                "error diagnostic severity escalated: type.x"
+            ),
+            "{path}"
+        );
+
+        let change = change_at(&escalated, &warned, path);
+        assert_eq!(
+            (change.level, change.detail.as_str()),
+            (
+                ChangeLevel::NonBreaking,
+                "error diagnostic severity lowered: type.x"
+            ),
+            "{path}"
+        );
+
+        let mut repaired = escalated.clone();
+        site(&mut repaired, None);
+        let change = change_at(&escalated, &repaired, path);
+        assert_eq!(
+            (change.level, change.detail.as_str()),
+            (ChangeLevel::NonBreaking, "error diagnostic removed: type.x"),
+            "{path}"
+        );
+        assert!(!escalated.diff(&repaired).has_breaking_changes(), "{path}");
+    }
+}
+
+#[test]
 fn type_field_and_variant_documentation_is_compared() {
     let old: Document = serde_json::from_value(fixture()).unwrap();
     let mut deprecated = fixture();
@@ -306,11 +462,6 @@ fn type_field_and_variant_documentation_is_compared() {
 fn added_error_diagnostics_are_reported() {
     let old: Document = serde_json::from_value(fixture()).unwrap();
     let mut changed = fixture();
-    changed["types"]["User"]["diagnostics"] = serde_json::json!([{
-        "severity": "error",
-        "code": "type.x",
-        "message": "unresolved"
-    }]);
     changed["types"]["User"]["fields"][0]["diagnostics"] = serde_json::json!([{
         "severity": "error",
         "code": "field.x",
@@ -325,20 +476,20 @@ fn added_error_diagnostics_are_reported() {
     assert!(new.validate().is_err());
 
     let diff = old.diff(&new);
-    assert_eq!(diff.worst(), Some(ChangeLevel::Breaking));
-    for (path, code) in [
-        ("types.User", "type.x"),
-        ("types.User.fields.id", "field.x"),
-        ("types.LoginError.variants.invalid", "variant.x"),
-    ] {
-        let change = diff
-            .changes
-            .iter()
-            .find(|change| change.path == path)
-            .unwrap_or_else(|| panic!("no change reported at {path}"));
-        assert_eq!(change.level, ChangeLevel::Breaking);
-        assert_eq!(change.detail, format!("error diagnostic added: {code}"));
-    }
+    assert_eq!(diff.changes.len(), 1, "{:#?}", diff.changes);
+    let change = &diff.changes[0];
+    assert_eq!(change.path, "document");
+    assert_eq!(change.level, ChangeLevel::Breaking);
+    assert!(
+        change
+            .detail
+            .contains("error diagnostic field.x: unresolved")
+    );
+    assert!(
+        change
+            .detail
+            .contains("error diagnostic variant.x: unresolved")
+    );
 }
 
 #[test]
@@ -502,6 +653,39 @@ fn non_event_stream_kinds_keep_their_own_paths() {
 }
 
 #[test]
+fn an_unchanged_stream_of_every_kind_has_no_diff() {
+    let sse: Document = serde_json::from_value(fixture()).unwrap();
+    let reskinned = |kind: crate::StreamKind| {
+        let mut document = sse.clone();
+        document.operations[1].stream.as_mut().unwrap().kind = kind;
+        document.validate().unwrap();
+        document
+    };
+
+    for document in [
+        sse.clone(),
+        reskinned(crate::StreamKind::Ndjson {
+            item: TypeRef::Named(crate::NamedRef {
+                id: "User".into(),
+                variant: None,
+            }),
+        }),
+        reskinned(crate::StreamKind::Bytes {
+            content_type: "application/octet-stream".into(),
+        }),
+        reskinned(crate::StreamKind::Websocket {
+            client: TypeRef::Inline(InlineType::Bool),
+            server: TypeRef::Named(crate::NamedRef {
+                id: "User".into(),
+                variant: None,
+            }),
+        }),
+    ] {
+        assert_eq!(document.diff(&document), Diff::default());
+    }
+}
+
+#[test]
 fn error_change_paths_are_injective() {
     let old: Document = serde_json::from_value(fixture()).unwrap();
 
@@ -551,6 +735,109 @@ fn error_change_paths_are_injective() {
             "operations.auth.login.errors.login_error".to_owned(),
         ]
     );
+}
+
+#[test]
+fn change_paths_stay_unique_across_the_lists_that_carry_them() {
+    let record = |id: &str, wires: &[&str]| {
+        serde_json::from_value(serde_json::json!({
+            "kind": "struct",
+            "name": [id],
+            "direction": "output",
+            "openness": "reject",
+            "fields": wires.iter().map(|wire| serde_json::json!({
+                "wire": wire,
+                "ident": [wire],
+                "ty": {"kind": "string"},
+                "presence": "optional"
+            })).collect::<Vec<_>>()
+        }))
+        .unwrap()
+    };
+
+    let mut old: Document = serde_json::from_value(fixture()).unwrap();
+    old.types
+        .insert("A".into(), record("A", &["x", "B.fields.c"]));
+    old.types
+        .insert("A.fields.B".into(), record("A_fields_B", &["x", "c"]));
+    old.operations[0].errors[0].name = vec!["x".into()];
+    let mut nested = old.operations[0].clone();
+    nested.id = vec![
+        vec!["auth".into()],
+        vec!["login".into()],
+        vec!["errors".into()],
+        vec!["x".into()],
+    ];
+    nested.path = vec![
+        crate::PathSegment::Literal {
+            lit: "errors".into(),
+        },
+        crate::PathSegment::Param {
+            param: "x".into(),
+            ty: TypeRef::Inline(InlineType::Bool),
+        },
+    ];
+    old.operations.push(nested);
+    for id in ["a", "a.flows"] {
+        old.auth_schemes.insert(
+            id.into(),
+            AuthScheme::OAuth2 {
+                flows: vec![OAuthFlow {
+                    kind: crate::OAuthFlowKind::Password,
+                    authorization_url: None,
+                    token_url: Some("https://identity.example.test/token".into()),
+                    scopes: BTreeMap::new(),
+                    ext: BTreeMap::new(),
+                }],
+            },
+        );
+    }
+    old.validate().unwrap();
+
+    let mut new = old.clone();
+    for (id, wire) in [("A", "B.fields.c"), ("A.fields.B", "c")] {
+        let TypeKind::Struct { fields, .. } = &mut new.types.get_mut(id).unwrap().definition else {
+            unreachable!()
+        };
+        fields.retain(|field| field.wire != wire);
+    }
+    new.operations[0].errors.clear();
+    new.operations.pop();
+    for id in ["a", "a.flows"] {
+        let AuthScheme::OAuth2 { flows } = new.auth_schemes.get_mut(id).unwrap() else {
+            unreachable!()
+        };
+        flows[0].token_url = Some("https://identity.example.test/v2/token".into());
+    }
+    new.validate().unwrap();
+
+    let changes = old.diff(&new).changes;
+    let mut paths = changes
+        .iter()
+        .map(|change| change.path.as_str())
+        .collect::<Vec<_>>();
+    let count = paths.len();
+    paths.sort_unstable();
+    paths.dedup();
+    assert_eq!(paths.len(), count, "{changes:#?}");
+    for (path, detail) in [
+        ("types.A.fields.B.fields.c", "field removed"),
+        ("types.A%2Efields%2EB.fields.c", "field removed"),
+        ("operations.auth.login.errors.x", "operation removed"),
+        ("operations.auth.login.errors.4xx.x", "error removed"),
+        ("auth_schemes.a.flows.Password", "OAuth2 token URL changed"),
+        (
+            "auth_schemes.a%2Eflows.flows.Password",
+            "OAuth2 token URL changed",
+        ),
+    ] {
+        assert!(
+            changes
+                .iter()
+                .any(|change| change.path == path && change.detail == detail),
+            "no {detail:?} reported at {path} in {changes:#?}"
+        );
+    }
 }
 
 #[test]

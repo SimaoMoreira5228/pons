@@ -235,6 +235,55 @@ fn diff_passes_a_warning_only_change() {
 }
 
 #[test]
+fn diff_reports_two_invalid_contracts_with_its_own_exit_code() {
+    let directory = tempfile::tempdir().unwrap();
+    let old = directory.path().join("old.json");
+    let new = directory.path().join("new.json");
+    let mut input: Value = serde_json::from_str(FIXTURE).unwrap();
+    input["types"]["User"]["fields"][1]["default"] = serde_json::json!(7);
+    fs::write(&old, serde_json::to_vec(&input).unwrap()).unwrap();
+    input["info"]["title"] = serde_json::json!("Renamed");
+    fs::write(&new, serde_json::to_vec(&input).unwrap()).unwrap();
+
+    let output = pons().arg("diff").arg(&old).arg(&new).output().unwrap();
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert_eq!(output.status.code(), Some(3), "{stdout}");
+    assert!(
+        stdout.contains("WARNING document: both documents are invalid: "),
+        "{stdout}"
+    );
+    assert!(stdout.contains("the previous document: "), "{stdout}");
+    assert!(stdout.contains("the new document: "), "{stdout}");
+    assert!(!stdout.contains("BREAKING"), "{stdout}");
+}
+
+#[test]
+fn diff_reports_an_unreadable_contract_with_its_own_exit_code() {
+    let directory = tempfile::tempdir().unwrap();
+    let old = directory.path().join("a.json");
+    fs::write(&old, FIXTURE).unwrap();
+    let typo = directory.path().join("typo.json");
+
+    let output = pons().arg("diff").arg(&old).arg(&typo).output().unwrap();
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(output.status.code(), Some(4), "{stderr}");
+    assert!(stderr.contains("cannot read"), "{stderr}");
+    assert!(stderr.contains("typo.json"), "{stderr}");
+    assert_eq!(String::from_utf8_lossy(&output.stdout), "");
+}
+
+#[test]
+fn help_documents_every_exit_code() {
+    let output = pons().arg("--help").output().unwrap();
+    let help = String::from_utf8_lossy(&output.stdout);
+    for line in ["0  ", "1  ", "2  ", "3  ", "4  "] {
+        assert!(help.contains(line), "{line} missing from the help");
+    }
+    assert!(help.contains("breaking"), "{help}");
+    assert!(help.contains("unreadable"), "{help}");
+}
+
+#[test]
 fn emit_writes_a_typed_typescript_client() {
     let directory = tempfile::tempdir().unwrap();
     let output_dir = directory.path().join("generated");
@@ -735,6 +784,7 @@ elif [ "$1" = emit ]; then
   printf '%s' "$request" > "$PONS_REQUEST"
   printf '%s\n' 'plugin log' >&2
   case "$request" in
+    *'"bits":64,"signed":false,"wire":"number"'*'"target":"fixture"'*) printf '%s' '{"protocol":2,"files":[{"path":"nested/client.ts","content":"generated"}],"coverage":{"exact":["types.EventQuery","types.LoginError"],"opaque":[],"lossy":["operations.auth.login","operations.events.watch","types.LoginRequest","types.User"],"unsupported":[]}}' ;;
     *'"target":"fixture"'*) printf '%s' '{"protocol":2,"files":[{"path":"nested/client.ts","content":"generated"}],"coverage":{"exact":["types.EventQuery","types.LoginError"],"opaque":["operations.auth.login","operations.events.watch","types.LoginRequest","types.User"],"lossy":[],"unsupported":[]}}' ;;
     *) exit 3 ;;
   esac

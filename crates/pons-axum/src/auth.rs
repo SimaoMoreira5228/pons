@@ -94,7 +94,9 @@ pub(crate) fn merge_auth_requirements(target: &mut AuthRequirement, source: &Aut
             }
         }
     }
-    target.optional &= source.optional;
+    if says_something(source) {
+        target.optional &= source.optional;
+    }
     let combined: Vec<BTreeSet<String>> = match (
         target.alternatives.is_empty(),
         source.alternatives.is_empty(),
@@ -117,6 +119,10 @@ pub(crate) fn merge_auth_requirements(target: &mut AuthRequirement, source: &Aut
 
 fn as_set(schemes: &[String]) -> BTreeSet<String> {
     schemes.iter().cloned().collect()
+}
+
+fn says_something(source: &AuthRequirement) -> bool {
+    !source.alternatives.is_empty() || !source.scopes.is_empty() || source.optional
 }
 
 fn canonical_alternatives(alternatives: Vec<BTreeSet<String>>) -> Vec<Vec<String>> {
@@ -331,5 +337,12 @@ mod tests {
         let mut empty = AuthRequirement::default();
         merge_auth_requirements(&mut empty, &requirement(&[&["session"]], false));
         assert_eq!(empty.alternatives, vec![vec!["session".to_owned()]]);
+
+        let mut optional = requirement(&[&["session"]], true);
+        merge_auth_requirements(&mut optional, &AuthRequirement::default());
+        assert!(
+            optional.optional,
+            "a requirement that names no scheme, no scope, and no optionality says nothing about optional auth"
+        );
     }
 }
