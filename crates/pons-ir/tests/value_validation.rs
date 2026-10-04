@@ -604,7 +604,9 @@ fn openness_policies_govern_extra_properties() {
             "name": ["typed"],
             "direction": "both",
             "openness": {"preserve_typed": {"value": {"ref": "Counts"}}},
-            "fields": [id.clone()],
+            "fields": [json!({
+                "wire": "id", "ident": ["id"], "ty": count, "presence": "required"
+            })],
         },
         "Closed": {
             "kind": "struct",
@@ -619,17 +621,13 @@ fn openness_policies_govern_extra_properties() {
         &named("Opaque"),
         json!({"id": "7", "extra": {"any": true}}),
     );
-    checked(
-        types.clone(),
-        &named("Typed"),
-        json!({"id": "7", "hits": 3}),
-    );
+    checked(types.clone(), &named("Typed"), json!({"id": 3, "hits": 3}));
     assert_eq!(
         messages(violations(
             types.clone(),
             &named("Typed"),
             Direction::Both,
-            json!({"id": "7", "hits": 300})
+            json!({"id": 3, "hits": 300})
         )),
         ["/hits: integer is outside the u8 range"]
     );
@@ -638,7 +636,7 @@ fn openness_policies_govern_extra_properties() {
             types.clone(),
             &named("Typed"),
             Direction::Both,
-            json!({"id": "7", "hits": {"a": 1}})
+            json!({"id": 3, "hits": {"a": 1}})
         )),
         ["/hits: expected a number, found an object"]
     );
@@ -942,12 +940,6 @@ fn recursive_types_terminate() {
             "openness": "reject",
             "fields": [field("child", &named("Deaf"), "required")],
         },
-        "Loop": {
-            "kind": "newtype",
-            "name": ["loop"],
-            "direction": "both",
-            "inner": {"ref": "Loop"},
-        },
         "Wrapped": {
             "kind": "newtype",
             "name": ["wrapped"],
@@ -979,10 +971,6 @@ fn recursive_types_terminate() {
         types.clone(),
         &named("Wrapped"),
         json!({"value": 1, "next": null}),
-    );
-    assert_eq!(
-        messages(violations(types, &named("Loop"), Direction::Both, json!(1))),
-        ["type Loop cannot be resolved because newtypes form a cycle"]
     );
 }
 
@@ -1090,4 +1078,54 @@ fn direction_controls_read_only_and_write_only_fields() {
         )),
         ["/server_id: field server_id is read_only and cannot cross the input boundary"]
     );
+}
+
+#[test]
+fn a_default_fills_the_key_a_direction_drops() {
+    let record = |default: Option<Value>, access: &str| {
+        let mut field = field("tenant", &text(None, None, None), "required");
+        field["access"] = json!(access);
+        if let Some(default) = default {
+            field["default"] = default;
+        }
+        json!({
+            "Record": {
+                "kind": "struct",
+                "name": ["record"],
+                "direction": "both",
+                "openness": "reject",
+                "fields": [field],
+            }
+        })
+    };
+    let checked = |access: &str, default: Option<Value>, value: Value| {
+        let direction = match access {
+            "read_only" => Direction::Input,
+            _ => Direction::Output,
+        };
+        let document = contract(record(default, access));
+        document.validate().unwrap();
+        validate_value(&document, &named("Record"), direction, &value)
+            .err()
+            .map(messages)
+            .unwrap_or_default()
+    };
+
+    for (access, message) in [
+        (
+            "read_only",
+            "/tenant: field tenant is read_only and cannot cross the input boundary",
+        ),
+        (
+            "write_only",
+            "/tenant: field tenant is write_only and cannot cross the output boundary",
+        ),
+    ] {
+        assert_eq!(checked(access, None, json!({})), [message]);
+        assert!(checked(access, Some(json!("acme")), json!({})).is_empty());
+        assert_eq!(
+            checked(access, Some(json!("acme")), json!({"tenant": "acme"})),
+            [message]
+        );
+    }
 }

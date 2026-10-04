@@ -107,7 +107,7 @@ pub(super) fn run(
         )
     };
 
-    eprint!("{}", String::from_utf8_lossy(&logs));
+    eprint!("{}", pons_plugin::log_tail(&String::from_utf8_lossy(&logs)));
     for warning in warnings {
         eprintln!("warning: {warning}");
     }

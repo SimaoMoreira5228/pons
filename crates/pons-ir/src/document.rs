@@ -9,8 +9,9 @@ use crate::operation::{
     ErrorStatus, Method, OAuthFlowKind, Operation, PathSegment, ResponseStatus, StreamKind,
 };
 use crate::types::{
-    Access, Diagnostic, DiagnosticSeverity, Direction, EnumRepr, Field, FieldDefault, InlineType,
-    IntegerWire, ObjectOpenness, OpaqueWire, Presence, TypeDef, TypeKind, TypeRef, VariantPayload,
+    Access, DecimalWire, Diagnostic, DiagnosticSeverity, Direction, EnumRepr, Field, FieldDefault,
+    InlineType, IntegerWire, ObjectOpenness, OpaqueWire, Presence, TypeDef, TypeKind, TypeRef,
+    Variant, VariantPayload,
 };
 use crate::violation::direction_name;
 
@@ -38,6 +39,14 @@ fn status_forbids_body(status: u16) -> bool {
     matches!(status, 100..=199 | 204 | 205 | 304)
 }
 
+fn response_answers_success(response: ResponseStatus) -> bool {
+    match response {
+        ResponseStatus::Exact(status) => (200..300).contains(&status),
+        ResponseStatus::Class(class) => class == 2,
+        ResponseStatus::Default | ResponseStatus::Unknown => true,
+    }
+}
+
 fn response_status_conflicts(response: ResponseStatus, error: &ErrorStatus) -> bool {
     match (response, error) {
         (ResponseStatus::Exact(response), ErrorStatus::Exact(error)) => response == *error,
@@ -49,13 +58,93 @@ fn response_status_conflicts(response: ResponseStatus, error: &ErrorStatus) -> b
         }
         (ResponseStatus::Class(response), ErrorStatus::Class(error)) => response == *error,
         (ResponseStatus::Default | ResponseStatus::Unknown, ErrorStatus::Exact(status)) => {
-            (200..300).contains(status)
+            response_answers_success(ResponseStatus::Exact(*status))
         }
         (ResponseStatus::Default | ResponseStatus::Unknown, ErrorStatus::Class(class)) => {
-            *class == 2
+            response_answers_success(ResponseStatus::Class(*class))
         }
         (ResponseStatus::Default | ResponseStatus::Unknown, ErrorStatus::Default) => true,
-        _ => false,
+        (_, ErrorStatus::Default) => !response_answers_success(response),
+    }
+}
+
+fn owns_request_header(wire: &str) -> bool {
+    matches!(
+        wire.to_ascii_lowercase().as_str(),
+        "accept" | "authorization" | "content-type" | "cookie"
+    )
+}
+
+fn absolute_https_url(value: &str) -> bool {
+    value.strip_prefix("https://").is_some_and(|rest| {
+        let end = rest.find(['/', '?', '#']).unwrap_or(rest.len());
+        let authority = &rest[..end];
+        let host = authority.rsplit('@').next().unwrap_or_default();
+        !host.is_empty() && !rest.chars().any(char::is_whitespace)
+    })
+}
+
+#[derive(Clone, Copy)]
+enum Encoding {
+    Json,
+    Form,
+    Multipart,
+    Text,
+    Bytes,
+    Any,
+}
+
+impl Encoding {
+    fn name(self) -> &'static str {
+        match self {
+            Self::Json => "json",
+            Self::Form => "form",
+            Self::Multipart => "multipart",
+            Self::Text => "text",
+            Self::Bytes => "bytes",
+            Self::Any => "declared",
+        }
+    }
+
+    fn names(self, media_type: &str) -> bool {
+        let base = media_type
+            .split(';')
+            .next()
+            .unwrap_or_default()
+            .trim()
+            .to_ascii_lowercase();
+        let json = base == "application/json" || base.ends_with("+json");
+        match self {
+            Self::Json => json,
+            Self::Form => base == "application/x-www-form-urlencoded",
+            Self::Multipart => base.starts_with("multipart/"),
+            Self::Text => base.starts_with("text/"),
+            Self::Bytes => {
+                !(json
+                    || base == "application/x-www-form-urlencoded"
+                    || base.starts_with("multipart/"))
+            }
+            Self::Any => true,
+        }
+    }
+}
+
+fn encoding(content: ContentKind) -> Encoding {
+    match content {
+        ContentKind::Json | ContentKind::ProblemJson => Encoding::Json,
+        ContentKind::Form => Encoding::Form,
+        ContentKind::Multipart => Encoding::Multipart,
+        ContentKind::Text => Encoding::Text,
+        ContentKind::Bytes => Encoding::Bytes,
+        ContentKind::Stream | ContentKind::Empty => Encoding::Any,
+    }
+}
+
+fn error_encoding(content: ErrorContent) -> Encoding {
+    match content {
+        ErrorContent::Json | ErrorContent::ProblemJson => Encoding::Json,
+        ErrorContent::Text => Encoding::Text,
+        ErrorContent::Empty => Encoding::Any,
     }
 }
 
@@ -86,6 +175,33 @@ fn field_crosses(field: &Field, boundary: Boundary) -> bool {
         (boundary, field.access),
         (Boundary::Request, Some(Access::ReadOnly)) | (Boundary::Response, Some(Access::WriteOnly))
     )
+}
+
+fn field_crosses_every_side(field: &Field, direction: Direction) -> bool {
+    !matches!(
+        (direction, field.access),
+        (Direction::Input, Some(Access::ReadOnly)) | (Direction::Output, Some(Access::WriteOnly))
+    )
+}
+
+fn render(ty: &TypeRef) -> String {
+    serde_json::to_string(ty).unwrap_or_default()
+}
+
+#[derive(PartialEq, Eq)]
+enum Shape<'a> {
+    Named(&'a str, Option<&'a str>),
+    Bool,
+    Number,
+    BigInt,
+    Text,
+    Bytes,
+    Null,
+    Opaque,
+    Array(Box<Shape<'a>>),
+    Map(Box<Shape<'a>>),
+    Tuple(Vec<Shape<'a>>),
+    Nullable(Box<Shape<'a>>),
 }
 
 fn carrier_key(location: ApiKeyLocation, name: &str) -> String {
@@ -309,6 +425,21 @@ impl Document {
                             message: format!("OAuth2 {:?} flow has invalid URL fields", flow.kind),
                         });
                     }
+                    for (kind, url) in [
+                        ("authorization", flow.authorization_url.as_deref()),
+                        ("token", flow.token_url.as_deref()),
+                    ] {
+                        if let Some(url) = url
+                            && !absolute_https_url(url)
+                        {
+                            errors.push(ValidationError::InvalidValue {
+                                path: owner.clone(),
+                                message: format!(
+                                    "OAuth2 {kind} URL for {id} must be an absolute HTTPS URL"
+                                ),
+                            });
+                        }
+                    }
                 }
             }
             if let AuthScheme::ApiKey {
@@ -430,8 +561,24 @@ impl Document {
                         ),
                     });
                 }
+                if owns_request_header(&header.wire) {
+                    errors.push(ValidationError::InvalidValue {
+                        path: owner.clone(),
+                        message: format!(
+                            "request header {} is owned by the request body or the security model, so every client and server built from the document writes it too",
+                            header.wire
+                        ),
+                    });
+                }
             }
             if let Some(body) = &operation.body {
+                if body.content == ContentKind::Stream {
+                    errors.push(ValidationError::InvalidValue {
+                        path: owner.clone(),
+                        message: "a request body cannot be stream content, because no built-in target reads one"
+                            .into(),
+                    });
+                }
                 if body.content == ContentKind::Empty {
                     errors.push(ValidationError::InvalidValue {
                         path: owner.clone(),
@@ -448,7 +595,13 @@ impl Document {
                     });
                 }
                 if let Some(media_type) = &body.media_type {
-                    self.validate_media_type(&owner, "request body", media_type, &mut errors);
+                    self.validate_media_type(
+                        &owner,
+                        "request body",
+                        encoding(body.content),
+                        media_type,
+                        &mut errors,
+                    );
                 }
                 if body.content == ContentKind::Bytes
                     && !self.is_byte_type(&body.ty, &mut BTreeSet::new())
@@ -509,6 +662,27 @@ impl Document {
                         owner: owner.clone(),
                         scheme: scheme.clone(),
                     });
+                }
+                match self.auth_schemes.get(scheme) {
+                    Some(AuthScheme::OAuth2 { flows }) => {
+                        for scope in scopes {
+                            if !flows.iter().any(|flow| flow.scopes.contains_key(scope)) {
+                                errors.push(ValidationError::InvalidValue {
+                                    path: owner.clone(),
+                                    message: format!(
+                                        "the OAuth2 scheme {scheme} does not declare the {scope} scope"
+                                    ),
+                                });
+                            }
+                        }
+                    }
+                    Some(_) => errors.push(ValidationError::InvalidValue {
+                        path: owner.clone(),
+                        message: format!(
+                            "auth scheme {scheme} has scopes but is not an OAuth2 scheme, because no other scheme declares them"
+                        ),
+                    }),
+                    None => {}
                 }
                 if !operation
                     .auth
@@ -614,6 +788,7 @@ impl Document {
                     self.validate_media_type(
                         &owner,
                         &format!("response {} body", response.status),
+                        encoding(response.content),
                         media_type,
                         &mut errors,
                     );
@@ -967,7 +1142,23 @@ impl Document {
                         Boundary::Response,
                         errors,
                     ),
-                    StreamKind::Websocket { .. } | StreamKind::Bytes { .. } => {}
+                    StreamKind::Websocket { client, server } => {
+                        self.check_direction(
+                            client,
+                            "websocket client message",
+                            format!("{prefix}.stream.client"),
+                            Boundary::Request,
+                            errors,
+                        );
+                        self.check_direction(
+                            server,
+                            "websocket server message",
+                            format!("{prefix}.stream.server"),
+                            Boundary::Response,
+                            errors,
+                        );
+                    }
+                    StreamKind::Bytes { .. } => {}
                 }
             }
         }
@@ -1097,19 +1288,52 @@ impl Document {
                         message: "nullable flattened types are not representable".into(),
                     });
                 }
+                if !self.inlines_a_struct(ty, &mut BTreeSet::new()) {
+                    errors.push(ValidationError::InvalidValue {
+                        path: format!("{owner}.flattened[{index}]"),
+                        message: format!(
+                            "flattened {} is not a struct, because a flattened member contributes its fields to one object",
+                            render(ty)
+                        ),
+                    });
+                }
             }
         }
 
         match &definition.definition {
-            TypeKind::Struct { fields, .. } => self.validate_fields(&owner, fields, errors),
+            TypeKind::Struct { fields, .. } => {
+                self.validate_fields(&owner, fields, errors);
+                self.validate_openness(&owner, definition, errors);
+            }
             TypeKind::Enum { repr, variants } => {
-                if let EnumRepr::Adjacent { tag, content } = repr
-                    && tag == content
-                {
-                    errors.push(ValidationError::InvalidValue {
-                        path: owner.clone(),
-                        message: "adjacent enum tag and content must differ".into(),
-                    });
+                match repr {
+                    EnumRepr::Internal { tag } if tag.is_empty() => {
+                        errors.push(ValidationError::InvalidValue {
+                            path: owner.clone(),
+                            message: "enum tag cannot be empty".into(),
+                        });
+                    }
+                    EnumRepr::Adjacent { tag, content } => {
+                        if tag.is_empty() {
+                            errors.push(ValidationError::InvalidValue {
+                                path: owner.clone(),
+                                message: "adjacent enum tag cannot be empty".into(),
+                            });
+                        }
+                        if content.is_empty() {
+                            errors.push(ValidationError::InvalidValue {
+                                path: owner.clone(),
+                                message: "adjacent enum content cannot be empty".into(),
+                            });
+                        }
+                        if tag == content {
+                            errors.push(ValidationError::InvalidValue {
+                                path: owner.clone(),
+                                message: "adjacent enum tag and content must differ".into(),
+                            });
+                        }
+                    }
+                    _ => {}
                 }
                 if variants.is_empty() {
                     errors.push(ValidationError::InvalidValue {
@@ -1160,7 +1384,210 @@ impl Document {
                     }
                 }
             }
-            TypeKind::Newtype { .. } => {}
+            TypeKind::Newtype { inner } => {
+                if self.reenters(id, inner, &mut BTreeSet::new()) {
+                    errors.push(ValidationError::InvalidValue {
+                        path: owner.clone(),
+                        message: format!(
+                            "the type {id} cannot be resolved because newtypes form a cycle"
+                        ),
+                    });
+                }
+            }
+        }
+    }
+
+    fn validate_openness(
+        &self,
+        owner: &str,
+        definition: &TypeDef,
+        errors: &mut Vec<ValidationError>,
+    ) {
+        let TypeKind::Struct {
+            fields,
+            flattened,
+            openness: ObjectOpenness::PreserveTyped { value },
+        } = &definition.definition
+        else {
+            return;
+        };
+        let value = self.openness_value(value);
+        let shape = self.shape(value);
+        let mut members: Vec<(String, &TypeRef)> = fields
+            .iter()
+            .filter(|field| field_crosses_every_side(field, definition.direction))
+            .map(|field| (format!("field {}", field.wire), &field.ty))
+            .collect();
+        for member in flattened {
+            self.flattened_member_types(member, &mut BTreeSet::new(), &mut members);
+        }
+        for (label, ty) in members {
+            if self.shape(ty) != shape {
+                errors.push(ValidationError::InvalidValue {
+                    path: owner.into(),
+                    message: format!(
+                        "the typed openness value {} contradicts the {label} of type {}, because every key of the object has one declared type",
+                        render(value),
+                        render(ty)
+                    ),
+                });
+            }
+        }
+    }
+
+    fn shape<'a>(&'a self, ty: &'a TypeRef) -> Shape<'a> {
+        match self.peeled(ty) {
+            TypeRef::Named(named) => Shape::Named(&named.id, named.variant.as_deref()),
+            TypeRef::Inline(inline) => match inline {
+                InlineType::Bool => Shape::Bool,
+                InlineType::Int { bits, wire, .. } => match (wire, *bits > 53) {
+                    (IntegerWire::String, _) => Shape::Text,
+                    (IntegerWire::Number, true) => Shape::BigInt,
+                    (IntegerWire::Number, false) => Shape::Number,
+                },
+                InlineType::Float { .. } => Shape::Number,
+                InlineType::Decimal { wire } => match wire {
+                    DecimalWire::Number => Shape::Number,
+                    DecimalWire::String => Shape::Text,
+                },
+                InlineType::String { .. } => Shape::Text,
+                InlineType::Bytes { .. } => Shape::Bytes,
+                InlineType::Null => Shape::Null,
+                InlineType::Any | InlineType::Opaque { .. } => Shape::Opaque,
+                InlineType::Nullable { inner } => Shape::Nullable(Box::new(self.shape(inner))),
+                InlineType::Array { item, .. } => Shape::Array(Box::new(self.shape(item))),
+                InlineType::Map { value, .. } => Shape::Map(Box::new(self.shape(value))),
+                InlineType::Tuple { items } => {
+                    Shape::Tuple(items.iter().map(|item| self.shape(item)).collect())
+                }
+            },
+        }
+    }
+
+    fn flattened_member_types<'a>(
+        &'a self,
+        member: &'a TypeRef,
+        seen: &mut BTreeSet<String>,
+        members: &mut Vec<(String, &'a TypeRef)>,
+    ) {
+        let TypeRef::Named(named) = member else {
+            return;
+        };
+        if named.variant.is_some() || !seen.insert(named.id.clone()) {
+            return;
+        }
+        let Some(definition) = self.types.get(&named.id) else {
+            return;
+        };
+        match &definition.definition {
+            TypeKind::Newtype { inner } => self.flattened_member_types(inner, seen, members),
+            TypeKind::Struct {
+                fields,
+                flattened,
+                openness,
+            } => {
+                members.extend(
+                    fields
+                        .iter()
+                        .map(|field| (format!("field {}", field.wire), &field.ty)),
+                );
+                if let ObjectOpenness::PreserveTyped { value } = openness {
+                    members.push((
+                        format!("openness value of the type {}", named.id),
+                        self.openness_value(value),
+                    ));
+                }
+                for member in flattened {
+                    self.flattened_member_types(member, seen, members);
+                }
+            }
+            TypeKind::Enum { .. } => {}
+        }
+    }
+
+    fn inlines_a_struct(&self, ty: &TypeRef, seen: &mut BTreeSet<String>) -> bool {
+        match ty {
+            TypeRef::Inline(InlineType::Opaque { .. }) => true,
+            TypeRef::Named(named) => {
+                if named.variant.is_some() || !seen.insert(named.id.clone()) {
+                    return false;
+                }
+                self.types
+                    .get(&named.id)
+                    .is_some_and(|found| match &found.definition {
+                        TypeKind::Struct { .. } => true,
+                        TypeKind::Newtype { inner } => self.inlines_a_struct(inner, seen),
+                        TypeKind::Enum { .. } => false,
+                    })
+            }
+            TypeRef::Inline(_) => false,
+        }
+    }
+
+    fn peeled<'a>(&'a self, ty: &'a TypeRef) -> &'a TypeRef {
+        let mut current = ty;
+        let mut seen = BTreeSet::new();
+        while let TypeRef::Named(named) = current
+            && named.variant.is_none()
+            && seen.insert(named.id.clone())
+        {
+            match self.types.get(&named.id).map(|found| &found.definition) {
+                Some(TypeKind::Newtype { inner }) => current = inner,
+                _ => return current,
+            }
+        }
+        current
+    }
+
+    fn openness_value<'a>(&'a self, ty: &'a TypeRef) -> &'a TypeRef {
+        match self.peeled(ty) {
+            TypeRef::Inline(InlineType::Map { value, .. }) => value,
+            other => other,
+        }
+    }
+
+    fn reenters(
+        &self,
+        id: &str,
+        reference: &TypeRef,
+        seen: &mut BTreeSet<(String, Option<String>)>,
+    ) -> bool {
+        match reference {
+            TypeRef::Named(named) => {
+                if named.id == id {
+                    return true;
+                }
+                if !seen.insert((named.id.clone(), named.variant.clone())) {
+                    return false;
+                }
+                let Some(definition) = self.types.get(&named.id) else {
+                    return false;
+                };
+                match &definition.definition {
+                    TypeKind::Newtype { inner } => self.reenters(id, inner, seen),
+                    TypeKind::Enum { variants, .. } => match named
+                        .variant
+                        .as_deref()
+                        .and_then(|variant| variants.iter().find(|entry| entry.wire == variant))
+                    {
+                        Some(Variant {
+                            payload: VariantPayload::Newtype { ty },
+                            ..
+                        }) => self.reenters(id, ty, seen),
+                        _ => false,
+                    },
+                    TypeKind::Struct { .. } => false,
+                }
+            }
+            TypeRef::Inline(InlineType::Nullable { inner }) => self.reenters(id, inner, seen),
+            TypeRef::Inline(InlineType::Array { item, .. }) => self.reenters(id, item, seen),
+            TypeRef::Inline(InlineType::Map { key, value }) => {
+                self.reenters(id, key, seen) || self.reenters(id, value, seen)
+            }
+            TypeRef::Inline(InlineType::Tuple { items }) => {
+                items.iter().any(|item| self.reenters(id, item, seen))
+            }
+            TypeRef::Inline(_) => false,
         }
     }
 
@@ -1192,9 +1619,16 @@ impl Document {
             return false;
         }
         let found = match self.types.get(&named.id).map(|found| &found.definition) {
-            Some(TypeKind::Struct { fields, .. }) => fields
-                .iter()
-                .any(|field| reserved.contains(&field.wire.as_str())),
+            Some(TypeKind::Struct {
+                fields, flattened, ..
+            }) => {
+                fields
+                    .iter()
+                    .any(|field| reserved.contains(&field.wire.as_str()))
+                    || flattened
+                        .iter()
+                        .any(|member| self.named_uses_reserved(member, reserved, seen))
+            }
             Some(TypeKind::Newtype { inner }) => self.named_uses_reserved(inner, reserved, seen),
             _ => false,
         };
@@ -1259,6 +1693,18 @@ impl Document {
                 errors.push(ValidationError::InvalidValue {
                     path: owner.into(),
                     message: format!("duplicate field {}", field.wire),
+                });
+            }
+            if field.presence == Presence::Required
+                && !matches!(field.default, FieldDefault::Unspecified)
+                && !matches!(field.access, Some(Access::ReadOnly | Access::WriteOnly))
+            {
+                errors.push(ValidationError::InvalidValue {
+                    path: format!("{owner}.fields.{}", field.wire),
+                    message: format!(
+                        "the required field {} cannot carry a default, because its key is always on the wire and only a side that drops the key is filled by one",
+                        field.wire
+                    ),
                 });
             }
             if let FieldDefault::Value(default) = &field.default
@@ -1343,6 +1789,13 @@ impl Document {
                                 path: owner.into(),
                                 message: format!(
                                     "integer {name} must be an integral value, got {value}"
+                                ),
+                            });
+                        } else if integer_magnitude(value).is_none() {
+                            errors.push(ValidationError::InvalidValue {
+                                path: owner.into(),
+                                message: format!(
+                                    "integer {name} must be written without an exponent, got {value}"
                                 ),
                             });
                         }
@@ -1473,6 +1926,7 @@ impl Document {
         &self,
         owner: &str,
         label: &str,
+        written: Encoding,
         value: &str,
         errors: &mut Vec<ValidationError>,
     ) {
@@ -1480,6 +1934,14 @@ impl Document {
             errors.push(ValidationError::InvalidValue {
                 path: owner.into(),
                 message: format!("{label} has invalid media type {value:?}"),
+            });
+        } else if !written.names(value) {
+            errors.push(ValidationError::InvalidValue {
+                path: owner.into(),
+                message: format!(
+                    "{label} has media type {value:?}, which does not name the {} body the client writes",
+                    written.name()
+                ),
             });
         }
     }
@@ -1491,6 +1953,12 @@ impl Document {
         body_forbidden: bool,
         errors: &mut Vec<ValidationError>,
     ) {
+        if error.name.is_empty() || error.name.iter().any(String::is_empty) {
+            errors.push(ValidationError::InvalidValue {
+                path: owner.into(),
+                message: "error name must contain non-empty name segments".into(),
+            });
+        }
         if let ErrorStatus::Exact(status) = error.status
             && !(100..=599).contains(&status)
         {
@@ -1530,7 +1998,13 @@ impl Document {
             });
         }
         if let Some(media_type) = &error.media_type {
-            self.validate_media_type(owner, "error body", media_type, errors);
+            self.validate_media_type(
+                owner,
+                "error body",
+                error_encoding(error.content),
+                media_type,
+                errors,
+            );
         }
         let mut header_names = BTreeSet::new();
         for header in &error.headers {

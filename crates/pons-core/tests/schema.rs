@@ -762,15 +762,24 @@ fn nested_flatten_inside_an_enum_payload_is_reported_instead_of_dropped() {
             .collect::<Vec<_>>(),
         ["id"]
     );
-    assert_eq!(cx.diagnostics().len(), 1);
-    assert_eq!(cx.diagnostics()[0].severity, DiagnosticSeverity::Error);
+    let refused: Vec<&str> = cx
+        .diagnostics()
+        .iter()
+        .map(|diagnostic| diagnostic.code.as_str())
+        .collect();
+    assert_eq!(refused, ["PONS-E104", "PONS-E101"]);
+    assert!(
+        cx.diagnostics()
+            .iter()
+            .all(|diagnostic| diagnostic.severity == DiagnosticSeverity::Error)
+    );
 
     let (types, diagnostics) = cx.into_parts();
     assert!(document(types, diagnostics).validate().is_err());
 }
 
 #[test]
-fn struct_flatten_keeps_nested_flattened_types_that_structs_can_represent() {
+fn a_flattened_map_is_refused_instead_of_claiming_a_member_shape() {
     let mut cx = TypeCx::new();
     let reference = FlattenedNestedMapStruct::schema(&mut cx, Direction::Output);
     let TypeRef::Named(named) = reference else {
@@ -793,9 +802,13 @@ fn struct_flatten_keeps_nested_flattened_types_that_structs_can_represent() {
         flattened.as_slice(),
         [TypeRef::Inline(InlineType::Map { .. })]
     ));
-    assert!(cx.diagnostics().is_empty());
+    assert!(
+        cx.diagnostics()
+            .iter()
+            .any(|diagnostic| diagnostic.code == "PONS-E104")
+    );
     let (types, diagnostics) = cx.into_parts();
-    assert!(document(types, diagnostics).validate().is_ok());
+    assert!(document(types, diagnostics).validate().is_err());
 }
 
 #[test]

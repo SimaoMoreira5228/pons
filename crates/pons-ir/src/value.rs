@@ -5,8 +5,9 @@ use serde_json::{Map, Value};
 use crate::document::integer_magnitude;
 use crate::violation::{IntegerProblem, Violation, describe};
 use crate::{
-    Access, ByteEncoding, DecimalWire, Direction, Document, EnumRepr, Field, InlineType,
-    IntegerWire, NamedRef, ObjectOpenness, Presence, TypeKind, TypeRef, Variant, VariantPayload,
+    Access, ByteEncoding, DecimalWire, Direction, Document, EnumRepr, Field, FieldDefault,
+    InlineType, IntegerWire, NamedRef, ObjectOpenness, Presence, TypeKind, TypeRef, Variant,
+    VariantPayload,
 };
 
 pub fn validate_value(
@@ -33,6 +34,7 @@ struct Member<'a> {
     ty: &'a TypeRef,
     presence: Presence,
     access: Option<Access>,
+    filled: bool,
 }
 
 struct Validator<'a> {
@@ -433,6 +435,7 @@ impl<'a> Validator<'a> {
                 ty: &field.ty,
                 presence: field.presence,
                 access: field.access,
+                filled: matches!(field.default, FieldDefault::Value(_)),
             });
         }
         for member in flattened {
@@ -473,7 +476,7 @@ impl<'a> Validator<'a> {
         );
         let present = entries.contains_key(member.wire);
         if !crosses {
-            if present || member.presence == Presence::Required {
+            if present || (member.presence == Presence::Required && !member.filled) {
                 return self.reject(Violation::Access {
                     path,
                     field: member.wire.to_owned(),
@@ -524,6 +527,7 @@ impl<'a> Validator<'a> {
                 ty: &field.ty,
                 presence: field.presence,
                 access: field.access,
+                filled: matches!(field.default, FieldDefault::Value(_)),
             })),
             TypeKind::Enum { .. } => {}
         }

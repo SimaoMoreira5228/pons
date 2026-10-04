@@ -62,19 +62,22 @@ pub(crate) fn declared_media_type<'a>(
         .filter(|operation| {
             operation.method == method && path_matches(&operation.path, request.uri().path())
         })
-        .min_by_key(|operation| resolution_order(&operation.path))
+        .max_by_key(|operation| specificity(&operation.path))
         .and_then(|operation| operation.body.as_ref()?.media_type.as_deref())
         .unwrap_or(default)
 }
 
-fn resolution_order(segments: &[pons_ir::PathSegment]) -> Vec<u8> {
-    segments
-        .iter()
-        .map(|segment| match segment {
-            pons_ir::PathSegment::Literal { .. } => 0,
-            pons_ir::PathSegment::Param { .. } => 1,
-        })
-        .collect()
+fn specificity(segments: &[pons_ir::PathSegment]) -> (usize, Vec<u8>) {
+    (
+        segments.len(),
+        segments
+            .iter()
+            .map(|segment| match segment {
+                pons_ir::PathSegment::Literal { .. } => 1,
+                pons_ir::PathSegment::Param { .. } => 0,
+            })
+            .collect(),
+    )
 }
 
 fn method(method: &axum::http::Method) -> Option<pons_ir::Method> {
@@ -94,8 +97,11 @@ fn path_matches(segments: &[pons_ir::PathSegment], path: &str) -> bool {
     let mut parts = path_segments(path).into_iter();
     segments
         .iter()
-        .all(|segment| match (segment, parts.next()) {
-            (pons_ir::PathSegment::Param { .. }, Some(_)) => true,
+        .enumerate()
+        .all(|(index, segment)| match (segment, parts.next()) {
+            (pons_ir::PathSegment::Param { .. }, Some(part)) => {
+                index + 1 < segments.len() || !part.is_empty()
+            }
             (pons_ir::PathSegment::Literal { lit }, Some(part)) => lit == part,
             _ => false,
         })
@@ -583,6 +589,14 @@ mod tests {
         let assets = segments("assets/{id}");
         assert!(path_matches(&assets, "/assets/1"));
         assert!(
+            !path_matches(&assets, "/assets/"),
+            "matchit ends the search when the path runs out, so a trailing parameter never binds the empty segment axum leaves after a slash"
+        );
+        assert!(
+            !path_matches(&assets, "/assets//"),
+            "the empty segment axum leaves after a slash is a segment of its own"
+        );
+        assert!(
             !path_matches(&assets, "/assets/1/"),
             "an empty segment is a segment axum serves, so /assets/1/ is another route"
         );
@@ -600,12 +614,34 @@ mod tests {
         let raw = segments("assets/{id}/raw");
         assert!(path_matches(&raw, "/assets/1/raw"));
         assert!(!path_matches(&raw, "/assets/1"));
+        assert!(
+            path_matches(&raw, "/assets//raw"),
+            "an interior parameter binds the empty segment between two slashes, which is a segment axum serves"
+        );
 
         let directory = segments("assets/");
         assert!(path_matches(&directory, "/assets/"));
         assert!(
             !path_matches(&directory, "/assets"),
             "/assets and /assets/ are two routes, and this one is the second"
+        );
+    }
+
+    #[test]
+    fn the_most_specific_match_wins_the_resolution() {
+        let parameter = segments("files/{id}");
+        let trailing = segments("files/{id}/");
+        assert!(
+            specificity(&trailing) > specificity(&parameter),
+            "the longer path is the one a client reaches by naming the trailing segment"
+        );
+        assert!(
+            specificity(&segments("files/raw")) > specificity(&parameter),
+            "a literal segment is more specific than a parameter, which is the rule matchit applies"
+        );
+        assert!(
+            specificity(&segments("files/raw")) > specificity(&segments("{a}/raw")),
+            "the first segment that differs decides, so a literal earlier in the path wins"
         );
     }
 

@@ -110,10 +110,16 @@ pub(crate) fn degraded_error() -> ErrorResponse {
     }
 }
 
+const ENFORCING_WRAPPERS: [&str; 2] = ["WithErrorHeader", "WithOptionalErrorHeader"];
+
 pub(crate) fn enforces_declared_status<E>() -> bool {
-    let name = std::any::type_name::<E>();
-    name.starts_with("pons_axum::error::WithErrorHeader")
-        || name.starts_with("pons_axum::error::WithOptionalErrorHeader")
+    enforces_declared_status_named(std::any::type_name::<E>())
+}
+
+fn enforces_declared_status_named(name: &str) -> bool {
+    let path = name.split('<').next().unwrap_or(name);
+    let wrapper = path.rsplit("::").next().unwrap_or(path);
+    ENFORCING_WRAPPERS.contains(&wrapper)
 }
 
 pub struct WithErrorHeader<S: HeaderSpec, E>(pub E, pub <S as HeaderSpec>::Value);
@@ -273,5 +279,22 @@ mod tests {
             !enforces_declared_status::<Conflict>(),
             "a bare error type writes whatever status its IntoResponse writes"
         );
+    }
+
+    #[test]
+    fn a_renamed_dependency_still_names_the_wrappers_that_enforce() {
+        for wrapper in ["WithErrorHeader", "WithOptionalErrorHeader"] {
+            for crate_name in ["pons_axum", "web_axum", "axum_pons"] {
+                assert!(
+                    enforces_declared_status_named(&format!(
+                        "{crate_name}::error::{wrapper}<app::TraceId, app::Conflict>"
+                    )),
+                    "a dependency renamed to {crate_name} still wraps the status in {wrapper}"
+                );
+            }
+        }
+        for bare in ["app::errors::Conflict", "Conflict", "app::WithErrors"] {
+            assert!(!enforces_declared_status_named(bare));
+        }
     }
 }

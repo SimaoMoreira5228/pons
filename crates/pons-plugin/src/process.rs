@@ -210,18 +210,19 @@ fn run_command_with_limits(
 
     let deadline = Instant::now() + timeout;
     let command_name = args.first().copied().unwrap_or("plugin");
-    loop {
+    let reaped = loop {
         if let Some(error) = output_error.lock().ok().and_then(|error| error.clone()) {
             terminate_before_reap(&mut child);
             return Err(PluginError(error));
         }
-        match exited_unreaped(&mut child) {
-            Ok(true) => break,
-            Ok(false) if Instant::now() >= deadline => {
+        match leader_state(&mut child) {
+            Ok(Leader::ExitedUnreaped) => break false,
+            Ok(Leader::ExitedReaped) => break true,
+            Ok(Leader::Running) if Instant::now() >= deadline => {
                 terminate_before_reap(&mut child);
                 return Err(timeout_error(executable, command_name));
             }
-            Ok(false) => thread::sleep(PLUGIN_POLL_INTERVAL),
+            Ok(Leader::Running) => thread::sleep(PLUGIN_POLL_INTERVAL),
             Err(error) => {
                 terminate_before_reap(&mut child);
                 return Err(PluginError(format!(
@@ -230,9 +231,11 @@ fn run_command_with_limits(
                 )));
             }
         }
-    }
+    };
 
-    signal_process_group(&child);
+    if !reaped {
+        signal_process_group(&child);
+    }
     let status = child.wait().map_err(|error| {
         PluginError(format!(
             "cannot wait for {}: {error}",
@@ -318,18 +321,36 @@ fn terminate_before_reap(child: &mut std::process::Child) {
     let _ = child.wait();
 }
 
-fn exited_unreaped(child: &mut std::process::Child) -> std::io::Result<bool> {
+#[cfg_attr(not(unix), allow(dead_code))]
+#[derive(PartialEq, Eq)]
+enum Leader {
+    Running,
+    ExitedUnreaped,
+    ExitedReaped,
+}
+
+fn leader_state(child: &mut std::process::Child) -> std::io::Result<Leader> {
     #[cfg(unix)]
     {
-        if let Some(exited) = waitid_exited_unreaped(child)? {
-            return Ok(exited);
+        match waitid_exited_unreaped(child)? {
+            Some(true) => return Ok(Leader::ExitedUnreaped),
+            Some(false) => return Ok(Leader::Running),
+            None => {}
         }
     }
-    child.try_wait().map(|status| status.is_some())
+
+    Ok(match child.try_wait()? {
+        Some(_) => Leader::ExitedReaped,
+        None => Leader::Running,
+    })
 }
 
 #[cfg(unix)]
 fn waitid_exited_unreaped(child: &std::process::Child) -> std::io::Result<Option<bool>> {
+    #[cfg(test)]
+    if WAITID_UNSUPPORTED.with(|unsupported| unsupported.get()) {
+        return Ok(None);
+    }
     let mut info = unsafe { std::mem::zeroed::<libc::siginfo_t>() };
     loop {
         let result = unsafe {
@@ -377,6 +398,19 @@ fn signal_process_group(child: &std::process::Child) {
 static GROUP_SIGNALS: Mutex<Vec<u32>> = Mutex::new(Vec::new());
 
 #[cfg(all(test, unix))]
+thread_local! {
+    static WAITID_UNSUPPORTED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+#[cfg(all(test, unix))]
+fn without_waitid<T>(body: impl FnOnce() -> T) -> T {
+    WAITID_UNSUPPORTED.with(|unsupported| unsupported.set(true));
+    let result = body();
+    WAITID_UNSUPPORTED.with(|unsupported| unsupported.set(false));
+    result
+}
+
+#[cfg(all(test, unix))]
 fn group_signals(pid: u32) -> usize {
     GROUP_SIGNALS
         .lock()
@@ -419,7 +453,7 @@ fn with_emitter_log(error: &str, logs: &[u8]) -> PluginError {
     }
 }
 
-fn log_tail(text: &str) -> String {
+pub fn log_tail(text: &str) -> String {
     if text.len() <= MAX_ERROR_LOG_BYTES {
         return text.to_owned();
     }
@@ -506,7 +540,7 @@ mod tests {
         command.process_group(0);
         let mut child = command.spawn().unwrap();
         let deadline = Instant::now() + Duration::from_secs(5);
-        while !exited_unreaped(&mut child).unwrap() {
+        while leader_state(&mut child).unwrap() == Leader::Running {
             assert!(Instant::now() < deadline, "plugin never exited");
             thread::sleep(PLUGIN_POLL_INTERVAL);
         }
@@ -651,6 +685,47 @@ mod tests {
             .trim()
             .parse()
             .unwrap()
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_platform_without_wnowait_leaves_the_reaped_leaders_group_alone() {
+        let directory =
+            std::env::temp_dir().join(format!("pons-plugin-reaped-{}", std::process::id()));
+        std::fs::create_dir_all(&directory).unwrap();
+        let pid_file = directory.join("pid");
+        let marker = directory.join("marker");
+        let _ = std::fs::remove_file(&marker);
+
+        let command = format!(
+            "echo $$ > {}; (sleep 0.5; touch {}) & exit 0",
+            pid_file.display(),
+            marker.display()
+        );
+        let output = without_waitid(|| {
+            run_command_with_limits(
+                OsStr::new("sh"),
+                &["-c", &command],
+                None,
+                Duration::from_millis(100),
+                MAX_PLUGIN_OUTPUT_BYTES,
+            )
+        })
+        .unwrap();
+        assert!(output.status.success(), "{}", output.status);
+
+        let pid = read_pid(&pid_file);
+        assert_eq!(
+            group_signals(pid),
+            0,
+            "try_wait reaped the leader, so its group must be left alone"
+        );
+        assert!(
+            marker.exists(),
+            "the descendant a reaped leader left behind survives, because its group was never \
+             signalled"
+        );
+        std::fs::remove_dir_all(&directory).unwrap();
     }
 
     #[cfg(target_os = "linux")]

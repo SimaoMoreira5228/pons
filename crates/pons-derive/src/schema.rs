@@ -566,6 +566,9 @@ fn field_body(
                 fields.extend(nested_fields);
                 flattened.extend(nested_flattened);
             } else if #supports_flatten {
+                if !cx.is_flattenable_carrier(&ty) {
+                    cx.push_error("PONS-E104", "a flattened map is not representable, because a flattened member contributes its fields to one object while a map contributes arbitrary keys");
+                }
                 flattened.push(ty);
             } else {
                 cx.push_error("PONS-E101", "serde flatten in an enum variant payload is not representable; VariantPayload::Struct has no flattened list, so flattened maps and nested flattened types would be dropped");

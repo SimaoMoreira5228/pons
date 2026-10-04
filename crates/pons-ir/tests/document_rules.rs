@@ -3,6 +3,7 @@ use pons_ir::{
     validate_value,
 };
 use serde_json::{Value, json};
+use std::collections::BTreeMap;
 
 fn contract(types: Value) -> Document {
     serde_json::from_value(json!({
@@ -938,5 +939,582 @@ fn a_nullable_field_axum_lowers_to_an_absent_key_is_a_field_every_carrier_carrie
             vec![],
         ),
         "email",
+    );
+}
+
+#[test]
+fn a_request_header_the_runtime_owns_is_refused() {
+    let with_header = |wire: &str| {
+        let mut document = fixture();
+        let operation = document.operations.last_mut().unwrap();
+        operation.headers[0].wire = wire.into();
+        document.operations[0].headers.clear();
+        document
+    };
+
+    for wire in [
+        "accept",
+        "Accept",
+        "authorization",
+        "content-type",
+        "cookie",
+    ] {
+        refuses(
+            &with_header(wire),
+            &format!(
+                "request header {wire} is owned by the request body or the security model, so every client and server built from the document writes it too"
+            ),
+        );
+    }
+    with_header("X-Request-ID").validate().unwrap();
+    let mut response = fixture();
+    response.operations[0].responses.push(
+        serde_json::from_value(json!({
+            "status": 201, "content": "empty", "headers": [
+                {"wire": "Set-Cookie", "ty": {"kind": "string"}, "presence": "required"}
+            ]
+        }))
+        .unwrap(),
+    );
+    response.validate().unwrap();
+}
+
+#[test]
+fn a_typed_openness_value_that_contradicts_a_field_is_refused() {
+    let openness = |fields: Vec<Value>, flattened: Vec<&str>, value: Value| {
+        with(
+            json!({
+                "Carrier": {
+                    "kind": "struct", "name": ["carrier"], "direction": "both",
+                    "openness": {"preserve_typed": {"value": value}},
+                    "fields": fields,
+                    "flattened": flattened.iter().map(|id| json!({"ref": id})).collect::<Vec<_>>()
+                }
+            }),
+            json!({
+                "Nested": struct_type("nested", vec![field("deep", json!({"ref": "Value"}), "optional")], vec![], json!("reject")),
+                "Value": {"kind": "newtype", "name": ["value"], "direction": "both", "inner": string()}
+            }),
+        )
+    };
+    let number = json!({"kind": "int", "bits": 32, "signed": false, "wire": "number"});
+
+    refuses(
+        &contract(openness(
+            vec![field("kind", string(), "required")],
+            vec![],
+            number.clone(),
+        )),
+        "the typed openness value {\"kind\":\"int\",\"bits\":32,\"signed\":false,\"wire\":\"number\"} contradicts the field kind of type {\"kind\":\"string\"}",
+    );
+    refuses(
+        &contract(openness(vec![], vec!["Nested"], number)),
+        "contradicts the field deep of type {\"ref\":\"Value\"}",
+    );
+
+    for accepted in [
+        openness(
+            vec![field(
+                "kind",
+                json!({"kind": "string", "format": "email"}),
+                "required",
+            )],
+            vec![],
+            string(),
+        ),
+        openness(vec![], vec!["Nested"], json!({"ref": "Value"})),
+        openness(vec![], vec![], string()),
+    ] {
+        contract(accepted).validate().unwrap();
+    }
+    contract(with(
+        json!({"Carrier": {
+            "kind": "struct", "name": ["carrier"], "direction": "input", "openness": "reject",
+            "fields": [json!({"wire": "kind", "ident": ["kind"], "ty": {"kind": "string"},
+                "presence": "required", "access": "read_only"})]
+        }}),
+        json!({}),
+    ))
+    .validate()
+    .unwrap();
+}
+
+fn struct_type(name: &str, fields: Vec<Value>, flattened: Vec<Value>, openness: Value) -> Value {
+    json!({
+        "kind": "struct", "name": [name], "direction": "both",
+        "openness": openness, "fields": fields, "flattened": flattened
+    })
+}
+
+#[test]
+fn a_flattened_member_must_be_a_struct() {
+    let flattened_document = |member: Value| {
+        request_body(json!({
+            "Envelope": struct_type("envelope", vec![field("a", string(), "required")], vec![member], json!("reject")),
+            "Seal": struct_type("seal", vec![field("b", string(), "required")], vec![], json!("reject")),
+            "Choice": {
+                "kind": "enum", "name": ["choice"], "direction": "both",
+                "repr": {"kind": "string"},
+                "variants": [{"wire": "one", "ident": ["one"], "payload": {"kind": "unit"}}]
+            }
+        }))
+    };
+
+    for (member, blamed) in [
+        (
+            json!({"kind": "string"}),
+            "flattened {\"kind\":\"string\"} is not a struct",
+        ),
+        (
+            json!({"kind": "map", "key": string(), "value": string()}),
+            "flattened {\"kind\":\"map\",\"key\":{\"kind\":\"string\"},\"value\":{\"kind\":\"string\"}} is not a struct",
+        ),
+        (
+            json!({"ref": "Choice", "variant": "one"}),
+            "flattened {\"ref\":\"Choice\",\"variant\":\"one\"} is not a struct",
+        ),
+        (
+            json!({"ref": "Choice"}),
+            "flattened {\"ref\":\"Choice\"} is not a struct",
+        ),
+        (
+            json!({"ref": "Alias", "variant": "one"}),
+            "flattened {\"ref\":\"Alias\",\"variant\":\"one\"} is not a struct",
+        ),
+    ] {
+        let mut document = flattened_document(member.clone());
+        if blamed.contains("Alias") {
+            document.types.insert(
+                "Alias".into(),
+                serde_json::from_value(json!({
+                    "kind": "newtype", "name": ["alias"], "direction": "both", "inner": {"ref": "Choice"}
+                }))
+                .unwrap(),
+            );
+        }
+        refuses(&document, blamed);
+    }
+
+    for member in [
+        json!({"ref": "Seal"}),
+        json!({"ref": "Opaque"}),
+        json!({"kind": "opaque", "codec": "example", "wire": "unknown"}),
+    ] {
+        let mut document = flattened_document(member);
+        document.types.insert(
+            "Opaque".into(),
+            serde_json::from_value(json!({
+                "kind": "newtype", "name": ["opaque"], "direction": "both",
+                "inner": {"kind": "opaque", "codec": "example", "wire": "unknown"}
+            }))
+            .unwrap(),
+        );
+        document.validate().unwrap();
+    }
+}
+
+#[test]
+fn a_reserved_tag_reached_through_a_flattened_member_is_refused() {
+    let enveloped = |payload: Value| {
+        contract(json!({
+            "Choice": {
+                "kind": "enum", "name": ["choice"], "direction": "both",
+                "repr": {"kind": "internal", "tag": "code"},
+                "variants": [{"wire": "held", "ident": ["held"], "payload": payload}]
+            },
+            "Tagged": struct_type("tagged", vec![field("code", string(), "required")], vec![], json!("reject")),
+            "Envelope": struct_type("envelope", vec![], vec![json!({"ref": "Tagged"})], json!("reject")),
+            "Payload": {"kind": "newtype", "name": ["payload"], "direction": "both", "inner": {"ref": "Envelope"}}
+        }))
+    };
+
+    refuses(
+        &enveloped(json!({"kind": "newtype", "ty": {"ref": "Payload"}})),
+        "variant held uses a reserved enum field",
+    );
+    enveloped(json!({"kind": "newtype", "ty": string()}))
+        .validate()
+        .unwrap();
+}
+
+#[test]
+fn a_newtype_cycle_is_refused() {
+    let cyclic = |inner: &str, other: &str| {
+        let mut types = json!({
+            "Left": {"kind": "newtype", "name": ["left"], "direction": "both", "inner": {"ref": inner}},
+            "Right": {"kind": "newtype", "name": ["right"], "direction": "both", "inner": {"ref": other}}
+        });
+        if inner == other {
+            types.as_object_mut().unwrap().remove("Right");
+        }
+        contract(types)
+    };
+
+    refuses(
+        &cyclic("Left", "Left"),
+        "the type Left cannot be resolved because newtypes form a cycle",
+    );
+    refuses(
+        &cyclic("Right", "Left"),
+        "the type Left cannot be resolved because newtypes form a cycle",
+    );
+    contract(json!({
+        "Left": {"kind": "newtype", "name": ["left"], "direction": "both",
+            "inner": {"kind": "nullable", "inner": {"ref": "Right"}}},
+        "Right": {"kind": "newtype", "name": ["right"], "direction": "both", "inner": {"kind": "string"}}
+    }))
+    .validate()
+    .unwrap();
+}
+
+#[test]
+fn a_declared_media_type_must_name_the_body_the_client_writes() {
+    let body = |content: &str, media_type: &str, ty: Value| {
+        let mut document = request_body(json!({
+            "Envelope": struct_type("envelope", vec![field("email", string(), "required")], vec![], json!("reject")),
+            "Blob": {"kind": "newtype", "name": ["blob"], "direction": "input",
+                "inner": {"kind": "bytes", "encoding": "base64"}}
+        }));
+        let body = &mut document.operations[0].body.as_mut().unwrap();
+        body.content = serde_json::from_value(json!(content)).unwrap();
+        body.media_type = Some(media_type.into());
+        body.ty = serde_json::from_value(ty).unwrap();
+        document
+    };
+    let envelope = json!({"ref": "Envelope"});
+    let blob = json!({"ref": "Blob"});
+
+    for (content, media_type) in [
+        ("form", "application/json"),
+        ("multipart", "application/json"),
+        ("text", "application/json"),
+        ("text", "application/x-www-form-urlencoded"),
+        ("bytes", "application/json"),
+        ("bytes", "application/vnd.acme+json"),
+        ("bytes", "multipart/form-data"),
+    ] {
+        refuses(
+            &body(
+                content,
+                media_type,
+                if content == "bytes" {
+                    blob.clone()
+                } else {
+                    envelope.clone()
+                },
+            ),
+            &format!("has media type \"{media_type}\", which does not name the"),
+        );
+    }
+    for (content, media_type, ty) in [
+        ("json", "application/json", envelope.clone()),
+        (
+            "json",
+            "application/vnd.acme+json; charset=utf-8",
+            envelope.clone(),
+        ),
+        ("problem_json", "application/problem+json", envelope.clone()),
+        (
+            "form",
+            "application/x-www-form-urlencoded",
+            envelope.clone(),
+        ),
+        ("multipart", "multipart/form-data", envelope.clone()),
+        ("text", "text/plain; charset=utf-8", envelope.clone()),
+        ("text", "text/csv", envelope.clone()),
+        ("bytes", "application/octet-stream", blob.clone()),
+        ("bytes", "application/pdf; version=1", blob.clone()),
+    ] {
+        body(content, media_type, ty).validate().unwrap();
+    }
+
+    let mut response = fixture();
+    response.operations[0].responses[0].content = pons_ir::ContentKind::Text;
+    response.operations[0].responses[0].media_type = Some("application/json".into());
+    refuses(
+        &response,
+        "response 200 body has media type \"application/json\", which does not name the text body the client writes",
+    );
+    let mut error = fixture();
+    error.operations[0].errors[0].content = pons_ir::ErrorContent::Text;
+    error.operations[0].errors[0].media_type = Some("application/json".into());
+    refuses(
+        &error,
+        "error body has media type \"application/json\", which does not name the text body the client writes",
+    );
+}
+
+#[test]
+fn a_stream_request_body_is_refused() {
+    let mut document = fixture();
+    document.operations[0].body.as_mut().unwrap().content = pons_ir::ContentKind::Stream;
+    refuses(
+        &document,
+        "a request body cannot be stream content, because no built-in target reads one",
+    );
+}
+
+#[test]
+fn a_default_error_cannot_answer_for_a_status_a_named_response_answers() {
+    let with_statuses = |response: pons_ir::ResponseStatus, error: ErrorStatus| {
+        let mut document = fixture();
+        document.operations[0].responses[0].status = response;
+        document.operations[0].errors[0].status = error;
+        document
+    };
+    let collides = "collides with a success response";
+
+    refuses(
+        &with_statuses(pons_ir::ResponseStatus::Exact(404), ErrorStatus::Default),
+        collides,
+    );
+    refuses(
+        &with_statuses(pons_ir::ResponseStatus::Class(4), ErrorStatus::Default),
+        collides,
+    );
+    for document in [
+        with_statuses(pons_ir::ResponseStatus::Exact(200), ErrorStatus::Default),
+        with_statuses(pons_ir::ResponseStatus::Class(2), ErrorStatus::Default),
+        with_statuses(pons_ir::ResponseStatus::Exact(404), ErrorStatus::Class(5)),
+    ] {
+        document.validate().unwrap();
+    }
+}
+
+#[test]
+fn a_required_field_cannot_carry_a_default() {
+    let field_with = |presence: &str, access: Option<&str>, default: Value| {
+        let mut field = field("email", string(), presence);
+        if let Some(access) = access {
+            field["access"] = json!(access);
+        }
+        field["default"] = default;
+        json!({"Text": {
+            "kind": "struct", "name": ["text"], "direction": "both", "openness": "reject",
+            "fields": [field]
+        }})
+    };
+    let message = "the required field email cannot carry a default, because its key is always on the wire and only a side that drops the key is filled by one";
+
+    refuses(
+        &contract(field_with("required", None, json!("a@b.test"))),
+        message,
+    );
+    refuses(
+        &contract(field_with(
+            "required",
+            Some("read_write"),
+            json!("a@b.test"),
+        )),
+        message,
+    );
+    for accepted in [
+        field_with("optional", None, json!("a@b.test")),
+        field_with("required", Some("read_only"), json!("a@b.test")),
+        field_with("required", Some("write_only"), json!("a@b.test")),
+        field_with("required", None, json!(null)).clone(),
+    ] {
+        if accepted["Text"]["fields"][0]["default"].is_null() {
+            let mut without = accepted.clone();
+            without["Text"]["fields"][0]
+                .as_object_mut()
+                .unwrap()
+                .remove("default");
+            contract(without).validate().unwrap();
+            continue;
+        }
+        contract(accepted).validate().unwrap();
+    }
+}
+
+#[test]
+fn an_operation_scope_the_flows_do_not_declare_is_refused() {
+    let oauth = |scopes: Value| {
+        let mut document = fixture();
+        document.auth_schemes.insert(
+            "oauth".into(),
+            serde_json::from_value(json!({
+                "kind": "o_auth2",
+                "flows": [{
+                    "kind": "client_credentials",
+                    "token_url": "https://auth.example.test/token",
+                    "scopes": scopes
+                }]
+            }))
+            .unwrap(),
+        );
+        document.operations[1].auth.alternatives = vec![vec!["oauth".into()]];
+        document.operations[1].auth.scopes =
+            BTreeMap::from([("oauth".into(), vec!["read".into()])]);
+        document
+    };
+
+    oauth(json!({"read": "Read", "write": "Write"}))
+        .validate()
+        .unwrap();
+    refuses(
+        &oauth(json!({"write": "Write"})),
+        "the OAuth2 scheme oauth does not declare the read scope",
+    );
+}
+
+#[test]
+fn an_oauth_flow_url_must_be_an_absolute_https_url() {
+    let flow = |kind: &str, url: &str| {
+        let mut document = fixture();
+        document.auth_schemes.insert(
+            "oauth".into(),
+            serde_json::from_value(json!({
+                "kind": "o_auth2",
+                "flows": [{ "kind": kind, "authorization_url": url, "token_url": url }]
+            }))
+            .unwrap(),
+        );
+        document
+    };
+
+    for url in [
+        "https://auth.example.test/authorize",
+        "https://auth.example.test/authorize?audience=api",
+        "https://user@auth.example.test/authorize",
+    ] {
+        flow("authorization_code", url).validate().unwrap();
+    }
+    for url in [
+        "/authorize",
+        "http://auth.example.test/authorize",
+        "https://",
+        "",
+    ] {
+        refuses(
+            &flow("authorization_code", url),
+            "OAuth2 authorization URL for oauth must be an absolute HTTPS URL",
+        );
+        refuses(
+            &flow("client_credentials", url),
+            "OAuth2 token URL for oauth must be an absolute HTTPS URL",
+        );
+    }
+}
+
+#[test]
+fn scopes_on_a_scheme_that_is_not_oauth2_are_refused() {
+    let mut document = fixture();
+    document.operations[1].auth.scopes = BTreeMap::from([("tenant".into(), vec!["read".into()])]);
+    refuses(
+        &document,
+        "auth scheme tenant has scopes but is not an OAuth2 scheme, because no other scheme declares them",
+    );
+    document.operations[1].auth.scopes = BTreeMap::new();
+    document.validate().unwrap();
+}
+
+#[test]
+fn an_empty_error_name_is_refused() {
+    for name in [vec![], vec!["bad".into(), String::new()]] {
+        let mut document = fixture();
+        document.operations[0].errors[0].name = name;
+        refuses(&document, "error name must contain non-empty name segments");
+    }
+    fixture().validate().unwrap();
+}
+
+#[test]
+fn an_empty_enum_tag_is_refused() {
+    let with_repr = |repr: Value| {
+        let mut document = fixture();
+        let definition = document.types.get_mut("LoginError").unwrap();
+        let TypeKind::Enum { repr: found, .. } = &mut definition.definition else {
+            panic!("LoginError is not an enum")
+        };
+        *found = serde_json::from_value(repr).unwrap();
+        document
+    };
+
+    refuses(
+        &with_repr(json!({"kind": "internal", "tag": ""})),
+        "enum tag cannot be empty",
+    );
+    refuses(
+        &with_repr(json!({"kind": "adjacent", "tag": "code", "content": ""})),
+        "adjacent enum content cannot be empty",
+    );
+    with_repr(json!({"kind": "adjacent", "tag": "code", "content": "payload"}))
+        .validate()
+        .unwrap();
+    with_repr(json!({"kind": "external"})).validate().unwrap();
+}
+
+#[test]
+fn a_websocket_message_needs_the_direction_the_operation_uses() {
+    let socket = |client: &str, server: &str| {
+        let mut document = contract(json!({
+            "Sent": {"kind": "struct", "name": ["sent"], "direction": "input", "openness": "reject",
+                "fields": [field("a", string(), "required")]},
+            "Received": {"kind": "struct", "name": ["received"], "direction": "output", "openness": "reject",
+                "fields": [field("b", string(), "required")]}
+        }));
+        document.operations.push(
+            serde_json::from_value(json!({
+                "id": [["socket"]],
+                "method": "GET",
+                "path": [{"lit": "socket"}],
+                "responses": [{"status": 200, "content": "stream"}],
+                "stream": {"kind": "websocket", "client": {"ref": client}, "server": {"ref": server}},
+                "auth": {"alternatives": [], "optional": false},
+                "semantics": {"safe": true, "idempotent": true}
+            }))
+            .unwrap(),
+        );
+        document
+    };
+
+    socket("Sent", "Received").validate().unwrap();
+    refuses(
+        &socket("Received", "Received"),
+        "the websocket client message needs a type of the input or both direction, but Received is declared output",
+    );
+    refuses(
+        &socket("Sent", "Sent"),
+        "the websocket server message needs a type of the output or both direction, but Sent is declared input",
+    );
+}
+
+#[test]
+fn an_integer_bound_written_with_an_exponent_is_refused() {
+    let bounded = |name: &str, text: &str| {
+        let bound = serde_json::from_str::<Value>(text).unwrap();
+        contract(json!({
+            "Count": {
+                "kind": "struct", "name": ["count"], "direction": "both", "openness": "reject",
+                "fields": [json!({"wire": "a", "ident": ["a"],
+                    "ty": {"kind": "int", "bits": 32, "signed": true, "wire": "number", name: bound},
+                    "presence": "optional"})]
+            }
+        }))
+    };
+
+    for text in ["1e2", "1E2", "1.5e2", "-1e2"] {
+        for (name, message) in [
+            (
+                "maximum",
+                "integer maximum must be written without an exponent",
+            ),
+            (
+                "minimum",
+                "integer minimum must be written without an exponent",
+            ),
+        ] {
+            let found = rejections(&bounded(name, text));
+            assert_eq!(found.len(), 1, "{text}: {found:?}");
+            assert!(found[0].contains(message), "{text}: {found:?}");
+        }
+    }
+    for text in ["100", "1e0", "0"] {
+        bounded("maximum", text).validate().unwrap();
+    }
+    refuses(
+        &bounded("maximum", "1e-2"),
+        "integer maximum must be an integral value, got 1e-2",
     );
 }

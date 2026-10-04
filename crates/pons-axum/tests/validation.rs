@@ -411,6 +411,15 @@ async fn raw_form_on_get(pons_axum::extract::RawForm(form): pons_axum::extract::
     String::from_utf8_lossy(&form).into_owned()
 }
 
+async fn form_on_head(pons_axum::Form(form): pons_axum::Form<SlugForm>) -> NoContent {
+    let _ = form.slug.0;
+    NoContent
+}
+
+async fn scalar_form_on_get(pons_axum::Form(form): pons_axum::Form<u64>) -> axum::Json<User> {
+    axum::Json(User { id: form })
+}
+
 async fn retried(Header(retries): Header<RetriesHeader>) -> axum::Json<User> {
     let _ = retries.0;
     axum::Json(User { id: 1 })
@@ -889,6 +898,11 @@ fn a_text_body_the_framework_reads_is_published_as_optional_and_says_what_it_rej
         !text.body.as_ref().unwrap().required,
         "a request with no body at all reaches the handler as an empty string"
     );
+    assert!(
+        text.errors.is_empty(),
+        "the framework reads this body, so nothing pons validates is rejected: {:?}",
+        text.errors
+    );
     let message = text
         .diagnostics
         .iter()
@@ -898,6 +912,10 @@ fn a_text_body_the_framework_reads_is_published_as_optional_and_says_what_it_rej
     assert!(
         message.contains("400") && message.contains("413"),
         "{message} must name the statuses the framework answers before the handler runs"
+    );
+    assert!(
+        message.contains("declares none of"),
+        "{message} must agree with what the operation declares"
     );
 
     let mut app = built(Router::<()>::new(info()).route("/note", post(note)));
@@ -959,14 +977,76 @@ fn a_form_on_a_get_is_published_as_the_query_the_runtime_reads() {
         errors.contains("PONS-E102") && errors.contains("query"),
         "{errors} must refuse a query this contract cannot publish opaquely"
     );
+}
 
-    let errors = refused(Router::<()>::new(info()).route(
-        "/head-form",
-        head_with(form_on_get, OperationMeta::new("head.form")),
+#[test]
+fn a_form_on_a_head_is_published_as_the_query_the_runtime_reads() {
+    fn router() -> Router<()> {
+        Router::new(info()).route(
+            "/head-form",
+            head_with(form_on_head, OperationMeta::new("head.form")),
+        )
+    }
+    let document = router().into_document().unwrap();
+    let operation = &document.operations[0];
+    assert!(
+        operation.body.is_none(),
+        "a form on a HEAD is read from the query, so the document publishes no request body: {:?}",
+        operation.body
+    );
+    let TypeRef::Named(form) = operation.query.as_ref().unwrap() else {
+        panic!("a typed form is published as a named type")
+    };
+    assert!(
+        form.id.ends_with("#form"),
+        "the runtime resolves the carrier the document publishes: {}",
+        form.id
+    );
+
+    let mut app = built(router());
+    let (status, body) = send(
+        &mut app,
+        Request::builder()
+            .method("HEAD")
+            .uri("/head-form?slug=ada-lovelace")
+            .body(Body::empty())
+            .unwrap(),
+    );
+    assert_eq!(status, StatusCode::NO_CONTENT, "{body}");
+    let (status, body) = send(
+        &mut app,
+        Request::builder()
+            .method("HEAD")
+            .uri("/head-form")
+            .body(Body::empty())
+            .unwrap(),
+    );
+    assert_eq!(
+        status,
+        StatusCode::UNPROCESSABLE_ENTITY,
+        "a HEAD the query does not satisfy is rejected as the report the operation declares: {body}"
+    );
+
+    let errors = refused(Router::new(info()).route(
+        "/raw-head-form",
+        head_with(raw_form_on_get, OperationMeta::new("head.raw_form")),
     ));
     assert!(
-        errors.contains("PONS-E102") && errors.contains("HEAD"),
-        "{errors} must refuse a HEAD, where the two form extractors read different places"
+        errors.contains("PONS-E102") && errors.contains("struct"),
+        "{errors} must refuse the opaque form type, whose fields a query cannot spell"
+    );
+}
+
+#[test]
+fn a_form_that_becomes_a_query_must_be_a_struct() {
+    let errors = refused(Router::new(info()).route("/scalar", get(scalar_form_on_get)));
+    assert!(
+        errors.contains("PONS-E102") && errors.contains("struct"),
+        "{errors} must name the struct the query slot a GET form becomes has to be"
+    );
+    assert!(
+        !errors.contains("use a typed form"),
+        "{errors} must not tell a user who already used a typed form to use one"
     );
 }
 

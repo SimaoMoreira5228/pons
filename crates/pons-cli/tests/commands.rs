@@ -1084,6 +1084,83 @@ fi
     );
 }
 
+#[cfg(target_os = "linux")]
+#[test]
+fn emit_bounds_the_log_it_echoes_from_an_external_target() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let directory = tempfile::tempdir().unwrap();
+    let bin = directory.path().join("bin");
+    fs::create_dir(&bin).unwrap();
+    let plugin = bin.join("pons-emit-python");
+    fs::write(
+        &plugin,
+        r##"#!/bin/sh
+if [ "$1" = describe ]; then
+  printf '%s' '{"name":"python","version":"1.0.0","protocol":{"min":"2.0","max":"2.0"},"ir_version":{"min":"0.2","max":"0.2"},"capabilities":{"streaming":["sse","ndjson","stream_body"],"enum_reprs":["string","external","internal","adjacent","untagged"],"direction_split":true,"provides":true,"flattened":true,"opaque":true,"object_openness":["reject","preserve_typed","preserve_opaque"]}}'
+elif [ "$1" = emit ]; then
+  cat > /dev/null
+  printf 'log head\n' >&2
+  dd if=/dev/zero bs=1048576 count=9 2>/dev/null | tr '\000' 'x' 1>&2
+  printf 'log tail\n' >&2
+  printf '%s' '{"protocol":2,"files":[{"path":"client.py","content":"generated"}],"coverage":{"exact":["types.EventQuery","types.LoginError"],"opaque":["operations.auth.login","operations.events.watch","types.LoginRequest","types.User"],"lossy":[],"unsupported":[]}}'
+else
+  exit 2
+fi
+"##,
+    )
+    .unwrap();
+    let mut permissions = fs::metadata(&plugin).unwrap().permissions();
+    permissions.set_mode(0o755);
+    fs::set_permissions(&plugin, permissions).unwrap();
+    let path = std::env::join_paths(std::iter::once(bin).chain(std::env::split_paths(
+        &std::env::var_os("PATH").unwrap_or_default(),
+    )))
+    .unwrap();
+
+    let input = directory.path().join("api.json");
+    fs::write(&input, FIXTURE).unwrap();
+    let output_dir = directory.path().join("generated");
+    let output = pons()
+        .args(["emit", "--target", "python"])
+        .arg(&input)
+        .arg(&output_dir)
+        .env("PATH", &path)
+        .output()
+        .unwrap();
+
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.len() < 16 * 1024,
+        "a 9 MiB log cannot become 9 MiB of terminal: {} bytes",
+        stderr.len()
+    );
+    assert!(
+        stderr.starts_with("..."),
+        "{}",
+        &stderr[..64.min(stderr.len())]
+    );
+    assert!(
+        !stderr.contains("log head"),
+        "{}",
+        &stderr[..64.min(stderr.len())]
+    );
+    assert!(
+        stderr.contains("log tail\n"),
+        "{}",
+        &stderr[..64.min(stderr.len())]
+    );
+    assert_eq!(
+        fs::read_to_string(output_dir.join("client.py")).unwrap(),
+        "generated"
+    );
+}
+
 #[test]
 fn openapi_emit_failure_does_not_create_output() {
     let directory = tempfile::tempdir().unwrap();

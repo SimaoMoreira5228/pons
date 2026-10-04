@@ -30,7 +30,7 @@ fn numeric_values_round_trip_without_precision_loss() {
                     "wire": "amount",
                     "ident": ["amount"],
                     "ty": {"kind": "decimal", "wire": "number"},
-                    "presence": "required",
+                    "presence": "optional",
                     "default": 123456789012345678901234567890.1200
                 }]
             }

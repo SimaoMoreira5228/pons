@@ -3,9 +3,9 @@ use axum::response::IntoResponse;
 use pons_axum::http::{Request, StatusCode};
 use pons_axum::routing::{get, post};
 use pons_axum::{HeaderSpec, Info, Query, Router, WithErrorHeader, WithHeader};
-use pons_axum::{WithOptionalErrorHeader, WithOptionalHeader};
+use pons_axum::{WithOptionalErrorHeader, WithOptionalHeader, WithUnknownStatus};
 use pons_core::Schema;
-use pons_ir::{ContentKind, ErrorContent, ErrorStatus, Presence};
+use pons_ir::{ContentKind, ErrorContent, ErrorStatus, Presence, ResponseStatus};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::future::Future;
@@ -165,6 +165,19 @@ async fn maybe_traced(
     WithOptionalHeader::new(axum::Json(User { id: 1 }), Some(query.trace))
 }
 
+async fn dynamic_traced(
+    Query(query): Query<TraceQuery>,
+) -> WithUnknownStatus<WithHeader<TraceId, axum::Json<User>>> {
+    WithUnknownStatus::new(WithHeader::new(axum::Json(User { id: 1 }), query.trace))
+}
+
+#[derive(Debug, Serialize, Schema, pons_core::ApiError)]
+enum Broken {
+    #[allow(dead_code)]
+    #[pons(status = 500)]
+    Broken,
+}
+
 fn info() -> Info {
     Info {
         title: "Users".into(),
@@ -283,6 +296,64 @@ fn a_response_header_that_is_no_header_value_degrades_to_a_status_the_document_d
     assert_eq!(
         served_status(router(), "/traced?trace=trace-1"),
         StatusCode::OK
+    );
+}
+
+#[test]
+fn an_inherited_common_error_owns_the_status_a_response_header_degrades_to() {
+    let router = || {
+        Router::<()>::new(info())
+            .common_error::<Broken>()
+            .route("/traced", get(traced))
+    };
+    let document = router()
+        .into_document()
+        .expect("one status answers the degradation, so the document can name it once");
+    let operation = &document.operations[0];
+    assert!(
+        operation.errors_inherit,
+        "the operation answers the common error"
+    );
+    assert!(
+        !operation
+            .errors
+            .iter()
+            .any(|error| error.status == ErrorStatus::Exact(500)),
+        "a second definition of the same status is a document no emitter can publish: {:?}",
+        operation.errors
+    );
+    assert_eq!(
+        served_status(router(), "/traced?trace=bad%0Avalue"),
+        StatusCode::INTERNAL_SERVER_ERROR,
+        "the response header still degrades at runtime"
+    );
+}
+
+#[test]
+fn a_catch_all_status_still_declares_the_status_a_response_header_degrades_to() {
+    let router = || Router::<()>::new(info()).route("/dynamic", get(dynamic_traced));
+    let document = router()
+        .into_document()
+        .expect("a response header degrades whatever status the handler writes");
+    let operation = &document.operations[0];
+    assert_eq!(operation.responses[0].status, ResponseStatus::Unknown);
+    assert!(
+        operation
+            .errors
+            .iter()
+            .any(|error| error.status == ErrorStatus::Exact(500)),
+        "the catch-all names no status, so the operation must declare the one it can serve: {:?}",
+        operation.errors
+    );
+    assert_eq!(
+        served_status(router(), "/dynamic?trace=trace-1"),
+        StatusCode::OK,
+        "the handler writes the status itself, and the catch-all the document publishes never names it"
+    );
+    assert_eq!(
+        served_status(router(), "/dynamic?trace=bad%0Avalue"),
+        StatusCode::INTERNAL_SERVER_ERROR,
+        "the value that is no header value degrades whatever status the handler writes"
     );
 }
 

@@ -83,7 +83,7 @@ where
         self.inner = self.inner.route(path, route.inner);
         for description in route.descriptions {
             let mut built = build(path, description);
-            declare_runtime_gaps(&mut built.operation);
+            resolve_request_body(&mut built.operation);
             self.types.extend(built.types);
             self.carriers.extend(built.carriers);
             self.operations.push(built.operation);
@@ -131,10 +131,7 @@ where
 
     pub fn document(&self) -> Document {
         let mut operations = self.operations.clone();
-        for operation in &mut operations {
-            auth::merge_auth_requirements(&mut operation.auth, &self.auth_requirement);
-        }
-        reuse_inherited_slots(&self.common_errors, &mut operations);
+        self.settle(&mut operations);
         let mut document = Document {
             ir_version: pons_ir::IR_VERSION.to_owned(),
             info: self.info.clone(),
@@ -164,22 +161,29 @@ where
     }
 
     fn into_document_value(mut self) -> Document {
-        for operation in &mut self.operations {
-            auth::merge_auth_requirements(&mut operation.auth, &self.auth_requirement);
-        }
-        reuse_inherited_slots(&self.common_errors, &mut self.operations);
+        let mut operations = std::mem::take(&mut self.operations);
+        self.settle(&mut operations);
         let mut document = Document {
             ir_version: pons_ir::IR_VERSION.to_owned(),
             info: self.info,
             types: self.types,
             auth_schemes: self.auth_schemes,
             common_errors: self.common_errors,
-            operations: self.operations,
+            operations,
             ext: BTreeMap::new(),
             diagnostics: self.diagnostics,
         };
         prune_unreferenced_types(&mut document, &self.carriers);
         document
+    }
+
+    fn settle(&self, operations: &mut [pons_ir::Operation]) {
+        operations.iter_mut().for_each(|operation| {
+            auth::merge_auth_requirements(&mut operation.auth, &self.auth_requirement);
+        });
+        reuse_inherited_slots(&self.common_errors, operations);
+        declare_degraded_headers(&self.common_errors, operations);
+        settle_head_answers(operations);
     }
 }
 
@@ -434,17 +438,12 @@ fn same_headers(inherited: &[ResponseHeader], declared: &[ResponseHeader]) -> bo
         })
 }
 
-fn declare_runtime_gaps(operation: &mut pons_ir::Operation) {
-    resolve_request_body(operation);
-    declare_degraded_header(operation);
-}
-
 fn resolve_request_body(operation: &mut pons_ir::Operation) {
     let Some(body) = &operation.body else {
         return;
     };
     match (operation.method, body.content) {
-        (Method::Get, ContentKind::Form) if matches!(body.ty, TypeRef::Named(_)) => {
+        (Method::Get | Method::Head, ContentKind::Form) if matches!(body.ty, TypeRef::Named(_)) => {
             let form = operation
                 .body
                 .take()
@@ -453,41 +452,84 @@ fn resolve_request_body(operation: &mut pons_ir::Operation) {
                 operation_cx::push_diagnostic(
                     &mut operation.diagnostics,
                     "PONS-W101",
-                    "a form on a GET is read from the query, which the operation already publishes a type for",
+                    "a form on a GET or a HEAD is read from the query, which the operation already publishes a type for",
                 );
             }
         }
-        (Method::Get, ContentKind::Form) => operation_cx::push_diagnostic(
+        (Method::Get | Method::Head, ContentKind::Form) => operation_cx::push_diagnostic(
             &mut operation.diagnostics,
             "PONS-E102",
-            "a raw form on a GET is read from the query, which this contract can only publish as typed fields; use a typed form",
-        ),
-        (Method::Head, ContentKind::Form) => operation_cx::push_diagnostic(
-            &mut operation.diagnostics,
-            "PONS-E102",
-            "a form on a HEAD is read from the query by Form and from the request body by RawForm, so the document cannot say which; read the query with Query instead",
+            "a form on a GET or a HEAD is read from the query, which this contract publishes as typed fields, so the form type must be a struct; use a struct type, or read the query with Query",
         ),
         (Method::Get | Method::Head, ContentKind::Multipart) => operation_cx::push_diagnostic(
             &mut operation.diagnostics,
             "PONS-E102",
             "a multipart body is read from a request body, and the client of a GET or HEAD operation sends none, so axum answers 400 for the boundary it never receives; the operation cannot be published",
         ),
-        _ => operation_cx::push_diagnostic(
-            &mut operation.diagnostics,
-            "PONS-W101",
-            "the framework answers a request body it cannot read as 400 and a body over the limit as 413, before the handler runs; neither status is declared",
-        ),
+        _ if framework_reads_the_body(body) => declare_framework_rejections(operation),
+        _ => {}
     }
 }
 
-fn declare_degraded_header(operation: &mut pons_ir::Operation) {
-    let header_wrapped = operation
-        .responses
-        .iter()
-        .any(|response| !response.headers.is_empty());
-    if header_wrapped && !declares_status(operation, crate::error::DEGRADED) {
-        operation.errors.push(crate::error::degraded_error());
+fn framework_reads_the_body(body: &pons_ir::Body) -> bool {
+    match body.content {
+        ContentKind::Multipart | ContentKind::Text | ContentKind::Bytes => true,
+        ContentKind::Form => !matches!(body.ty, TypeRef::Named(_)),
+        ContentKind::Json | ContentKind::Stream | ContentKind::ProblemJson | ContentKind::Empty => {
+            false
+        }
     }
+}
+
+fn declare_framework_rejections(operation: &mut pons_ir::Operation) {
+    let undeclared: Vec<String> = [400, 413]
+        .into_iter()
+        .filter(|status| !declares_status(operation, *status))
+        .map(|status| status.to_string())
+        .collect();
+    if undeclared.is_empty() {
+        return;
+    }
+    operation_cx::push_diagnostic(
+        &mut operation.diagnostics,
+        "PONS-W101",
+        format!(
+            "the framework reads this request body itself, so it answers a body it cannot read as 400 and a body over the limit as 413 before the handler runs; the operation declares none of {}",
+            undeclared.join(" or ")
+        ),
+    );
+}
+
+fn declare_degraded_headers(common: &[ErrorResponse], operations: &mut [pons_ir::Operation]) {
+    let exact = pons_ir::ErrorStatus::Exact(crate::error::DEGRADED);
+    for operation in operations {
+        let header_wrapped = operation
+            .responses
+            .iter()
+            .any(|response| !response.headers.is_empty());
+        let inherited =
+            operation.errors_inherit && common.iter().any(|error| error.status.covers(&exact));
+        if header_wrapped && !inherited && !declares_status(operation, crate::error::DEGRADED) {
+            operation.errors.push(crate::error::degraded_error());
+        }
+    }
+}
+
+fn settle_head_answers(operations: &mut [pons_ir::Operation]) {
+    let heads: Vec<Vec<pons_ir::PathSegment>> = operations
+        .iter()
+        .filter(|operation| operation.method == Method::Head)
+        .map(|operation| operation.path.clone())
+        .collect();
+    operations
+        .iter_mut()
+        .filter(|operation| operation.method == Method::Get)
+        .filter(|operation| heads.contains(&operation.path))
+        .for_each(|operation| {
+            operation
+                .diagnostics
+                .retain(|entry| entry.code != routing::HEAD_OVER_GET);
+        });
 }
 
 fn declares_status(operation: &pons_ir::Operation, status: u16) -> bool {
@@ -502,7 +544,7 @@ fn declares_status(operation: &pons_ir::Operation, status: u16) -> bool {
             .any(|response| match response.status {
                 pons_ir::ResponseStatus::Exact(published) => published == status,
                 pons_ir::ResponseStatus::Class(class) => u16::from(class) == status / 100,
-                pons_ir::ResponseStatus::Default | pons_ir::ResponseStatus::Unknown => true,
+                pons_ir::ResponseStatus::Default | pons_ir::ResponseStatus::Unknown => false,
             })
 }
 

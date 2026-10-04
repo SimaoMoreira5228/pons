@@ -136,6 +136,28 @@ impl TypeCx {
         Some((fields.clone(), flattened.clone()))
     }
 
+    pub fn is_flattenable_carrier(&self, ty: &TypeRef) -> bool {
+        let mut current = ty;
+        let mut seen = BTreeSet::new();
+        loop {
+            let TypeRef::Named(reference) = current else {
+                return false;
+            };
+            if !seen.insert(reference.id.clone()) {
+                return false;
+            }
+            match self
+                .definitions
+                .get(&reference.id)
+                .map(|definition| &definition.definition)
+            {
+                Some(TypeKind::Struct { .. }) => return true,
+                Some(TypeKind::Newtype { inner }) => current = inner,
+                _ => return false,
+            }
+        }
+    }
+
     pub fn into_definitions(self) -> BTreeMap<String, TypeDef> {
         self.definitions
     }
