@@ -8,28 +8,30 @@ use std::path::Path;
 use std::process::ExitCode;
 
 use pons_emit_ts::ErrorStrategy;
-use pons_ir::{ChangeLevel, Document};
+use pons_ir::{ChangeLevel, Document, ValidationError};
 
-const HELP: &str = "Usage: pons <command> <ir.json> [arguments]\n\nCommands:\n  check <ir.json>                              Validate an IR document\n  fmt <ir.json>                                Rewrite an IR document in canonical form\n  diff <old.json> <new.json>                   Classify changes between two IR documents\n  emit --target <name> <ir.json> <output-dir> [--strict|--lossy] [--errors <neverthrow|throw>] [--coverage <relative-file>]\n                                                Generate files (built-in: ts, openapi)\n      --strict                                 Reject unsupported/lossy coverage; opaque is allowed on ts/openapi, and on a plugin that declares it (default)\n      --lossy                                  Emit non-exact coverage with warnings\n      --errors <neverthrow|throw>              TypeScript target only: neverthrow (default), throw\n      --coverage <relative-file>               Write emitter coverage as JSON\n\nExit codes:\n  0  success, and a diff that found no breaking change\n  1  diff only: the new contract has a breaking change\n  2  the arguments are wrong\n  3  diff only: the new contract is invalid\n  4  the tool could not do its job: an unreadable or malformed document, a\n     check/fmt validation failure, or an emit failure\n";
+const HELP: &str = "Usage: pons <command> <ir.json> [arguments]\n\nCommands:\n  check <ir.json>                              Validate an IR document\n  fmt <ir.json>                                Rewrite an IR document in canonical form\n  diff <old.json> <new.json>                   Classify changes between two IR documents\n  emit --target <name> <ir.json> <output-dir> [--strict|--lossy] [--errors <neverthrow|throw>] [--coverage <relative-file>]\n                                                Generate files (built-in: ts, openapi)\n      --strict                                 Reject unsupported/lossy coverage; opaque is allowed on ts/openapi, and on a plugin that declares it (default)\n      --lossy                                  Emit non-exact coverage with warnings\n      --errors <neverthrow|throw>              TypeScript target only: neverthrow (default), throw\n      --coverage <relative-file>               Write emitter coverage as JSON\n\nExit codes:\n  0  success, and a diff that found nothing to report\n  1  diff only: the contract changed, but nothing in it is breaking\n  2  diff only: the new contract has a breaking change\n  3  diff only: the new contract is invalid\n  4  the arguments are wrong\n  5  the tool could not do its job: an unreadable or malformed document, a\n     check/fmt validation failure, or an emit failure\n";
 
 fn main() -> ExitCode {
     match run(env::args_os().skip(1).collect()) {
         Ok(()) => ExitCode::SUCCESS,
-        Err(CliError::Usage(message)) => {
-            eprintln!("pons: {message}");
-            ExitCode::from(2)
-        }
+
+        Err(CliError::Changed) => ExitCode::from(1),
         Err(CliError::Breaking(message)) => {
             eprintln!("pons: {message}");
-            ExitCode::FAILURE
-        }
-        Err(CliError::Failure(message)) => {
-            eprintln!("pons: {message}");
-            ExitCode::from(4)
+            ExitCode::from(2)
         }
         Err(CliError::Invalid(message)) => {
             eprintln!("pons: {message}");
             ExitCode::from(3)
+        }
+        Err(CliError::Usage(message)) => {
+            eprintln!("pons: {message}");
+            ExitCode::from(4)
+        }
+        Err(CliError::Failure(message)) => {
+            eprintln!("pons: {message}");
+            ExitCode::from(5)
         }
     }
 }
@@ -66,13 +68,16 @@ fn run(args: Vec<OsString>) -> Result<(), CliError> {
             };
             println!("{level} {}: {}", change.path, change.detail);
         }
-        if let Some(errors) = &diff.new_document_errors {
-            return Err(CliError::Invalid(errors.clone()));
+        if !diff.validity.new_is_valid() {
+            return Err(CliError::Invalid(render(&diff.validity.new)));
         }
-        return if diff.worst() == Some(ChangeLevel::Breaking) {
-            Err(CliError::Breaking("breaking changes found".into()))
-        } else {
+        if diff.has_breaking_changes() {
+            return Err(CliError::Breaking("breaking changes found".into()));
+        }
+        return if diff.changes.is_empty() {
             Ok(())
+        } else {
+            Err(CliError::Changed)
         };
     }
     if command == "emit" {
@@ -205,17 +210,17 @@ fn read_document(path: &Path) -> Result<Document, CliError> {
 }
 
 fn validate(document: &Document) -> Result<(), CliError> {
-    validation_errors(document).map_err(CliError::Failure)
+    document
+        .validate()
+        .map_err(|errors| CliError::Failure(render(&errors)))
 }
 
-fn validation_errors(document: &Document) -> Result<(), String> {
-    document.validate().map_err(|errors| {
-        errors
-            .iter()
-            .map(ToString::to_string)
-            .collect::<Vec<_>>()
-            .join("\n")
-    })
+fn render(errors: &[ValidationError]) -> String {
+    errors
+        .iter()
+        .map(ToString::to_string)
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 fn rewrite_canonical(path: &Path, document: &Document) -> Result<(), CliError> {
@@ -266,8 +271,9 @@ fn rewrite_canonical(path: &Path, document: &Document) -> Result<(), CliError> {
 
 #[derive(Debug)]
 enum CliError {
-    Usage(String),
+    Changed,
     Breaking(String),
-    Failure(String),
     Invalid(String),
+    Usage(String),
+    Failure(String),
 }

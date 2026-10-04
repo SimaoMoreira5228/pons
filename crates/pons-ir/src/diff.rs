@@ -25,7 +25,24 @@ pub struct Change {
 pub struct Diff {
     pub changes: Vec<Change>,
 
-    pub new_document_errors: Option<String>,
+    pub validity: Validity,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Validity {
+    pub previous: Vec<ValidationError>,
+
+    pub new: Vec<ValidationError>,
+}
+
+impl Validity {
+    pub fn previous_is_valid(&self) -> bool {
+        self.previous.is_empty()
+    }
+
+    pub fn new_is_valid(&self) -> bool {
+        self.new.is_empty()
+    }
 }
 
 impl Diff {
@@ -62,51 +79,57 @@ impl Document {
             );
         }
         diff_info(&mut diff, &old.info, &new.info);
-        diff_types(&mut diff, &old, &new);
-        diff_auth_schemes(&mut diff, &old, &new);
-        let mut paths = BTreeSet::new();
+
+        let mut used = BTreeSet::new();
+        diff_types(&mut diff, &mut used, &old, &new);
+        diff_auth_schemes(&mut diff, &mut used, &old, &new);
         diff_errors(
             &mut diff,
-            &mut paths,
+            &mut used,
             "common_errors",
             &old.common_errors,
             &new.common_errors,
         );
-        diff_operations(&mut diff, &mut paths, &old, &new);
+        diff_operations(&mut diff, &mut used, &old, &new);
         diff
     }
 }
 
 fn diff_validity(diff: &mut Diff, old: &Document, new: &Document) {
-    let old = old.validate().err().map(validation_message);
-    let new = new.validate().err().map(validation_message);
-    diff.new_document_errors.clone_from(&new);
-    match (&old, &new) {
-        (None, None) => {}
-        (Some(old), None) => add(
+    let previous = old.validate().err().unwrap_or_default();
+    let new = new.validate().err().unwrap_or_default();
+    match (previous.is_empty(), new.is_empty()) {
+        (true, true) => {}
+        (false, true) => add(
             diff,
             ChangeLevel::Info,
             "document",
-            format!("the previous document was invalid: {old}"),
+            format!(
+                "the previous document was invalid: {}",
+                validation_message(&previous)
+            ),
         ),
-        (None, Some(new)) => add(
+        (true, false) => add(
             diff,
             ChangeLevel::Breaking,
             "document",
-            format!("the new document is invalid: {new}"),
+            format!("the new document is invalid: {}", validation_message(&new)),
         ),
-        (Some(old), Some(new)) => add(
+        (false, false) => add(
             diff,
             ChangeLevel::Warning,
             "document",
             format!(
-                "both documents are invalid: the previous document: {old}; the new document: {new}"
+                "both documents are invalid: the previous document: {}; the new document: {}",
+                validation_message(&previous),
+                validation_message(&new)
             ),
         ),
     }
+    diff.validity = Validity { previous, new };
 }
 
-fn validation_message(errors: Vec<ValidationError>) -> String {
+fn validation_message(errors: &[ValidationError]) -> String {
     errors
         .iter()
         .map(ToString::to_string)
@@ -160,33 +183,68 @@ fn diff_info(diff: &mut Diff, old: &Info, new: &Info) {
     }
 }
 
-fn key_path(prefix: &str, id: &str) -> String {
-    format!("{prefix}.{}", id.replace('%', "%25").replace('.', "%2E"))
+struct Path {
+    readable: String,
+    escaped: String,
 }
 
-fn diff_types(diff: &mut Diff, old: &Document, new: &Document) {
+impl Path {
+    fn key(prefix: &str, key: &str) -> Self {
+        Self {
+            readable: format!("{prefix}.{key}"),
+            escaped: format!("{prefix}.{}", escape(key)),
+        }
+    }
+
+    fn child(&self, segment: &str, key: &str) -> Self {
+        Self {
+            readable: format!("{}.{segment}.{key}", self.readable),
+            escaped: format!("{}.{segment}.{}", self.escaped, escape(key)),
+        }
+    }
+
+    fn claim(&self, used: &mut BTreeSet<String>) -> String {
+        if used.insert(self.readable.clone()) {
+            return self.readable.clone();
+        }
+        let mut path = self.escaped.clone();
+        let mut suffix = 2;
+        while !used.insert(path.clone()) {
+            path = format!("{}#{suffix}", self.readable);
+            suffix += 1;
+        }
+        path
+    }
+}
+
+fn escape(key: &str) -> String {
+    crate::operation_path(&[vec![key.to_owned()]])
+}
+
+fn diff_types(diff: &mut Diff, used: &mut BTreeSet<String>, old: &Document, new: &Document) {
     let refused = refuses_required_read_only(new);
     for id in old.types.keys() {
         if !new.types.contains_key(id) {
             add(
                 diff,
                 ChangeLevel::Breaking,
-                key_path("types", id),
+                Path::key("types", id).claim(used),
                 "type removed",
             );
         }
     }
     for (id, definition) in &new.types {
+        let path = Path::key("types", id);
         let Some(previous) = old.types.get(id) else {
             add(
                 diff,
                 ChangeLevel::NonBreaking,
-                key_path("types", id),
+                path.claim(used),
                 "type added",
             );
             continue;
         };
-        diff_type(diff, &refused, id, previous, definition);
+        diff_type(diff, used, &refused, &path, id, previous, definition);
     }
 }
 
@@ -208,38 +266,68 @@ fn refuses_required_read_only(document: &Document) -> BTreeSet<String> {
                     .map(|body| &body.ty),
             );
         for ty in carriers {
-            if let TypeRef::Named(named) = ty
-                && crate::query::required_read_only(document, ty).is_some()
-            {
-                refused.insert(named.id.clone());
-            }
+            record_refusing(document, ty, &mut BTreeSet::new(), &mut refused);
         }
     }
     refused
 }
 
-fn diff_auth_schemes(diff: &mut Diff, old: &Document, new: &Document) {
+fn record_refusing(
+    document: &Document,
+    ty: &TypeRef,
+    visiting: &mut BTreeSet<String>,
+    refused: &mut BTreeSet<String>,
+) -> bool {
+    let TypeRef::Named(named) = ty else {
+        return false;
+    };
+    if named.variant.is_some() || !visiting.insert(named.id.clone()) {
+        return false;
+    }
+    let refusing = match document.types.get(&named.id).map(|found| &found.definition) {
+        Some(TypeKind::Struct {
+            fields, flattened, ..
+        }) => {
+            fields.iter().any(|field| {
+                field.presence == Presence::Required
+                    && field.access == Some(crate::Access::ReadOnly)
+            }) || flattened
+                .iter()
+                .any(|member| record_refusing(document, member, visiting, refused))
+        }
+        Some(TypeKind::Newtype { inner }) => record_refusing(document, inner, visiting, refused),
+        _ => false,
+    };
+    visiting.remove(&named.id);
+    if refusing {
+        refused.insert(named.id.clone());
+    }
+    refusing
+}
+
+fn diff_auth_schemes(diff: &mut Diff, used: &mut BTreeSet<String>, old: &Document, new: &Document) {
     for id in old.auth_schemes.keys() {
         if !new.auth_schemes.contains_key(id) {
             add(
                 diff,
                 ChangeLevel::Breaking,
-                key_path("auth_schemes", id),
+                Path::key("auth_schemes", id).claim(used),
                 "authentication scheme removed",
             );
         }
     }
     for (id, scheme) in &new.auth_schemes {
-        let path = key_path("auth_schemes", id);
+        let owner = Path::key("auth_schemes", id);
         let Some(previous) = old.auth_schemes.get(id) else {
             add(
                 diff,
                 ChangeLevel::NonBreaking,
-                &path,
+                owner.claim(used),
                 "authentication scheme added",
             );
             continue;
         };
+        let path = owner.claim(used);
         match (previous, scheme) {
             (AuthScheme::Bearer { format: old }, AuthScheme::Bearer { format: new }) => {
                 if old != new {
@@ -281,7 +369,7 @@ fn diff_auth_schemes(diff: &mut Diff, old: &Document, new: &Document) {
                 }
             }
             (AuthScheme::OAuth2 { flows: old }, AuthScheme::OAuth2 { flows }) => {
-                diff_oauth_flows(diff, &path, old, flows);
+                diff_oauth_flows(diff, used, &owner, old, flows);
             }
             (
                 AuthScheme::Custom {
@@ -317,7 +405,13 @@ fn diff_auth_schemes(diff: &mut Diff, old: &Document, new: &Document) {
     }
 }
 
-fn diff_oauth_flows(diff: &mut Diff, path: &str, old: &[OAuthFlow], new: &[OAuthFlow]) {
+fn diff_oauth_flows(
+    diff: &mut Diff,
+    used: &mut BTreeSet<String>,
+    owner: &Path,
+    old: &[OAuthFlow],
+    new: &[OAuthFlow],
+) {
     let old: BTreeMap<_, _> = old.iter().map(|flow| (flow.kind, flow)).collect();
     let new: BTreeMap<_, _> = new.iter().map(|flow| (flow.kind, flow)).collect();
     for kind in old.keys() {
@@ -325,13 +419,13 @@ fn diff_oauth_flows(diff: &mut Diff, path: &str, old: &[OAuthFlow], new: &[OAuth
             add(
                 diff,
                 ChangeLevel::Breaking,
-                format!("{path}.flows.{kind:?}"),
+                owner.child("flows", &format!("{kind:?}")).claim(used),
                 "OAuth2 flow removed",
             );
         }
     }
     for (kind, flow) in &new {
-        let flow_path = format!("{path}.flows.{kind:?}");
+        let flow_path = owner.child("flows", &format!("{kind:?}")).claim(used);
         let Some(previous) = old.get(kind) else {
             add(
                 diff,
@@ -393,25 +487,49 @@ fn add_doc_change(diff: &mut Diff, path: &str, old: Option<&Doc>, new: Option<&D
 fn diff_diagnostics(diff: &mut Diff, path: &str, old: &[Diagnostic], new: &[Diagnostic]) {
     let mut unmatched = old.iter().collect::<Vec<_>>();
     for diagnostic in new {
-        let found = unmatched.iter().position(|previous| {
-            previous.code == diagnostic.code && previous.message == diagnostic.message
-        });
-        let Some(index) = found else { continue };
+        let found = unmatched
+            .iter()
+            .position(|previous| previous.code == diagnostic.code);
+        let Some(index) = found else {
+            if diagnostic.severity == DiagnosticSeverity::Error {
+                add(
+                    diff,
+                    ChangeLevel::Breaking,
+                    path,
+                    format!("error diagnostic added: {}", diagnostic.code),
+                );
+            }
+            continue;
+        };
         let previous = unmatched.remove(index);
-        if previous.severity == diagnostic.severity {
+        if previous.severity != diagnostic.severity {
+            let escalated = severity_rank(diagnostic.severity) > severity_rank(previous.severity);
+
+            let level = if diagnostic.severity == DiagnosticSeverity::Error {
+                ChangeLevel::Breaking
+            } else {
+                ChangeLevel::NonBreaking
+            };
+            add(
+                diff,
+                level,
+                path,
+                format!(
+                    "diagnostic severity {}: {}",
+                    if escalated { "escalated" } else { "lowered" },
+                    diagnostic.code
+                ),
+            );
             continue;
         }
-        let (level, change) = if diagnostic.severity == DiagnosticSeverity::Error {
-            (ChangeLevel::Breaking, "escalated")
-        } else {
-            (ChangeLevel::NonBreaking, "lowered")
-        };
-        add(
-            diff,
-            level,
-            path,
-            format!("error diagnostic severity {change}: {}", diagnostic.code),
-        );
+        if previous.message != diagnostic.message {
+            add(
+                diff,
+                ChangeLevel::NonBreaking,
+                path,
+                format!("diagnostic message changed: {}", diagnostic.code),
+            );
+        }
     }
     for previous in unmatched {
         if previous.severity == DiagnosticSeverity::Error {
@@ -425,8 +543,24 @@ fn diff_diagnostics(diff: &mut Diff, path: &str, old: &[Diagnostic], new: &[Diag
     }
 }
 
-fn diff_type(diff: &mut Diff, refused: &BTreeSet<String>, id: &str, old: &TypeDef, new: &TypeDef) {
-    let path = key_path("types", id);
+const fn severity_rank(severity: DiagnosticSeverity) -> u8 {
+    match severity {
+        DiagnosticSeverity::Info => 0,
+        DiagnosticSeverity::Warning => 1,
+        DiagnosticSeverity::Error => 2,
+    }
+}
+
+fn diff_type(
+    diff: &mut Diff,
+    used: &mut BTreeSet<String>,
+    refused: &BTreeSet<String>,
+    owner: &Path,
+    id: &str,
+    old: &TypeDef,
+    new: &TypeDef,
+) {
+    let path = owner.claim(used);
     if old.name != new.name {
         add(diff, ChangeLevel::Breaking, &path, "type name changed");
     }
@@ -451,10 +585,10 @@ fn diff_type(diff: &mut Diff, refused: &BTreeSet<String>, id: &str, old: &TypeDe
         ) => {
             diff_fields(
                 diff,
-                &path,
+                used,
+                owner,
                 new.direction,
-                matches!(new.direction, Direction::Both)
-                    || (new.direction == Direction::Input && refused.contains(id)),
+                refused.contains(id),
                 old_fields,
                 new_fields,
             );
@@ -506,18 +640,19 @@ fn diff_type(diff: &mut Diff, refused: &BTreeSet<String>, id: &str, old: &TypeDe
                     add(
                         diff,
                         ChangeLevel::Breaking,
-                        format!("{path}.variants.{wire}"),
+                        owner.child("variants", wire).claim(used),
                         "enum variant removed",
                     );
                 }
             }
             for (wire, variant) in new_variants {
+                let variant_path = owner.child("variants", wire).claim(used);
                 if let Some(previous) = old_variants.get(wire) {
                     if previous.payload != variant.payload {
                         add(
                             diff,
                             ChangeLevel::Breaking,
-                            format!("{path}.variants.{wire}"),
+                            &variant_path,
                             "enum variant payload changed",
                         );
                     }
@@ -525,7 +660,7 @@ fn diff_type(diff: &mut Diff, refused: &BTreeSet<String>, id: &str, old: &TypeDe
                         add(
                             diff,
                             ChangeLevel::Breaking,
-                            format!("{path}.variants.{wire}"),
+                            &variant_path,
                             "enum variant identifier changed",
                         );
                     }
@@ -533,20 +668,20 @@ fn diff_type(diff: &mut Diff, refused: &BTreeSet<String>, id: &str, old: &TypeDe
                         add(
                             diff,
                             ChangeLevel::Warning,
-                            format!("{path}.variants.{wire}"),
+                            &variant_path,
                             "enum variant metadata changed",
                         );
                     }
                     add_doc_change(
                         diff,
-                        &format!("{path}.variants.{wire}"),
+                        &variant_path,
                         previous.doc.as_ref(),
                         variant.doc.as_ref(),
                         "enum variant",
                     );
                     diff_diagnostics(
                         diff,
-                        &format!("{path}.variants.{wire}"),
+                        &variant_path,
                         &previous.diagnostics,
                         &variant.diagnostics,
                     );
@@ -556,12 +691,7 @@ fn diff_type(diff: &mut Diff, refused: &BTreeSet<String>, id: &str, old: &TypeDe
                     } else {
                         ChangeLevel::Breaking
                     };
-                    add(
-                        diff,
-                        level,
-                        format!("{path}.variants.{wire}"),
-                        "enum variant added",
-                    );
+                    add(diff, level, variant_path, "enum variant added");
                 }
             }
         }
@@ -578,12 +708,14 @@ fn diff_type(diff: &mut Diff, refused: &BTreeSet<String>, id: &str, old: &TypeDe
 
 fn diff_fields(
     diff: &mut Diff,
-    owner: &str,
+    used: &mut BTreeSet<String>,
+    owner: &Path,
     direction: Direction,
-    sent: bool,
+    carrier: bool,
     old: &[Field],
     new: &[Field],
 ) {
+    let sent = carrier || matches!(direction, Direction::Both);
     let old: BTreeMap<_, _> = old.iter().map(|field| (&field.wire, field)).collect();
     let new: BTreeMap<_, _> = new.iter().map(|field| (&field.wire, field)).collect();
     for wire in old.keys() {
@@ -591,25 +723,29 @@ fn diff_fields(
             add(
                 diff,
                 ChangeLevel::Breaking,
-                format!("{owner}.fields.{wire}"),
+                owner.child("fields", wire).claim(used),
                 "field removed",
             );
         }
     }
     for (wire, field) in new {
-        let path = format!("{owner}.fields.{wire}");
+        let path = owner.child("fields", wire).claim(used);
+        let read_only = field.access == Some(crate::Access::ReadOnly);
+        let mut input = matches!(direction, Direction::Input | Direction::Both) || carrier;
+        if read_only && !sent {
+            input = false;
+        }
+        let output = matches!(direction, Direction::Output | Direction::Both)
+            && field.access != Some(crate::Access::WriteOnly);
         let Some(previous) = old.get(wire) else {
-            let input_required = matches!(direction, Direction::Input | Direction::Both)
-                && field.presence == Presence::Required
-                && (sent || field.access != Some(crate::Access::ReadOnly));
             add(
                 diff,
-                if input_required {
+                if input && field.presence == Presence::Required {
                     ChangeLevel::Breaking
                 } else {
                     ChangeLevel::NonBreaking
                 },
-                path,
+                &path,
                 "field added",
             );
             continue;
@@ -622,10 +758,6 @@ fn diff_fields(
                 "field identifier changed",
             );
         }
-        let input = matches!(direction, Direction::Input | Direction::Both)
-            && field.access != Some(crate::Access::ReadOnly);
-        let output = matches!(direction, Direction::Output | Direction::Both)
-            && field.access != Some(crate::Access::WriteOnly);
         if previous.presence != field.presence {
             let breaking = (input
                 && previous.presence == Presence::Optional

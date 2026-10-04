@@ -752,10 +752,7 @@ mod tests {
         ] {
             let document = with_body(json!({}), ty, ContentKind::Form);
             let error = crate::emit(&document).unwrap_err().0;
-            assert!(
-                error.contains("a form or multipart body must be a struct"),
-                "{error}"
-            );
+            assert!(error.contains("must be a struct"), "{error}");
         }
     }
 

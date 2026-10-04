@@ -70,10 +70,13 @@ pub fn invoke(
     )?;
     let manifest: EmitterManifest =
         serde_json::from_slice(&manifest_output.stdout).map_err(|error| {
-            PluginError(format!(
-                "{} returned an invalid manifest: {error}",
-                executable.to_string_lossy()
-            ))
+            with_emitter_log(
+                &format!(
+                    "{} returned an invalid manifest: {error}",
+                    executable.to_string_lossy()
+                ),
+                &manifest_output.stderr,
+            )
         })?;
     if manifest.name != target {
         return Err(PluginError(format!(
@@ -111,21 +114,19 @@ pub fn invoke(
         .map_err(|error| PluginError(format!("cannot encode emitter request: {error}")))?;
     let output = run_command(executable, &["emit"], Some(input))?;
     ensure_success(executable, "emit", &output.status, &output.stderr)?;
-    let response: EmitResponse = serde_json::from_slice(&output.stdout).map_err(|error| {
-        PluginError(format!(
-            "{} returned an invalid response: {error}",
-            executable.to_string_lossy()
-        ))
-    })?;
-    validate_response_for_document(&response, ir, mode, manifest.capabilities.opaque).map_err(
-        |error| {
-            let mut stderr = manifest_output.stderr.clone();
-            stderr.extend(&output.stderr);
-            with_emitter_log(&error, &stderr)
-        },
-    )?;
     let mut logs = manifest_output.stderr;
-    logs.extend(output.stderr);
+    logs.extend(&output.stderr);
+    let response: EmitResponse = serde_json::from_slice(&output.stdout).map_err(|error| {
+        with_emitter_log(
+            &format!(
+                "{} returned an invalid response: {error}",
+                executable.to_string_lossy()
+            ),
+            &logs,
+        )
+    })?;
+    validate_response_for_document(&response, ir, mode, manifest.capabilities.opaque)
+        .map_err(|error| with_emitter_log(&error, &logs))?;
     Ok(PluginResult {
         manifest,
         response,
@@ -176,17 +177,17 @@ fn run_command_with_limits(
     let writer = match (input, child.stdin.take()) {
         (Some(input), Some(mut stdin)) => Some(thread::spawn(move || stdin.write_all(&input))),
         (Some(_), None) => {
-            terminate(&mut child);
+            terminate_before_reap(&mut child);
             return Err(PluginError("emitter stdin is unavailable".into()));
         }
         (None, _) => None,
     };
     let Some(stdout) = child.stdout.take() else {
-        terminate(&mut child);
+        terminate_before_reap(&mut child);
         return Err(PluginError("emitter stdout is unavailable".into()));
     };
     let Some(stderr) = child.stderr.take() else {
-        terminate(&mut child);
+        terminate_before_reap(&mut child);
         return Err(PluginError("emitter stderr is unavailable".into()));
     };
     let output_error: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
@@ -211,18 +212,18 @@ fn run_command_with_limits(
     let command_name = args.first().copied().unwrap_or("plugin");
     loop {
         if let Some(error) = output_error.lock().ok().and_then(|error| error.clone()) {
-            terminate(&mut child);
+            terminate_before_reap(&mut child);
             return Err(PluginError(error));
         }
         match exited_unreaped(&mut child) {
             Ok(true) => break,
             Ok(false) if Instant::now() >= deadline => {
-                terminate(&mut child);
+                terminate_before_reap(&mut child);
                 return Err(timeout_error(executable, command_name));
             }
             Ok(false) => thread::sleep(PLUGIN_POLL_INTERVAL),
             Err(error) => {
-                terminate(&mut child);
+                terminate_before_reap(&mut child);
                 return Err(PluginError(format!(
                     "cannot wait for {}: {error}",
                     executable.to_string_lossy()
@@ -230,6 +231,7 @@ fn run_command_with_limits(
             }
         }
     }
+
     signal_process_group(&child);
     let status = child.wait().map_err(|error| {
         PluginError(format!(
@@ -237,7 +239,7 @@ fn run_command_with_limits(
             executable.to_string_lossy()
         ))
     })?;
-    let joined: Result<Output, PluginError> = (|| {
+    (|| {
         if let Some(writer) = writer
             && let Err(error) =
                 join_before(writer, deadline, executable, command_name, "stdin writer")?
@@ -266,11 +268,7 @@ fn run_command_with_limits(
             stdout,
             stderr,
         })
-    })();
-    if joined.is_err() {
-        terminate(&mut child);
-    }
-    joined
+    })()
 }
 
 fn read_output(mut pipe: impl Read, limit: usize) -> Result<Vec<u8>, PluginError> {
@@ -314,7 +312,7 @@ fn timeout_error(executable: &OsStr, command: &str) -> PluginError {
     ))
 }
 
-fn terminate(child: &mut std::process::Child) {
+fn terminate_before_reap(child: &mut std::process::Child) {
     signal_process_group(child);
     let _ = child.kill();
     let _ = child.wait();
@@ -366,9 +364,26 @@ fn waitid_unsupported(error: &std::io::Error) -> bool {
 #[cfg_attr(not(unix), allow(unused_variables))]
 fn signal_process_group(child: &std::process::Child) {
     #[cfg(unix)]
-    unsafe {
-        let _ = libc::kill(-(child.id() as i32), libc::SIGKILL);
+    {
+        #[cfg(test)]
+        GROUP_SIGNALS.lock().unwrap().push(child.id());
+        unsafe {
+            let _ = libc::kill(-(child.id() as i32), libc::SIGKILL);
+        }
     }
+}
+
+#[cfg(all(test, unix))]
+static GROUP_SIGNALS: Mutex<Vec<u32>> = Mutex::new(Vec::new());
+
+#[cfg(all(test, unix))]
+fn group_signals(pid: u32) -> usize {
+    GROUP_SIGNALS
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|signalled| **signalled == pid)
+        .count()
 }
 
 fn ensure_success(
@@ -380,8 +395,8 @@ fn ensure_success(
     if status.success() {
         return Ok(());
     }
-    let detail = String::from_utf8_lossy(stderr);
-    let detail = detail.trim();
+    let stderr = String::from_utf8_lossy(stderr);
+    let detail = log_tail(stderr.trim());
     Err(PluginError(if detail.is_empty() {
         format!(
             "{} {command} exited with {status}",
@@ -575,6 +590,154 @@ mod tests {
         permissions.set_mode(0o755);
         std::fs::set_permissions(&path, permissions).unwrap();
         path
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn only_an_unreaped_leader_has_its_group_signalled() {
+        let directory =
+            std::env::temp_dir().join(format!("pons-plugin-group-{}", std::process::id()));
+        std::fs::create_dir_all(&directory).unwrap();
+        let pid_file = directory.join("pid");
+        let marker = directory.join("marker");
+        let _ = std::fs::remove_file(&marker);
+
+        let running = format!(
+            "echo $$ > {}; (sleep 0.5; touch {}) & sleep 5",
+            pid_file.display(),
+            marker.display()
+        );
+        let error = run_command_with_limits(
+            OsStr::new("sh"),
+            &["-c", &running],
+            None,
+            Duration::from_millis(200),
+            MAX_PLUGIN_OUTPUT_BYTES,
+        )
+        .unwrap_err();
+        assert!(error.0.contains("timed out"), "{}", error.0);
+        let pid = read_pid(&pid_file);
+        thread::sleep(Duration::from_millis(500));
+        assert!(!marker.exists(), "a still-running target loses its group");
+        assert_eq!(group_signals(pid), 1, "its group is signalled once");
+
+        let escaped = format!(
+            "echo $$ > {}; setsid sh -c 'sleep 5' & exit 0",
+            pid_file.display()
+        );
+        let error = run_command_with_limits(
+            OsStr::new("sh"),
+            &["-c", &escaped],
+            None,
+            Duration::from_millis(50),
+            MAX_PLUGIN_OUTPUT_BYTES,
+        )
+        .unwrap_err();
+        assert!(error.0.contains("timed out"), "{}", error.0);
+        let pid = read_pid(&pid_file);
+        assert_eq!(
+            group_signals(pid),
+            1,
+            "a descendant holding the pipe outlives the leader, and the group was already \
+             signalled while that leader was unreaped"
+        );
+        std::fs::remove_dir_all(&directory).unwrap();
+    }
+
+    #[cfg(all(test, target_os = "linux"))]
+    fn read_pid(path: &std::path::Path) -> u32 {
+        std::fs::read_to_string(path)
+            .unwrap()
+            .trim()
+            .parse()
+            .unwrap()
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn bounds_the_emitter_log_it_reports_in_an_error() {
+        let output = run_command_with_limits(
+            OsStr::new("sh"),
+            &[
+                "-c",
+                r#"dd if=/dev/zero bs=1048576 count=9 2>/dev/null | tr '\000' 'x' 1>&2; exit 3"#,
+            ],
+            None,
+            Duration::from_secs(10),
+            MAX_PLUGIN_OUTPUT_BYTES,
+        )
+        .unwrap();
+        assert!(!output.status.success());
+        let error =
+            ensure_success(OsStr::new("stub"), "emit", &output.status, &output.stderr).unwrap_err();
+        assert!(
+            error.0.contains("exited with exit status: 3"),
+            "{}",
+            &error.0[..80]
+        );
+        assert!(
+            error.0.len() < 4 * MAX_ERROR_LOG_BYTES,
+            "a 9 MiB log cannot become a 9 MiB error line: {} bytes",
+            error.0.len()
+        );
+        assert!(error.0.contains(": ..."), "{}", &error.0[..80]);
+        assert!(error.0.ends_with('x'), "the tail of the log is kept");
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn an_unparsable_answer_keeps_the_emitters_explanation() {
+        let document: Document =
+            serde_json::from_str(include_str!("../../../fixtures/login.json")).unwrap();
+
+        let unparsable_manifest = stub_emitter(
+            "unparsable-manifest",
+            r#"#!/bin/sh
+printf '%s\n' 'the range key is protokl' >&2
+printf '%s' '{"name":"fixture","protokl":{"min":"2.0","max":"2.0"}}'
+"#,
+        );
+        let error = invoke(
+            unparsable_manifest.as_os_str(),
+            "fixture",
+            &document,
+            BTreeMap::new(),
+            false,
+        )
+        .unwrap_err();
+        assert!(error.0.contains("invalid manifest"), "{}", error.0);
+        assert!(error.0.contains("unknown field `protokl`"), "{}", error.0);
+        assert!(error.0.contains("the range key is protokl"), "{}", error.0);
+        let _ = std::fs::remove_file(&unparsable_manifest);
+
+        let unparsable_response = stub_emitter(
+            "unparsable-response",
+            r#"#!/bin/sh
+if [ "$1" = describe ]; then
+  printf '%s' '{"name":"fixture","version":"1.0.0","protocol":{"min":"2.0","max":"2.0"},"ir_version":{"min":"0.2","max":"0.2"},"capabilities":{"streaming":["sse"],"enum_reprs":["string","external","internal","adjacent","untagged"],"direction_split":true,"provides":true,"flattened":true,"opaque":true,"object_openness":["reject","preserve_typed","preserve_opaque"]}}'
+  exit 0
+fi
+cat > /dev/null
+printf '%s\n' 'the coverage key is coverag' >&2
+printf '%s' '{"protocol":2,"coverag":{}}'
+"#,
+        );
+        let error = invoke(
+            unparsable_response.as_os_str(),
+            "fixture",
+            &document,
+            BTreeMap::new(),
+            false,
+        )
+        .unwrap_err();
+        assert!(error.0.contains("invalid response"), "{}", error.0);
+        assert!(error.0.contains("unknown field `coverag`"), "{}", error.0);
+        assert!(
+            error.0.contains("the coverage key is coverag"),
+            "{}",
+            error.0
+        );
+        let _ = std::fs::remove_file(&unparsable_response);
     }
 
     #[cfg(target_os = "linux")]

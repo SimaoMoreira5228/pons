@@ -2,7 +2,7 @@ use std::collections::BTreeMap;
 use std::ffi::OsString;
 use std::fs;
 use std::io::Write;
-use std::path::Path;
+use std::path::{Component, Path};
 
 use pons_emit_ts::ErrorStrategy;
 use pons_ir::Document;
@@ -127,12 +127,7 @@ pub(super) fn run(
         let relative = path
             .to_str()
             .ok_or_else(|| CliError::Failure("coverage path is not valid UTF-8".into()))?;
-        if relative.is_empty()
-            || relative.contains('\\')
-            || relative
-                .split('/')
-                .any(|part| part.is_empty() || part == "." || part == "..")
-        {
+        if !safe_relative_path(relative) {
             return Err(CliError::Failure(format!(
                 "coverage path is not a safe relative path: {relative}"
             )));
@@ -423,11 +418,41 @@ fn destination_is_case_insensitive(output: &Path) -> Result<bool, CliError> {
     }
 }
 
+fn safe_relative_path(path: &str) -> bool {
+    !path.is_empty()
+        && !path.contains('\\')
+        && !path.contains(':')
+        && !Path::new(path).is_absolute()
+        && Path::new(path)
+            .components()
+            .all(|component| matches!(component, Component::Normal(_)))
+        && path
+            .split('/')
+            .all(|part| !part.is_empty() && part != "." && part != ".." && !reserved_device(part))
+}
+
+fn reserved_device(segment: &str) -> bool {
+    let name = segment
+        .split_once('.')
+        .map_or(segment, |(stem, _)| stem)
+        .to_ascii_uppercase();
+    matches!(name.as_str(), "NUL" | "CON" | "PRN" | "AUX")
+        || ["COM", "LPT"].iter().any(|prefix| {
+            name.strip_prefix(prefix)
+                .is_some_and(|n| n.len() == 1 && matches!(n.as_bytes()[0], b'1'..=b'9'))
+        })
+}
+
 fn validate_destination(root: &Path, relative: &str) -> Result<(), CliError> {
+    if !safe_relative_path(relative) {
+        return Err(CliError::Failure(format!(
+            "unsafe emitter output path {relative:?}"
+        )));
+    }
     let mut destination = root.to_path_buf();
     let mut components = Path::new(relative).components().peekable();
     while let Some(component) = components.next() {
-        let std::path::Component::Normal(name) = component else {
+        let Component::Normal(name) = component else {
             return Err(CliError::Failure(format!(
                 "unsafe emitter output path {relative:?}"
             )));
@@ -598,6 +623,48 @@ mod tests {
         assert!(!paths_conflict("Client.ts", "client.ts", false));
         assert!(paths_conflict("Client.ts", "client.ts", true));
         assert!(paths_conflict("Nested", "nested/file.ts", true));
+    }
+
+    #[test]
+    fn refuses_output_paths_the_plugin_protocol_also_refuses() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().join("output");
+
+        for path in [
+            "NUL",
+            "nul.ts",
+            "a:b.ts",
+            "sub/CON.ts",
+            "nested/aux",
+            "com1.ts",
+            "client.ts\\escape",
+            "",
+        ] {
+            let result = write_files(
+                &root,
+                vec![OutputFile {
+                    path: path.into(),
+                    content: "generated".into(),
+                }],
+            );
+            assert!(result.is_err(), "{path:?} must be refused");
+            assert!(
+                path.is_empty() || !root.join(path).exists(),
+                "{path:?} was written"
+            );
+        }
+        assert_eq!(fs::read_dir(&root).unwrap().count(), 0, "nothing written");
+
+        assert!(
+            write_files(
+                &root,
+                vec![OutputFile {
+                    path: "nested/client.ts".into(),
+                    content: "generated".into(),
+                }],
+            )
+            .is_ok()
+        );
     }
 
     #[test]

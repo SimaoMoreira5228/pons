@@ -193,6 +193,152 @@ fn a_required_read_only_input_field_is_breaking() {
     assert_eq!(change.detail, "field added");
 }
 
+fn read_only_field(presence: &str) -> serde_json::Value {
+    serde_json::json!({
+        "wire": "since",
+        "ident": ["since"],
+        "ty": {"kind": "string"},
+        "presence": presence,
+        "access": "read_only"
+    })
+}
+
+#[test]
+fn a_required_read_only_field_on_an_output_carrier_is_breaking() {
+    let mut old = fixture();
+    old["types"]["EventQuery"]["direction"] = serde_json::json!("output");
+    let old: Document = serde_json::from_value(old).unwrap();
+    let mut changed = serde_json::to_value(&old).unwrap();
+    changed["types"]["EventQuery"]["fields"]
+        .as_array_mut()
+        .unwrap()
+        .push(read_only_field("required"));
+    let new: Document = serde_json::from_value(changed).unwrap();
+    assert!(new.validate().is_err());
+
+    let diff = old.diff(&new);
+    let change = change_at(&old, &new, "types.EventQuery.fields.since");
+    assert_eq!(change.level, ChangeLevel::Breaking, "{:#?}", diff.changes);
+    assert_eq!(change.detail, "field added");
+    assert_eq!(
+        change_at(&old, &new, "document").level,
+        ChangeLevel::Warning
+    );
+}
+
+#[test]
+fn a_required_read_only_field_behind_a_flattened_carrier_is_breaking() {
+    let mut old = fixture();
+    old["types"]["EventQuery"]["flattened"] = serde_json::json!([{"ref": "EventFilter"}]);
+    old["types"]["EventFilter"] = serde_json::json!({
+        "kind": "struct",
+        "name": ["event", "filter"],
+        "direction": "input",
+        "openness": "reject",
+        "fields": [{
+            "wire": "kind",
+            "ident": ["kind"],
+            "ty": {"kind": "string"},
+            "presence": "optional"
+        }]
+    });
+    let old: Document = serde_json::from_value(old).unwrap();
+    old.validate().unwrap();
+
+    let mut changed = serde_json::to_value(&old).unwrap();
+    changed["types"]["EventFilter"]["fields"]
+        .as_array_mut()
+        .unwrap()
+        .push(read_only_field("required"));
+    let new: Document = serde_json::from_value(changed).unwrap();
+    assert!(new.validate().is_err());
+
+    let diff = old.diff(&new);
+    let change = change_at(&old, &new, "types.EventFilter.fields.since");
+    assert_eq!(change.level, ChangeLevel::Breaking, "{:#?}", diff.changes);
+    assert_eq!(change.detail, "field added");
+    assert_eq!(
+        change_at(&old, &new, "document").level,
+        ChangeLevel::Breaking,
+        "the field and the document it invalidates must not disagree"
+    );
+}
+
+#[test]
+fn a_required_read_only_field_behind_a_newtype_carrier_is_breaking() {
+    let mut old = fixture();
+    old["types"]["EventWindow"] = serde_json::json!({
+        "kind": "newtype",
+        "name": ["event", "window"],
+        "direction": "input",
+        "inner": {"ref": "EventQuery"}
+    });
+    old["operations"][1]["query"] = serde_json::json!({"ref": "EventWindow"});
+    let old: Document = serde_json::from_value(old).unwrap();
+    old.validate().unwrap();
+
+    let mut changed = serde_json::to_value(&old).unwrap();
+    changed["types"]["EventQuery"]["fields"]
+        .as_array_mut()
+        .unwrap()
+        .push(read_only_field("required"));
+    let new: Document = serde_json::from_value(changed).unwrap();
+    assert!(new.validate().is_err());
+
+    let diff = old.diff(&new);
+    let change = change_at(&old, &new, "types.EventQuery.fields.since");
+    assert_eq!(change.level, ChangeLevel::Breaking, "{:#?}", diff.changes);
+    assert_eq!(change.detail, "field added");
+    assert_eq!(
+        change_at(&old, &new, "document").level,
+        ChangeLevel::Breaking
+    );
+}
+
+#[test]
+fn a_carrier_grades_presence_and_default_changes_as_input() {
+    let mut old = fixture();
+    old["types"]["EventQuery"]["fields"]
+        .as_array_mut()
+        .unwrap()
+        .push(read_only_field("optional"));
+    let old: Document = serde_json::from_value(old).unwrap();
+    old.validate().unwrap();
+
+    let mut required = serde_json::to_value(&old).unwrap();
+    required["types"]["EventQuery"]["fields"][1]["presence"] = serde_json::json!("required");
+    let new: Document = serde_json::from_value(required).unwrap();
+    assert!(new.validate().is_err());
+    let diff = old.diff(&new);
+    assert_eq!(
+        change_at(&old, &new, "types.EventQuery.fields.since").level,
+        ChangeLevel::Breaking,
+        "{:#?}",
+        diff.changes
+    );
+    assert_eq!(
+        change_at(&old, &new, "document").level,
+        ChangeLevel::Breaking
+    );
+
+    let mut bidirectional = fixture();
+    bidirectional["types"]["User"]["direction"] = serde_json::json!("both");
+    bidirectional["types"]["User"]["fields"]
+        .as_array_mut()
+        .unwrap()
+        .push(read_only_field("optional"));
+    let sent: Document = serde_json::from_value(bidirectional).unwrap();
+    sent.validate().unwrap();
+
+    let mut defaulted = serde_json::to_value(&sent).unwrap();
+    defaulted["types"]["User"]["fields"][2]["default"] = serde_json::json!("yesterday");
+    let new: Document = serde_json::from_value(defaulted).unwrap();
+    new.validate().unwrap();
+    let change = change_at(&sent, &new, "types.User.fields.since");
+    assert_eq!(change.level, ChangeLevel::Breaking, "{change:#?}");
+    assert_eq!(change.detail, "field default changed");
+}
+
 #[test]
 fn an_invalid_side_is_reported_once() {
     let old: Document = serde_json::from_value(fixture()).unwrap();
@@ -306,7 +452,7 @@ fn a_required_read_only_field_is_breaking_only_where_a_client_must_send_it() {
 }
 
 #[test]
-fn an_added_error_diagnostic_is_reported_once() {
+fn an_added_error_diagnostic_is_reported_next_to_the_validity_change() {
     let old: Document = serde_json::from_value(fixture()).unwrap();
     let mut changed = fixture();
     changed["types"]["User"]["diagnostics"] = serde_json::json!([
@@ -317,13 +463,27 @@ fn an_added_error_diagnostic_is_reported_once() {
     assert!(new.validate().is_err());
 
     let diff = old.diff(&new);
-    assert_eq!(diff.changes.len(), 1, "{:#?}", diff.changes);
-    let change = &diff.changes[0];
-    assert_eq!(change.path, "document");
-    assert_eq!(change.level, ChangeLevel::Breaking);
-    assert!(change.detail.starts_with("the new document is invalid: "));
-    assert!(change.detail.contains("error diagnostic type.x: first"));
-    assert!(change.detail.contains("error diagnostic type.x: second"));
+    let validity = diff
+        .changes
+        .iter()
+        .find(|change| change.path == "document")
+        .unwrap();
+    assert_eq!(validity.level, ChangeLevel::Breaking);
+    assert!(validity.detail.starts_with("the new document is invalid: "));
+    assert!(validity.detail.contains("error diagnostic type.x: first"));
+    assert!(validity.detail.contains("error diagnostic type.x: second"));
+    let added = diff
+        .changes
+        .iter()
+        .filter(|change| change.detail == "error diagnostic added: type.x")
+        .collect::<Vec<_>>();
+    assert_eq!(added.len(), 2, "{:#?}", diff.changes);
+    assert!(
+        added
+            .iter()
+            .all(|change| change.level == ChangeLevel::Breaking)
+    );
+    assert!(!diff.validity.new_is_valid());
 }
 
 #[test]
@@ -349,8 +509,39 @@ fn two_invalid_documents_are_reported_by_both_sides() {
     assert!(change.detail.contains("contradicts its type"));
     assert!(change.detail.contains("carrier names cannot be empty"));
     assert_eq!(diff.worst(), Some(ChangeLevel::Warning));
-    let errors = diff.new_document_errors.as_deref().unwrap();
-    assert!(errors.contains("carrier names cannot be empty"), "{errors}");
+
+    assert!(!diff.validity.new_is_valid());
+    assert!(!diff.validity.previous_is_valid());
+    assert!(
+        diff.validity
+            .previous
+            .iter()
+            .any(|error| error.to_string().contains("contradicts its type")),
+        "{:?}",
+        diff.validity.previous
+    );
+    assert!(
+        diff.validity
+            .new
+            .iter()
+            .any(|error| error.to_string().contains("carrier names cannot be empty")),
+        "{:?}",
+        diff.validity.new
+    );
+
+    assert_eq!(
+        diff.validity.previous.len(),
+        1,
+        "{:?}",
+        diff.validity.previous
+    );
+    assert_eq!(diff.validity.new.len(), 2, "{:?}", diff.validity.new);
+
+    let valid: Document = serde_json::from_value(fixture()).unwrap();
+    let unchanged = valid.diff(&valid);
+    assert!(unchanged.validity.new_is_valid());
+    assert!(unchanged.validity.previous_is_valid());
+    assert_eq!(unchanged, Diff::default());
 }
 
 fn set_diagnostics(diagnostics: &mut Vec<Diagnostic>, severity: Option<DiagnosticSeverity>) {
@@ -395,7 +586,7 @@ fn diagnostic_changes_are_reported_at_their_own_site() {
             (change.level, change.detail.as_str()),
             (
                 ChangeLevel::Breaking,
-                "error diagnostic severity escalated: type.x"
+                "diagnostic severity escalated: type.x"
             ),
             "{path}"
         );
@@ -405,7 +596,7 @@ fn diagnostic_changes_are_reported_at_their_own_site() {
             (change.level, change.detail.as_str()),
             (
                 ChangeLevel::NonBreaking,
-                "error diagnostic severity lowered: type.x"
+                "diagnostic severity lowered: type.x"
             ),
             "{path}"
         );
@@ -420,6 +611,89 @@ fn diagnostic_changes_are_reported_at_their_own_site() {
         );
         assert!(!escalated.diff(&repaired).has_breaking_changes(), "{path}");
     }
+}
+
+#[test]
+fn a_reworded_diagnostic_is_a_change_and_not_a_removal() {
+    let old: Document = serde_json::from_value(fixture()).unwrap();
+    let mut errored = old.clone();
+    errored
+        .types
+        .get_mut("User")
+        .unwrap()
+        .diagnostics
+        .push(Diagnostic {
+            severity: DiagnosticSeverity::Error,
+            code: "type.x".into(),
+            message: "the field is unresolved".into(),
+            origin: None,
+            ext: BTreeMap::new(),
+        });
+    assert!(errored.validate().is_err());
+
+    let mut reworded = errored.clone();
+    reworded.types.get_mut("User").unwrap().diagnostics[0].message =
+        "the field cannot be resolved".into();
+    let diff = errored.diff(&reworded);
+    assert!(errored.validate().is_err(), "the error is still there");
+    let reported = diff
+        .changes
+        .iter()
+        .filter(|change| change.path != "document")
+        .collect::<Vec<_>>();
+    assert_eq!(reported.len(), 1, "{:#?}", diff.changes);
+    assert_eq!(reported[0].level, ChangeLevel::NonBreaking);
+    assert_eq!(reported[0].detail, "diagnostic message changed: type.x");
+    assert!(
+        !diff
+            .changes
+            .iter()
+            .any(|change| change.detail.contains("removed")),
+        "a reword is not a removal: {:#?}",
+        diff.changes
+    );
+    assert!(errored.validate().is_err(), "the error is still there");
+    assert!(reworded.validate().is_err(), "the error is still there");
+    assert!(!errored.diff(&reworded).has_breaking_changes());
+}
+
+#[test]
+fn diagnostic_severity_transitions_key_on_the_transition() {
+    let old: Document = serde_json::from_value(fixture()).unwrap();
+    let warned = |severity| {
+        let mut document = old.clone();
+        document
+            .types
+            .get_mut("User")
+            .unwrap()
+            .diagnostics
+            .push(Diagnostic {
+                severity,
+                code: "type.x".into(),
+                message: "unresolved".into(),
+                origin: None,
+                ext: BTreeMap::new(),
+            });
+        document
+    };
+    let info = warned(DiagnosticSeverity::Info);
+    let warning = warned(DiagnosticSeverity::Warning);
+
+    let change = change_at(&info, &warning, "types.User");
+    assert_eq!(change.level, ChangeLevel::NonBreaking);
+    assert_eq!(change.detail, "diagnostic severity escalated: type.x");
+
+    let change = change_at(&warning, &info, "types.User");
+    assert_eq!(change.level, ChangeLevel::NonBreaking);
+    assert_eq!(change.detail, "diagnostic severity lowered: type.x");
+
+    let change = change_at(&info, &warned(DiagnosticSeverity::Error), "types.User");
+    assert_eq!(change.level, ChangeLevel::Breaking);
+    assert_eq!(change.detail, "diagnostic severity escalated: type.x");
+    assert!(
+        info.diff(&warned(DiagnosticSeverity::Error))
+            .has_breaking_changes()
+    );
 }
 
 #[test]
@@ -476,9 +750,11 @@ fn added_error_diagnostics_are_reported() {
     assert!(new.validate().is_err());
 
     let diff = old.diff(&new);
-    assert_eq!(diff.changes.len(), 1, "{:#?}", diff.changes);
-    let change = &diff.changes[0];
-    assert_eq!(change.path, "document");
+    let change = diff
+        .changes
+        .iter()
+        .find(|change| change.path == "document")
+        .unwrap();
     assert_eq!(change.level, ChangeLevel::Breaking);
     assert!(
         change
@@ -490,6 +766,22 @@ fn added_error_diagnostics_are_reported() {
             .detail
             .contains("error diagnostic variant.x: unresolved")
     );
+    for (path, code) in [
+        ("types.User.fields.id", "field.x"),
+        ("types.LoginError.variants.invalid", "variant.x"),
+    ] {
+        let change = diff
+            .changes
+            .iter()
+            .find(|change| change.path == path)
+            .unwrap_or_else(|| panic!("no change reported at {path}"));
+        assert_eq!(change.level, ChangeLevel::Breaking, "{path}");
+        assert_eq!(
+            change.detail,
+            format!("error diagnostic added: {code}"),
+            "{path}"
+        );
+    }
 }
 
 #[test]
@@ -827,7 +1119,7 @@ fn change_paths_stay_unique_across_the_lists_that_carry_them() {
         ("operations.auth.login.errors.4xx.x", "error removed"),
         ("auth_schemes.a.flows.Password", "OAuth2 token URL changed"),
         (
-            "auth_schemes.a%2Eflows.flows.Password",
+            "auth_schemes.a.flows.flows.Password",
             "OAuth2 token URL changed",
         ),
     ] {
@@ -838,6 +1130,72 @@ fn change_paths_stay_unique_across_the_lists_that_carry_them() {
             "no {detail:?} reported at {path} in {changes:#?}"
         );
     }
+}
+
+#[test]
+fn a_key_with_a_dot_prints_readable_and_escapes_only_on_a_collision() {
+    let record = |id: &str, wires: &[&str]| {
+        serde_json::from_value(serde_json::json!({
+            "kind": "struct",
+            "name": [id],
+            "direction": "output",
+            "openness": "reject",
+            "fields": wires.iter().map(|wire| serde_json::json!({
+                "wire": wire,
+                "ident": [wire],
+                "ty": {"kind": "string"},
+                "presence": "optional"
+            })).collect::<Vec<_>>()
+        }))
+        .unwrap()
+    };
+    let mut old: Document = serde_json::from_value(fixture()).unwrap();
+    old.types
+        .insert("A".into(), record("A", &["%b.fields.c", "f_o.fields.c"]));
+    old.types
+        .insert("A.fields.%b".into(), record("A_fields_percent_b", &["c"]));
+    old.types
+        .insert("A.fields.f_o".into(), record("A_fields_f_o", &["c"]));
+
+    let mut new = old.clone();
+    new.types.remove("A.fields.f_o");
+    old.validate().unwrap();
+    new.validate().unwrap();
+    assert_eq!(
+        change_at(&old, &new, "types.A.fields.f_o").detail,
+        "type removed"
+    );
+
+    let mut new = old.clone();
+    for (id, wire) in [
+        ("A", "%b.fields.c"),
+        ("A", "f_o.fields.c"),
+        ("A.fields.%b", "c"),
+        ("A.fields.f_o", "c"),
+    ] {
+        let TypeKind::Struct { fields, .. } = &mut new.types.get_mut(id).unwrap().definition else {
+            unreachable!()
+        };
+        fields.retain(|field| field.wire != wire);
+    }
+    old.validate().unwrap();
+    new.validate().unwrap();
+    let removed = old
+        .diff(&new)
+        .changes
+        .into_iter()
+        .filter(|change| change.detail == "field removed")
+        .map(|change| change.path)
+        .collect::<Vec<_>>();
+    assert_eq!(
+        removed,
+        [
+            "types.A.fields.%b.fields.c",
+            "types.A.fields.f_o.fields.c",
+            "types.A%2Efields%2E%25b.fields.c",
+            "types.A%2Efields%2Ef%5Fo.fields.c",
+        ]
+    );
 }
 
 #[test]

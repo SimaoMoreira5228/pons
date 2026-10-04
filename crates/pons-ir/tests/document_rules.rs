@@ -555,3 +555,388 @@ fn canonicalize_makes_a_reorder_of_flattened_members_the_same_document() {
     );
     assert!(forwards.diff(&backwards).changes.is_empty());
 }
+
+const CARRIERS: [&str; 3] = ["query", "form", "path"];
+
+fn carrier_document(types: Value, carrier: &str) -> Document {
+    let mut document = contract(types);
+    let mut operation = json!({
+        "id": [["events"], ["list"]],
+        "method": "POST",
+        "path": [{"lit": "events"}],
+        "responses": [{"status": 200, "content": "json", "body": {"kind": "string"}}],
+        "auth": {"alternatives": [], "optional": false},
+        "semantics": {"safe": false, "idempotent": false}
+    });
+    match carrier {
+        "query" => operation["query"] = json!({"ref": "Carrier"}),
+        "form" => {
+            operation["body"] =
+                json!({"ty": {"ref": "Carrier"}, "content": "form", "required": true})
+        }
+        _ => {
+            operation["path"] = json!([
+                {"lit": "events"},
+                {"param": "carrier", "ty": {"ref": "Carrier"}}
+            ])
+        }
+    }
+    document
+        .operations
+        .push(serde_json::from_value(operation).unwrap());
+    document
+}
+
+fn verdict(document: &Document) -> Vec<String> {
+    match document.validate() {
+        Ok(()) => Vec::new(),
+        Err(errors) => errors.iter().map(ToString::to_string).collect(),
+    }
+}
+
+fn verdicts(types: Value) -> Vec<Vec<String>> {
+    CARRIERS
+        .iter()
+        .map(|carrier| verdict(&carrier_document(types.clone(), carrier)))
+        .collect()
+}
+
+fn agreed(types: Value) -> Vec<Vec<String>> {
+    let verdicts = verdicts(types);
+    let refused = verdicts.iter().filter(|found| !found.is_empty()).count();
+    assert!(
+        refused == 0 || refused == CARRIERS.len(),
+        "one rule means every flat carrier answers a shape the same way: {verdicts:?}"
+    );
+    verdicts
+}
+
+fn carried_by_every_carrier(types: Value) {
+    for (carrier, found) in CARRIERS.iter().zip(agreed(types.clone())) {
+        assert!(
+            found.is_empty(),
+            "the {carrier} carrier refused a shape every flat carrier carries: {found:?}"
+        );
+    }
+}
+
+fn refused_by_every_carrier(types: Value, blamed: &str) {
+    for (carrier, found) in CARRIERS.iter().zip(agreed(types.clone())) {
+        assert_eq!(
+            found.len(),
+            1,
+            "one rule means one message from the {carrier} carrier: {found:?}"
+        );
+        assert!(
+            found[0].contains(blamed),
+            "the {carrier} carrier must name what it refused: {found:?}"
+        );
+        assert!(
+            found[0].contains(carrier),
+            "the {carrier} carrier must say which carrier it is: {found:?}"
+        );
+    }
+}
+
+fn field(wire: &str, ty: Value, presence: &str) -> Value {
+    json!({"wire": wire, "ident": [wire], "ty": ty, "presence": presence})
+}
+
+fn string() -> Value {
+    json!({"kind": "string"})
+}
+
+fn with(mut types: Value, extra: Value) -> Value {
+    types
+        .as_object_mut()
+        .unwrap()
+        .extend(extra.as_object().unwrap().clone());
+    types
+}
+
+fn carrier_struct(openness: Value, fields: Vec<Value>, flattened: Vec<&str>) -> Value {
+    json!({
+        "Carrier": {
+            "kind": "struct", "name": ["carrier"], "direction": "input", "openness": openness,
+            "fields": fields,
+            "flattened": flattened.iter().map(|id| json!({"ref": id})).collect::<Vec<_>>()
+        }
+    })
+}
+
+#[test]
+fn a_named_newtype_over_a_nullable_is_the_field_the_inline_one_is() {
+    let nullable = json!({"kind": "nullable", "inner": string()});
+    let types = |inner: Value, presence: &str| {
+        json!({
+            "MaybeName": {
+                "kind": "newtype", "name": ["maybe", "name"], "direction": "input", "inner": inner
+            },
+            "Carrier": {
+                "kind": "struct", "name": ["carrier"], "direction": "input", "openness": "reject",
+                "fields": [field("name", json!({"ref": "MaybeName"}), presence)]
+            }
+        })
+    };
+
+    refused_by_every_carrier(types(nullable.clone(), "required"), "name");
+    carried_by_every_carrier(types(nullable.clone(), "optional"));
+
+    let inline = |presence: &str| {
+        json!({
+            "Carrier": {
+                "kind": "struct", "name": ["carrier"], "direction": "input", "openness": "reject",
+                "fields": [field("name", nullable.clone(), presence)]
+            }
+        })
+    };
+    refused_by_every_carrier(inline("required"), "name");
+    carried_by_every_carrier(inline("optional"));
+}
+
+#[test]
+fn a_form_body_is_judged_by_the_record_rule_the_query_uses() {
+    for openness in [
+        json!("reject"),
+        json!({"preserve_typed": {"value": string()}}),
+        json!("preserve_opaque"),
+    ] {
+        let types = carrier_struct(
+            openness.clone(),
+            vec![field("a", string(), "optional")],
+            vec![],
+        );
+        if openness == json!("reject") {
+            carried_by_every_carrier(types);
+        } else {
+            refused_by_every_carrier(types, "Carrier");
+        }
+    }
+
+    refused_by_every_carrier(
+        with(
+            carrier_struct(
+                json!("reject"),
+                vec![field("b", string(), "optional")],
+                vec!["Member"],
+            ),
+            json!({
+                "Member": {
+                    "kind": "struct", "name": ["member"], "direction": "input",
+                    "openness": "preserve_opaque",
+                    "fields": [field("a", string(), "optional")]
+                }
+            }),
+        ),
+        "Member",
+    );
+    refused_by_every_carrier(
+        with(
+            carrier_struct(
+                json!("reject"),
+                vec![field("a", string(), "optional")],
+                vec!["Member"],
+            ),
+            json!({
+                "Nested": {
+                    "kind": "struct", "name": ["nested"], "direction": "input", "openness": "reject",
+                    "fields": [field("deep", string(), "optional")]
+                },
+                "Member": {
+                    "kind": "struct", "name": ["member"], "direction": "input", "openness": "reject",
+                    "fields": [field("deep", json!({"ref": "Nested"}), "optional")]
+                }
+            }),
+        ),
+        "deep",
+    );
+
+    for (top, path_carries) in [
+        (
+            json!({"kind": "map", "key": string(), "value": string()}),
+            false,
+        ),
+        (json!({"kind": "array", "item": string()}), false),
+        (
+            json!({"kind": "opaque", "codec": "axum.form", "wire": "unknown"}),
+            false,
+        ),
+        (string(), true),
+    ] {
+        let types = json!({"Carrier": {
+            "kind": "newtype", "name": ["carrier"], "direction": "input", "inner": top
+        }});
+        for carrier in ["query", "form"] {
+            let found = verdict(&carrier_document(types.clone(), carrier));
+            assert_eq!(found.len(), 1, "one rule means one message: {found:?}");
+            assert!(
+                found[0].contains("struct") && found[0].contains(carrier),
+                "the {carrier} carrier writes one key per field of a record: {found:?}"
+            );
+        }
+        let found = verdict(&carrier_document(types, "path"));
+        if path_carries {
+            assert!(
+                found.is_empty(),
+                "a path segment spells a string: {found:?}"
+            );
+            continue;
+        }
+        assert_eq!(found.len(), 1, "one rule means one message: {found:?}");
+        assert!(
+            found[0].contains("path parameter \"carrier\""),
+            "a path parameter that is not a record is one value it cannot spell: {found:?}"
+        );
+    }
+    carried_by_every_carrier(json!({
+        "Carrier": {
+            "kind": "newtype", "name": ["carrier"], "direction": "input",
+            "inner": {"ref": "CarrierBody"}
+        },
+        "CarrierBody": {
+            "kind": "struct", "name": ["carrier", "body"], "direction": "input", "openness": "reject",
+            "fields": [field("a", string(), "optional")]
+        }
+    }));
+}
+
+#[test]
+fn a_required_nullable_field_is_refused_by_the_nullable_rule_in_every_carrier() {
+    let types = |presence: &str| {
+        json!({
+            "Carrier": {
+                "kind": "struct", "name": ["carrier"], "direction": "input", "openness": "reject",
+                "fields": [field("email", json!({"kind": "nullable", "inner": string()}), presence)]
+            }
+        })
+    };
+    for (carrier, found) in CARRIERS.iter().zip(agreed(types("required"))) {
+        assert_eq!(found.len(), 1, "{carrier} must refuse it once: {found:?}");
+        assert!(
+            found[0].contains("email")
+                && found[0].contains("nullable")
+                && found[0].contains(carrier),
+            "{carrier} must blame the field that is required and nullable: {found:?}"
+        );
+        assert!(
+            !found[0].contains("cannot carry nested objects"),
+            "a scalar is not a nested object: {found:?}"
+        );
+    }
+    carried_by_every_carrier(types("optional"));
+}
+
+#[test]
+fn a_path_carrier_is_judged_by_the_value_and_duplicate_rules_the_query_uses() {
+    let nested = json!({
+        "Nested": {
+            "kind": "struct", "name": ["nested"], "direction": "input", "openness": "reject",
+            "fields": [field("deep", string(), "optional")]
+        }
+    });
+    for member in [
+        json!({"kind": "map", "key": string(), "value": string()}),
+        json!({"ref": "Nested"}),
+    ] {
+        refused_by_every_carrier(
+            with(
+                carrier_struct(
+                    json!("reject"),
+                    vec![field("member", member, "optional")],
+                    vec![],
+                ),
+                nested.clone(),
+            ),
+            "member",
+        );
+    }
+
+    refused_by_every_carrier(
+        with(
+            carrier_struct(
+                json!("reject"),
+                vec![field(
+                    "kind",
+                    json!({"kind": "int", "bits": 32, "signed": false, "wire": "string"}),
+                    "required",
+                )],
+                vec!["Seal"],
+            ),
+            json!({
+                "Seal": {
+                    "kind": "struct", "name": ["seal"], "direction": "input", "openness": "reject",
+                    "fields": [field("kind", string(), "required")]
+                }
+            }),
+        ),
+        "kind",
+    );
+}
+
+#[test]
+fn a_default_fills_the_key_a_read_only_field_drops() {
+    let types = |default: Option<Value>| {
+        let mut read_only = field("tenant", string(), "required");
+        read_only["access"] = json!("read_only");
+        if let Some(default) = default {
+            read_only["default"] = default;
+        }
+        carrier_struct(json!("reject"), vec![read_only], vec![])
+    };
+
+    refused_by_every_carrier(types(None), "tenant");
+    carried_by_every_carrier(types(Some(json!("acme"))));
+
+    let mut optional = field("tenant", string(), "optional");
+    optional["access"] = json!("read_only");
+    carried_by_every_carrier(carrier_struct(json!("reject"), vec![optional], vec![]));
+}
+
+#[test]
+fn a_form_body_carries_one_array_level_because_a_query_and_a_path_carry_none() {
+    let array = |levels: usize| {
+        let mut item = string();
+        for _ in 0..levels {
+            item = json!({"kind": "array", "item": item});
+        }
+        carrier_struct(
+            json!("reject"),
+            vec![field("tags", item, "optional")],
+            vec![],
+        )
+    };
+
+    carrier_document(array(1), "form").validate().unwrap();
+    for carrier in ["query", "path"] {
+        let found = verdict(&carrier_document(array(1), carrier));
+        assert_eq!(
+            found.len(),
+            1,
+            "the {carrier} carrier writes one value per key: {found:?}"
+        );
+    }
+
+    refused_by_every_carrier(array(2), "tags");
+}
+
+#[test]
+fn a_nullable_field_axum_lowers_to_an_absent_key_is_a_field_every_carrier_carries() {
+    carried_by_every_carrier(carrier_struct(
+        json!("reject"),
+        vec![field("email", string(), "optional")],
+        vec![],
+    ));
+
+    refused_by_every_carrier(
+        carrier_struct(
+            json!("reject"),
+            vec![field(
+                "email",
+                json!({"kind": "nullable", "inner": string()}),
+                "required",
+            )],
+            vec![],
+        ),
+        "email",
+    );
+}

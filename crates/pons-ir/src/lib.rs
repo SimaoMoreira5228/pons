@@ -10,7 +10,7 @@ mod value;
 mod violation;
 
 pub use coverage::{CoverageLevel, canonical_coverage, coverage_subjects, strict_violations};
-pub use diff::{Change, ChangeLevel, Diff};
+pub use diff::{Change, ChangeLevel, Diff, Validity};
 pub use document::{Document, Info, ValidationError};
 pub use media::{is_valid_media_type, media_type_matches};
 pub use operation::{

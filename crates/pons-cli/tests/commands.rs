@@ -107,7 +107,7 @@ fn diff_returns_nonzero_for_removed_operations() {
     fs::write(&new, serde_json::to_vec(&input).unwrap()).unwrap();
 
     let output = pons().arg("diff").arg(&old).arg(&new).output().unwrap();
-    assert_eq!(output.status.code(), Some(1));
+    assert_eq!(output.status.code(), Some(2));
     assert!(
         String::from_utf8_lossy(&output.stdout)
             .contains("BREAKING operations.auth.login: operation removed")
@@ -125,7 +125,7 @@ fn diff_returns_nonzero_for_idempotency_changes() {
     fs::write(&new, serde_json::to_vec(&input).unwrap()).unwrap();
 
     let output = pons().arg("diff").arg(&old).arg(&new).output().unwrap();
-    assert_eq!(output.status.code(), Some(1));
+    assert_eq!(output.status.code(), Some(2));
     assert!(
         String::from_utf8_lossy(&output.stdout)
             .contains("BREAKING operations.auth.login.semantics: operation idempotency changed")
@@ -143,7 +143,7 @@ fn diff_returns_nonzero_for_type_name_changes() {
     fs::write(&new, serde_json::to_vec(&input).unwrap()).unwrap();
 
     let output = pons().arg("diff").arg(&old).arg(&new).output().unwrap();
-    assert_eq!(output.status.code(), Some(1));
+    assert_eq!(output.status.code(), Some(2));
     assert!(
         String::from_utf8_lossy(&output.stdout).contains("BREAKING types.User: type name changed")
     );
@@ -201,15 +201,11 @@ fn diff_passes_a_repair_of_an_invalid_previous_contract() {
     fs::write(&new, FIXTURE).unwrap();
 
     let output = pons().arg("diff").arg(&old).arg(&new).output().unwrap();
-    assert!(
-        output.status.success(),
-        "{}",
-        String::from_utf8_lossy(&output.stderr)
-    );
+    assert_eq!(output.status.code(), Some(1));
+    assert!(output.stderr.is_empty());
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(stdout.contains("INFO document: the previous document was invalid"));
     assert!(stdout.contains("NON_BREAKING types.User.fields.nickname: field default changed"));
-    assert!(output.stderr.is_empty());
 }
 
 #[test]
@@ -223,15 +219,82 @@ fn diff_passes_a_warning_only_change() {
     fs::write(&new, serde_json::to_vec(&input).unwrap()).unwrap();
 
     let output = pons().arg("diff").arg(&old).arg(&new).output().unwrap();
-    assert!(
-        output.status.success(),
-        "{}",
-        String::from_utf8_lossy(&output.stderr)
-    );
+    assert_eq!(output.status.code(), Some(1));
+    assert!(output.stderr.is_empty());
     assert!(
         String::from_utf8_lossy(&output.stdout)
             .contains("WARNING operations.auth.login.body: request body metadata changed")
     );
+}
+
+#[test]
+fn only_unchanged_or_non_breaking_contracts_exit_below_two() {
+    let directory = tempfile::tempdir().unwrap();
+    let old = directory.path().join("old.json");
+    let new = directory.path().join("new.json");
+    let mut input: Value = serde_json::from_str(FIXTURE).unwrap();
+    fs::write(&old, FIXTURE).unwrap();
+
+    fs::write(&new, FIXTURE).unwrap();
+    assert_eq!(
+        pons()
+            .arg("diff")
+            .arg(&old)
+            .arg(&new)
+            .output()
+            .unwrap()
+            .status
+            .code(),
+        Some(0)
+    );
+
+    input["info"]["title"] = serde_json::json!("Renamed");
+    fs::write(&new, serde_json::to_vec(&input).unwrap()).unwrap();
+    let code = pons()
+        .arg("diff")
+        .arg(&old)
+        .arg(&new)
+        .output()
+        .unwrap()
+        .status
+        .code();
+    assert!(
+        code.is_some_and(|code| code < 2),
+        "{code:?} must read as success"
+    );
+
+    let mut breaking: Value = serde_json::from_str(FIXTURE).unwrap();
+    breaking["types"]["User"]["fields"][0]["ident"] = serde_json::json!(["userId"]);
+    fs::write(&new, serde_json::to_vec(&breaking).unwrap()).unwrap();
+    let code = pons()
+        .arg("diff")
+        .arg(&old)
+        .arg(&new)
+        .output()
+        .unwrap()
+        .status
+        .code();
+    assert!(
+        code.is_some_and(|code| code >= 2),
+        "{code:?} must read as failure"
+    );
+
+    for arguments in [
+        vec!["check", "missing.json"],
+        vec!["diff", "missing.json", "missing.json"],
+        vec!["nonsense", FIXTURE],
+    ] {
+        let output = pons()
+            .args(&arguments)
+            .current_dir(directory.path())
+            .output()
+            .unwrap();
+        assert!(
+            output.status.code().is_some_and(|code| code >= 2),
+            "{arguments:?} exited {:?}",
+            output.status.code()
+        );
+    }
 }
 
 #[test]
@@ -266,7 +329,7 @@ fn diff_reports_an_unreadable_contract_with_its_own_exit_code() {
 
     let output = pons().arg("diff").arg(&old).arg(&typo).output().unwrap();
     let stderr = String::from_utf8_lossy(&output.stderr);
-    assert_eq!(output.status.code(), Some(4), "{stderr}");
+    assert_eq!(output.status.code(), Some(5), "{stderr}");
     assert!(stderr.contains("cannot read"), "{stderr}");
     assert!(stderr.contains("typo.json"), "{stderr}");
     assert_eq!(String::from_utf8_lossy(&output.stdout), "");
@@ -276,7 +339,7 @@ fn diff_reports_an_unreadable_contract_with_its_own_exit_code() {
 fn help_documents_every_exit_code() {
     let output = pons().arg("--help").output().unwrap();
     let help = String::from_utf8_lossy(&output.stdout);
-    for line in ["0  ", "1  ", "2  ", "3  ", "4  "] {
+    for line in ["0  ", "1  ", "2  ", "3  ", "4  ", "5  "] {
         assert!(help.contains(line), "{line} missing from the help");
     }
     assert!(help.contains("breaking"), "{help}");
@@ -430,6 +493,44 @@ fn emit_rejects_coverage_paths_that_alias_output_files() {
 }
 
 #[test]
+fn emit_rejects_coverage_paths_the_plugin_protocol_would_also_refuse() {
+    let directory = tempfile::tempdir().unwrap();
+    let input_path = directory.path().join("api.json");
+    fs::write(&input_path, FIXTURE).unwrap();
+
+    for coverage in [
+        "NUL",
+        "nul.json",
+        "a:b.json",
+        "sub/CON.txt",
+        "nested/aux",
+        "com1.json",
+        "LPT9.json",
+        "coverage/../escape.json",
+        "",
+    ] {
+        let output_dir = directory
+            .path()
+            .join(format!("generated{}", coverage.replace(['/', ':'], "_")));
+        let output = pons()
+            .args(["emit", "--target", "openapi"])
+            .arg(&input_path)
+            .arg(&output_dir)
+            .args(["--coverage", coverage])
+            .output()
+            .unwrap();
+
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert_eq!(output.status.code(), Some(5), "{coverage:?}: {stderr}");
+        assert!(
+            stderr.contains("safe relative path"),
+            "{coverage:?}: {stderr}"
+        );
+        assert!(!output_dir.exists(), "{coverage:?} wrote to {output_dir:?}");
+    }
+}
+
+#[test]
 fn emit_selects_the_throwing_typescript_strategy() {
     let directory = tempfile::tempdir().unwrap();
     let output_dir = directory.path().join("generated");
@@ -475,7 +576,7 @@ fn emit_rejects_the_error_strategy_for_non_typescript_targets() {
             let stderr = String::from_utf8_lossy(&output.stderr);
             assert_eq!(
                 output.status.code(),
-                Some(2),
+                Some(4),
                 "{target} --errors {strategy}"
             );
             assert_eq!(
@@ -512,7 +613,7 @@ fn emit_rejects_a_flag_supplied_as_another_flag_s_value() {
             .unwrap();
 
         let stderr = String::from_utf8_lossy(&output.stderr);
-        assert_eq!(output.status.code(), Some(2), "{flag} {value}: {stderr}");
+        assert_eq!(output.status.code(), Some(4), "{flag} {value}: {stderr}");
         assert!(stderr.contains(flag), "{flag} {value}: {stderr}");
         assert!(stderr.contains(value), "{flag} {value}: {stderr}");
         assert!(
@@ -559,7 +660,7 @@ fn emit_accepts_a_repeated_coverage_flag_and_rejects_a_conflict() {
             .unwrap();
 
         let stderr = String::from_utf8_lossy(&output.stderr);
-        assert_eq!(output.status.code(), Some(2), "{flags:?}: {stderr}");
+        assert_eq!(output.status.code(), Some(4), "{flags:?}: {stderr}");
         assert!(stderr.contains("--strict"), "{flags:?}: {stderr}");
         assert!(stderr.contains("--lossy"), "{flags:?}: {stderr}");
         assert!(!output_dir.exists(), "{flags:?} wrote to {output_dir:?}");
@@ -567,7 +668,7 @@ fn emit_accepts_a_repeated_coverage_flag_and_rejects_a_conflict() {
 }
 
 #[test]
-fn malformed_arguments_exit_two_with_a_one_line_diagnosis() {
+fn malformed_arguments_exit_with_the_usage_code_and_a_one_line_diagnosis() {
     let directory = tempfile::tempdir().unwrap();
     fs::write(directory.path().join("api.json"), FIXTURE).unwrap();
 
@@ -597,7 +698,7 @@ fn malformed_arguments_exit_two_with_a_one_line_diagnosis() {
             .unwrap();
 
         let stderr = String::from_utf8_lossy(&output.stderr);
-        assert_eq!(output.status.code(), Some(2), "{arguments:?}: {stderr}");
+        assert_eq!(output.status.code(), Some(4), "{arguments:?}: {stderr}");
         assert!(stderr.starts_with("pons: "), "{arguments:?}: {stderr}");
         assert_eq!(stderr.lines().count(), 1, "{arguments:?}: {stderr}");
         assert!(stderr.contains(expected), "{arguments:?}: {stderr}");

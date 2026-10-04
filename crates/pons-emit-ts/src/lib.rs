@@ -176,16 +176,7 @@ pub fn emit_with_strategy(
             )?,
         },
     ];
-    if mode == EmitMode::Strict
-        && let Some((level, subjects)) = pons_ir::strict_violations(coverage.levels(), true)
-            .into_iter()
-            .next()
-    {
-        return Err(EmitError(format!(
-            "the TypeScript emitter reported {level} coverage in strict mode: {}",
-            subjects.join(", ")
-        )));
-    }
+    strict_coverage_error(mode, &coverage)?;
     let mut warnings = Vec::new();
     if mode == EmitMode::Lossy {
         if !wide_integers.is_empty() {
@@ -206,6 +197,15 @@ pub fn emit_with_strategy(
         warnings,
         coverage,
     })
+}
+
+fn strict_coverage_error(mode: EmitMode, coverage: &Coverage) -> Result<(), EmitError> {
+    match mode {
+        EmitMode::Strict => pons_plugin::strict_violation_message(coverage)
+            .map(|violations| EmitError(format!("the TypeScript emitter reported {violations}")))
+            .map_or(Ok(()), Err),
+        EmitMode::Lossy => Ok(()),
+    }
 }
 
 fn validate_query_types(document: &Document) -> Result<(), EmitError> {
@@ -1328,6 +1328,29 @@ mod tests {
             .unwrap();
         assert!(warning.contains("operations[0].errors[0].headers[0].ty"));
         assert!(warning.contains("common_errors[0].headers[0].ty"));
+    }
+
+    #[test]
+    fn strict_mode_names_every_violating_coverage_class() {
+        let coverage = super::Coverage {
+            lossy: ["types.User".into()].into_iter().collect(),
+            unsupported: ["operations.auth.login".into()].into_iter().collect(),
+            ..super::Coverage::default()
+        };
+        let error = super::strict_coverage_error(super::EmitMode::Strict, &coverage)
+            .unwrap_err()
+            .0;
+        assert_eq!(
+            error,
+            "the TypeScript emitter reported unsupported coverage in strict mode: \
+             operations.auth.login; lossy coverage in strict mode: types.User",
+            "every violating class is named, worst class first"
+        );
+        assert!(super::strict_coverage_error(super::EmitMode::Lossy, &coverage).is_ok());
+        assert!(
+            super::strict_coverage_error(super::EmitMode::Strict, &super::Coverage::default())
+                .is_ok()
+        );
     }
 
     #[test]

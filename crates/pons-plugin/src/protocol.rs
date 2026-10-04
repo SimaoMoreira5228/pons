@@ -14,6 +14,7 @@ const STREAM_BODY: &str = "stream_body";
 const STREAMING: &[&str] = &["sse", "ndjson", "bytes", "websocket", STREAM_BODY];
 const ENUM_REPRS: &[&str] = &["string", "external", "internal", "adjacent", "untagged"];
 const OBJECT_OPENNESS: &[&str] = &["reject", "preserve_typed", "preserve_opaque"];
+const DEVICE_INDEXES: &[&str] = &["1", "2", "3", "4", "5", "6", "7", "8", "9", "¹", "²", "³"];
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -121,7 +122,6 @@ fn coverage_set<E: de::Error>(level: &str, values: Vec<String>) -> Result<BTreeS
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
-#[serde(deny_unknown_fields)]
 pub struct EmitRequest<'a> {
     pub protocol: u32,
     pub mode: EmitMode,
@@ -462,18 +462,22 @@ pub(crate) fn validate_response_for_document(
     if mode == EmitMode::Strict && !opaque_supported && !coverage.opaque.is_empty() {
         return Err("emitter reported opaque coverage without declaring opaque support".into());
     }
-    if mode == EmitMode::Strict {
-        let violations: Vec<String> = pons_ir::strict_violations(coverage.levels(), true)
-            .into_iter()
-            .map(|(level, subjects)| {
-                format!("{level} coverage in strict mode: {}", subjects.join(", "))
-            })
-            .collect();
-        if !violations.is_empty() {
-            return Err(format!("emitter reported {}", violations.join("; ")));
-        }
+    if mode == EmitMode::Strict
+        && let Some(violations) = strict_violation_message(coverage)
+    {
+        return Err(format!("emitter reported {violations}"));
     }
     Ok(())
+}
+
+pub fn strict_violation_message(coverage: &Coverage) -> Option<String> {
+    let violations: Vec<String> = pons_ir::strict_violations(coverage.levels(), true)
+        .into_iter()
+        .map(|(level, subjects)| {
+            format!("{level} coverage in strict mode: {}", subjects.join(", "))
+        })
+        .collect();
+    (!violations.is_empty()).then(|| violations.join("; "))
 }
 
 fn validate_capability_list(list: &str, values: &[String], allowed: &[&str]) -> Result<(), String> {
@@ -529,14 +533,15 @@ fn validate_output_path(path: &str) -> Result<(), String> {
 }
 
 fn is_reserved_device(segment: &str) -> bool {
-    let name = segment
+    let trimmed = segment.trim_end_matches(' ');
+    let name = trimmed
         .split_once('.')
-        .map_or(segment, |(stem, _)| stem)
+        .map_or(trimmed, |(stem, _)| stem)
         .to_ascii_uppercase();
     matches!(name.as_str(), "NUL" | "CON" | "PRN" | "AUX")
         || ["COM", "LPT"].iter().any(|prefix| {
             name.strip_prefix(prefix)
-                .is_some_and(|n| n.len() == 1 && matches!(n.as_bytes()[0], b'1'..=b'9'))
+                .is_some_and(|index| DEVICE_INDEXES.contains(&index))
         })
 }
 
@@ -1675,6 +1680,40 @@ mod tests {
             error: None,
         };
         assert!(validate_response(&response).is_err());
+    }
+
+    #[test]
+    fn windows_device_names_survive_superscripts_and_trailing_spaces() {
+        for path in [
+            "com¹",
+            "COM³",
+            "com2.txt",
+            "LPT¹ ",
+            "lpt³.log ",
+            "NUL ",
+            "con  ",
+            "aux ",
+        ] {
+            let response = EmitResponse {
+                protocol: PROTOCOL_VERSION,
+                files: vec![file(path)],
+                diagnostics: Vec::new(),
+                coverage: None,
+                error: None,
+            };
+            assert!(validate_response(&response).is_err(), "accepted {path:?}");
+        }
+
+        for path in ["com¹⁰", "lpt1a", "null", "com10 ", "com⁴"] {
+            let response = EmitResponse {
+                protocol: PROTOCOL_VERSION,
+                files: vec![file(path)],
+                diagnostics: Vec::new(),
+                coverage: None,
+                error: None,
+            };
+            assert!(validate_response(&response).is_ok(), "refused {path:?}");
+        }
     }
 
     fn file(path: &str) -> GeneratedFile {

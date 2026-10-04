@@ -127,6 +127,7 @@ impl pons_axum::SseEvent for UserEvent {
 }
 
 #[derive(Deserialize, Schema)]
+#[serde(deny_unknown_fields)]
 struct CreateUser {
     name: String,
 }
@@ -1427,6 +1428,10 @@ fn a_route_axum_also_answers_with_head_says_the_document_describes_only_get() {
         Router::<()>::new(info())
             .route("/probe", get(first_user).head(second_user))
             .document(),
+        Router::<()>::new(info())
+            .route("/probe", get(first_user))
+            .route("/probe", head(second_user))
+            .document(),
     ] {
         assert!(
             head_diagnostic(&document).is_none(),
@@ -1438,6 +1443,23 @@ fn a_route_axum_also_answers_with_head_says_the_document_describes_only_get() {
                 .collect::<Vec<_>>()
         );
     }
+
+    let apart = Router::<()>::new(info())
+        .route("/probe", get(first_user))
+        .route("/probe/head", head(second_user))
+        .document();
+    assert_eq!(
+        apart
+            .operations
+            .iter()
+            .filter(|operation| operation
+                .diagnostics
+                .iter()
+                .any(|entry| entry.code == "PONS-W103"))
+            .count(),
+        1,
+        "the GET on a path no HEAD operation answers is the only one axum answers with HEAD"
+    );
 }
 
 #[test]
@@ -1650,10 +1672,17 @@ fn router_describes_path_query_body_response_and_state() {
     assert_eq!(post.body.as_ref().unwrap().content, ContentKind::Json);
     assert_eq!(post.responses[0].status, ResponseStatus::Exact(201));
     assert!(
-        post.diagnostics
+        post.errors
             .iter()
-            .any(|diagnostic| diagnostic.code == "PONS-W101" && diagnostic.message.contains("413")),
-        "{:?} must say the framework rejects a request body it reads before the handler runs",
+            .any(|error| error.status == pons_ir::ErrorStatus::Exact(422)),
+        "a pons body reader answers a body it cannot read as the rejection it declares: {:?}",
+        post.errors
+    );
+    assert!(
+        !post.diagnostics.iter().any(|diagnostic| {
+            diagnostic.code == "PONS-W101" && diagnostic.message.contains("413")
+        }),
+        "{:?} must not claim a status pons reads the body before the framework can answer it",
         post.diagnostics
     );
     let response = WithStatus::<201, _>::new(axum::Json(User {

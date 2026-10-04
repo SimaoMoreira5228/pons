@@ -147,14 +147,8 @@ pub fn emit_with_mode(document: &Document, mode: EmitMode) -> Result<EmitOutput,
 
 fn coverage_warnings(mode: EmitMode, coverage: &Coverage) -> Result<Vec<String>, EmitError> {
     if mode == EmitMode::Strict {
-        if let Some((level, subjects)) = pons_ir::strict_violations(coverage.levels(), true)
-            .into_iter()
-            .next()
-        {
-            return Err(EmitError(format!(
-                "OpenAPI emitter reported {level} coverage in strict mode: {}",
-                subjects.join(", ")
-            )));
+        if let Some(violations) = pons_plugin::strict_violation_message(coverage) {
+            return Err(EmitError(format!("OpenAPI emitter reported {violations}")));
         }
         return Ok(Vec::new());
     }
@@ -721,6 +715,25 @@ mod tests {
             ..Coverage::default()
         };
         assert!(super::coverage_warnings(super::EmitMode::Strict, &carried).is_ok());
+    }
+
+    #[test]
+    fn strict_mode_names_every_violating_coverage_class() {
+        let coverage = Coverage {
+            lossy: ["types.User".into()].into_iter().collect(),
+            unsupported: ["operations.auth.login".into()].into_iter().collect(),
+            ..Coverage::default()
+        };
+        let error = super::coverage_warnings(super::EmitMode::Strict, &coverage)
+            .unwrap_err()
+            .0;
+        assert_eq!(
+            error,
+            "OpenAPI emitter reported unsupported coverage in strict mode: operations.auth.login; \
+             lossy coverage in strict mode: types.User",
+            "every violating class is named, worst class first"
+        );
+        assert!(super::coverage_warnings(super::EmitMode::Lossy, &coverage).is_ok());
     }
 
     #[test]

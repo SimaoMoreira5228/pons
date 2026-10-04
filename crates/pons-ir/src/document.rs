@@ -402,20 +402,10 @@ impl Document {
                             message: format!("duplicate path parameter {param}"),
                         });
                     }
-                    if self.is_nullable_type(ty, &mut BTreeSet::new()) {
+                    if let Err(refusal) = crate::query::path_fields(self, param, ty) {
                         errors.push(ValidationError::InvalidValue {
                             path: owner.clone(),
-                            message: format!("required path parameter {param} cannot be nullable"),
-                        });
-                    }
-                    if let Some(wire) = crate::query::required_read_only(self, ty) {
-                        errors.push(ValidationError::InvalidValue {
-                            path: owner.clone(),
-                            message: crate::query::read_only_message(
-                                "path parameter",
-                                "a path segment",
-                                &wire,
-                            ),
+                            message: refusal.in_carrier(&crate::query::PATH),
                         });
                     }
                 }
@@ -469,23 +459,12 @@ impl Document {
                             .into(),
                     });
                 }
-                if body.content == ContentKind::Form && !self.is_flat_form_body(&body.ty) {
-                    errors.push(ValidationError::InvalidValue {
-                        path: owner.clone(),
-                        message: "form bodies must be a flat record of scalars and arrays of scalars, because a urlencoded form cannot carry nested objects"
-                            .into(),
-                    });
-                }
                 if body.content == ContentKind::Form
-                    && let Some(wire) = crate::query::required_read_only(self, &body.ty)
+                    && let Err(refusal) = crate::query::form_body_fields(self, &body.ty)
                 {
                     errors.push(ValidationError::InvalidValue {
                         path: owner.clone(),
-                        message: crate::query::read_only_message(
-                            "form body field",
-                            "a urlencoded form field",
-                            &wire,
-                        ),
+                        message: refusal.in_carrier(&crate::query::FORM),
                     });
                 }
             }
@@ -1265,52 +1244,6 @@ impl Document {
                 result
             }
             TypeRef::Inline(_) => false,
-        }
-    }
-
-    fn is_flat_form_body(&self, ty: &TypeRef) -> bool {
-        self.is_form_value(ty, true, &mut BTreeSet::new())
-    }
-
-    fn is_form_value(&self, ty: &TypeRef, top: bool, visiting: &mut BTreeSet<String>) -> bool {
-        match ty {
-            TypeRef::Named(named) => {
-                if !visiting.insert(named.id.clone()) {
-                    return false;
-                }
-                let result = match self
-                    .types
-                    .get(&named.id)
-                    .map(|definition| &definition.definition)
-                {
-                    None => true,
-                    Some(TypeKind::Newtype { inner }) => self.is_form_value(inner, top, visiting),
-                    Some(TypeKind::Struct { fields, .. }) if top => fields.iter().all(|field| {
-                        crate::query::encodes_nullable_as_absence(self, field)
-                            && self.is_form_value(&field.ty, false, visiting)
-                    }),
-                    Some(TypeKind::Enum { .. }) => {
-                        crate::query::is_scalar_field(self, ty, &mut Vec::new())
-                    }
-                    Some(TypeKind::Struct { .. }) => false,
-                };
-                visiting.remove(&named.id);
-                result
-            }
-            TypeRef::Inline(InlineType::Nullable { inner }) => {
-                self.is_form_value(inner, top, visiting)
-            }
-            TypeRef::Inline(InlineType::Array { item, .. }) if top => {
-                self.is_form_value(item, false, visiting)
-            }
-            TypeRef::Inline(InlineType::Map { value, .. }) if top => {
-                self.is_form_value(value, false, visiting)
-            }
-            TypeRef::Inline(_) if top => true,
-            TypeRef::Inline(InlineType::Array { item, .. }) => {
-                crate::query::is_scalar_field(self, item, &mut Vec::new())
-            }
-            TypeRef::Inline(_) => crate::query::is_scalar_field(self, ty, &mut Vec::new()),
         }
     }
 
@@ -2583,23 +2516,34 @@ mod tests {
         document
     }
 
-    fn rejects_nested_form_values(document: &Document) {
-        let errors = document
+    fn form_errors(document: &Document) -> Vec<String> {
+        document
             .validate()
             .unwrap_err()
             .iter()
             .map(ToString::to_string)
-            .collect::<Vec<_>>();
+            .collect()
+    }
+
+    fn refuses_form_field(document: &Document, wire: &str) {
+        let errors = form_errors(document);
+        let blamed = format!("form body field {wire:?}");
         assert!(
-            errors
-                .iter()
-                .any(|error| error.contains("form bodies must be a flat record")),
-            "a nested form value must be rejected: {errors:?}"
+            errors.iter().any(|error| error.contains(&blamed)),
+            "a form body value the carrier cannot spell is blamed by its own field: {errors:?}"
+        );
+    }
+
+    fn refuses_form(document: &Document, message: &str) {
+        let errors = form_errors(document);
+        assert!(
+            errors.iter().any(|error| error.contains(message)),
+            "{message:?} missing from {errors:?}"
         );
     }
 
     #[test]
-    fn form_bodies_reuse_the_query_scalar_rule_and_reject_nested_objects() {
+    fn a_form_body_is_a_record_of_flat_values_and_nothing_else() {
         for (fields, extra, body) in [
             (vec![("email", string())], vec![], None),
             (
@@ -2612,14 +2556,6 @@ mod tests {
                 )],
                 Some(named("Wrapped")),
             ),
-            (
-                vec![],
-                vec![],
-                Some(TypeRef::Inline(InlineType::Opaque {
-                    codec: "axum.form".into(),
-                    wire: OpaqueWire::Unknown,
-                })),
-            ),
         ] {
             let mut document = form_document(fields, extra);
             if let Some(body) = body {
@@ -2628,11 +2564,25 @@ mod tests {
             document.validate().unwrap();
         }
 
-        for (fields, extra) in [
-            (vec![("profile", named("Profile"))], vec![profile()]),
-            (vec![("profile", map(string()))], vec![]),
-            (vec![("email", nullable(string()))], vec![]),
+        let mut opaque = form_document(vec![("email", string())], vec![]);
+        opaque.operations[0].body.as_mut().unwrap().ty = TypeRef::Inline(InlineType::Opaque {
+            codec: "axum.form".into(),
+            wire: OpaqueWire::Unknown,
+        });
+        refuses_form(
+            &opaque,
+            "a form body must be a struct or a transparent newtype over a struct, because a urlencoded form writes one key per field",
+        );
+
+        for (wire, fields, extra) in [
             (
+                "profile",
+                vec![("profile", named("Profile"))],
+                vec![profile()],
+            ),
+            ("profile", vec![("profile", map(string()))], vec![]),
+            (
+                "profile",
                 vec![("profile", named("WrappedProfile"))],
                 vec![
                     profile(),
@@ -2645,9 +2595,13 @@ mod tests {
                 ],
             ),
         ] {
-            rejects_nested_form_values(&form_document(fields, extra));
+            refuses_form_field(&form_document(fields, extra), wire);
         }
 
+        refuses_form(
+            &form_document(vec![("email", nullable(string()))], vec![]),
+            "form body field \"email\" is required and nullable; a urlencoded form field has no encoding for a present null",
+        );
         form_document_with(
             Presence::Optional,
             vec![("email", nullable(string()))],
@@ -2658,7 +2612,7 @@ mod tests {
     }
 
     #[test]
-    fn form_bodies_add_one_array_level_to_the_query_scalar_rule() {
+    fn a_form_body_carries_one_array_level_and_no_more() {
         form_document(vec![("tags", array(string()))], vec![])
             .validate()
             .unwrap();
@@ -2670,13 +2624,24 @@ mod tests {
         .validate()
         .unwrap();
 
-        for (fields, extra) in [
-            (vec![("matrix", array(array(string())))], vec![]),
-            (vec![("profiles", array(named("Profile")))], vec![profile()]),
-            (vec![("tags", nullable(array(string())))], vec![]),
+        for (wire, fields, extra) in [
+            (
+                "matrix",
+                vec![("matrix", array(array(string())))],
+                Vec::new(),
+            ),
+            (
+                "profiles",
+                vec![("profiles", array(named("Profile")))],
+                vec![profile()],
+            ),
         ] {
-            rejects_nested_form_values(&form_document(fields, extra));
+            refuses_form_field(&form_document(fields, extra), wire);
         }
+        refuses_form(
+            &form_document(vec![("tags", nullable(array(string())))], vec![]),
+            "form body field \"tags\" is required and nullable",
+        );
     }
 
     #[test]
