@@ -413,7 +413,7 @@ fn an_invalid_side_is_reported_once() {
 }
 
 #[test]
-fn a_required_read_only_field_is_breaking_only_where_a_client_must_send_it() {
+fn a_required_read_only_field_refuses_the_document_in_every_carrier() {
     let field = serde_json::json!({
         "wire": "since",
         "ident": ["since"],
@@ -421,6 +421,7 @@ fn a_required_read_only_field_is_breaking_only_where_a_client_must_send_it() {
         "presence": "required",
         "access": "read_only"
     });
+    let refusal = "the client drops the field on encode and every server built from the document waits for a key the client cannot send";
 
     let mut bidirectional = fixture();
     bidirectional["types"]["User"]["direction"] = serde_json::json!("both");
@@ -431,9 +432,13 @@ fn a_required_read_only_field_is_breaking_only_where_a_client_must_send_it() {
         .unwrap()
         .push(field.clone());
     let new: Document = serde_json::from_value(changed).unwrap();
-    new.validate().unwrap();
+    assert!(rejections(&new).iter().any(|error| error.contains(refusal)));
     assert_eq!(
         change_at(&old, &new, "types.User.fields.since").level,
+        ChangeLevel::Breaking
+    );
+    assert_eq!(
+        change_at(&old, &new, "document").level,
         ChangeLevel::Breaking
     );
 
@@ -444,11 +449,20 @@ fn a_required_read_only_field_is_breaking_only_where_a_client_must_send_it() {
         .unwrap()
         .push(field);
     let new: Document = serde_json::from_value(changed).unwrap();
-    new.validate().unwrap();
-    let change = change_at(&old, &new, "types.LoginRequest.fields.since");
-    assert_eq!(change.level, ChangeLevel::NonBreaking);
-    assert_eq!(change.detail, "field added");
-    assert!(!old.diff(&new).has_breaking_changes());
+    assert!(rejections(&new).iter().any(|error| error.contains(refusal)));
+    assert_eq!(
+        change_at(&old, &new, "document").level,
+        ChangeLevel::Breaking
+    );
+}
+
+fn rejections(document: &Document) -> Vec<String> {
+    document
+        .validate()
+        .unwrap_err()
+        .iter()
+        .map(ToString::to_string)
+        .collect()
 }
 
 #[test]

@@ -991,7 +991,7 @@ fn validation_rejects_a_use_site_whose_type_cannot_cross_the_boundary() {
                 raw["types"]["Envelope"] = json!({
                     "kind": "struct", "name": ["envelope"], "direction": "both",
                     "openness": "reject",
-                    "fields": [{"wire": "user", "ident": ["user"], "ty": {"ref": "User"}, "presence": "required", "access": "read_only"}]
+                    "fields": [{"wire": "user", "ident": ["user"], "ty": {"ref": "User"}, "presence": "optional", "access": "read_only"}]
                 });
                 raw["operations"][0]["body"] =
                     json!({"ty": {"ref": "Envelope"}, "content": "json", "required": true});

@@ -198,14 +198,24 @@ function integerConstraint(value: any): bigint {
 
 function validateStruct(value: any, definition: any, mode: "encode" | "decode", allowUnsafeWideIntegers: boolean): void {
   if (!isRecord(value)) throw new WirePolicyError("expected object");
+  const declared = collectFields(definition);
+  if (mode === "encode") {
+    for (const field of declared) {
+      if (field.access === "read_only" && Object.hasOwn(value, field.wire) && value[field.wire] !== undefined) {
+        throw new WirePolicyError(`field ${field.wire} is read_only and cannot cross the encode direction`);
+      }
+    }
+  }
   const openness = definition.openness ?? "preserve_opaque";
-  const key = opennessKey(openness.preserve_typed?.value);
-  if (openness === "reject" || key !== undefined) {
-    const known = new Set(collectFields(definition).map((field: any) => field.wire));
-    for (const name of Object.keys(value)) {
+  if (openness !== "preserve_opaque") {
+    const known = new Set(declared.map((field: any) => field.wire));
+    const key = opennessKey(openness.preserve_typed?.value);
+    const extra = opennessValue(openness.preserve_typed?.value);
+    for (const [name, item] of Object.entries(value)) {
       if (known.has(name)) continue;
-      if (key === undefined) throw new WirePolicyError(`unknown property ${name}`);
-      validateWire(name, key, mode, allowUnsafeWideIntegers);
+      if (openness === "reject") throw new WirePolicyError(`unknown property ${name}`);
+      if (key !== undefined) validateWire(name, key, mode, allowUnsafeWideIntegers);
+      validateWire(item, extra, mode, allowUnsafeWideIntegers);
     }
   }
   const flattenedOpaque = (definition.flattened ?? []).some((item: any) => isFlattenedOpaque(item));

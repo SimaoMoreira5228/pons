@@ -396,6 +396,173 @@ fn arrays_check_every_item_and_their_uniqueness() {
     );
 }
 
+fn literal(text: &str) -> Value {
+    serde_json::from_str(text).unwrap()
+}
+
+#[test]
+fn a_whole_value_written_with_an_exponent_is_that_integer() {
+    let types = struct_type(
+        "Counts",
+        "reject",
+        json!([
+            field(
+                "small",
+                &inline(json!({"kind": "int", "bits": 32, "signed": false, "wire": "number"})),
+                "required"
+            ),
+            field(
+                "wide",
+                &inline(json!({"kind": "int", "bits": 128, "signed": false, "wire": "number"})),
+                "required"
+            ),
+        ]),
+        json!([]),
+    );
+    let body = |small: &str, wide: &str| json!({"small": literal(small), "wide": literal(wide)});
+
+    for text in [
+        "1e3", "1E2", "1.0", "1e0", "1000.0", "1.5e2", "0e-2", "-0.0",
+    ] {
+        checked(types.clone(), &named("Counts"), body(text, text));
+    }
+    for text in [
+        "1e+21",
+        "1e30",
+        "1e38",
+        "340282366920938463463374607431768211455",
+    ] {
+        checked(types.clone(), &named("Counts"), body("1", text));
+    }
+    for (text, found) in [
+        ("1.5", "expected an exact integer, found 1.5"),
+        ("1e-2", "expected an exact integer, found 1e-2"),
+        ("-1e-2", "expected an exact integer, found -1e-2"),
+        ("1e30", "integer is outside the u32 range"),
+        ("1e39", "integer is outside the u32 range"),
+        ("1e400", "integer is outside the u32 range"),
+        (
+            "340282366920938463463374607431768211456",
+            "integer is outside the u32 range",
+        ),
+    ] {
+        assert_eq!(
+            messages(violations(
+                types.clone(),
+                &named("Counts"),
+                Direction::Both,
+                body(text, "1")
+            )),
+            [format!("/small: {found}")],
+            "{text}"
+        );
+    }
+    for (text, found) in [
+        ("1.5", "expected an exact integer, found 1.5"),
+        ("1e-2", "expected an exact integer, found 1e-2"),
+        ("1e39", "integer is outside the u128 range"),
+        ("1e400", "integer is outside the u128 range"),
+        (
+            "340282366920938463463374607431768211456",
+            "integer is outside the u128 range",
+        ),
+    ] {
+        assert_eq!(
+            messages(violations(
+                types.clone(),
+                &named("Counts"),
+                Direction::Both,
+                body("1", text)
+            )),
+            [format!("/wide: {found}")],
+            "{text}"
+        );
+    }
+}
+
+#[test]
+fn a_byte_array_reads_an_exponent_as_the_whole_byte_it_is() {
+    let types = json!({});
+    let bytes = inline(json!({"kind": "bytes", "encoding": "array"}));
+
+    checked(
+        types.clone(),
+        &bytes,
+        json!([literal("1e1"), literal("1.0"), literal("0e0"), 255]),
+    );
+    assert_eq!(
+        messages(violations(
+            types.clone(),
+            &bytes,
+            Direction::Both,
+            json!([literal("1e400")])
+        )),
+        ["/0: expected a byte between 0 and 255, found 1e+400"]
+    );
+    assert_eq!(
+        messages(violations(
+            types.clone(),
+            &bytes,
+            Direction::Both,
+            json!([literal("1e39")])
+        )),
+        ["/0: expected a byte between 0 and 255, found 1e+39"]
+    );
+    assert_eq!(
+        messages(violations(
+            types,
+            &bytes,
+            Direction::Both,
+            json!([literal("1e-1")])
+        )),
+        ["/0: expected a byte between 0 and 255, found a number"]
+    );
+}
+
+#[test]
+fn unique_compares_numbers_by_value_and_the_rest_structurally() {
+    let types = json!({});
+    let unique = inline(json!({"kind": "array", "item": {"kind": "any"}, "unique": true}));
+
+    for (value, repeats) in [
+        (json!([1, 1.0]), 1),
+        (json!([1, 1.0, 2]), 1),
+        (json!([0, -0.0]), 1),
+        (json!([0.0, -0.0]), 1),
+        (json!([1e0, 1]), 1),
+        (json!([1e21, 1000000000000000000000u128]), 1),
+        (json!(["a", "a"]), 1),
+        (json!([{"a": 1, "b": 2}, {"b": 2, "a": 1}]), 1),
+        (json!([[1, [2]], [1.0, [2.0]]]), 1),
+        (json!([1, 2, 1.0]), 2),
+    ] {
+        assert_eq!(
+            messages(violations(
+                types.clone(),
+                &unique,
+                Direction::Both,
+                value.clone()
+            )),
+            [format!("array item {repeats} repeats item 0")],
+            "{value}"
+        );
+    }
+    for value in [
+        json!([1, 2]),
+        json!([1, 2.0]),
+        json!([0, -1.5]),
+        json!([1, "1"]),
+        json!([9007199254740993u64, 9007199254740993.0]),
+        json!([1e21, 1000000000000000000001u128]),
+        json!(["a", "b"]),
+        json!([{"a": 1}, {"a": 2}]),
+        json!([{"a": 1}, {"a": 1, "b": 2}]),
+        json!([[1], [1, 2]]),
+    ] {
+        checked(types.clone(), &unique, value);
+    }
+}
+
 #[test]
 fn tuples_check_arity_and_items() {
     let pair = inline(json!({
@@ -985,6 +1152,10 @@ fn direction_controls_read_only_and_write_only_fields() {
             "access": access,
         })
     };
+    let defaulted = |mut field: Value| {
+        field["default"] = json!("filled");
+        field
+    };
     let record = |fields| {
         json!({
             "Record": {
@@ -997,8 +1168,8 @@ fn direction_controls_read_only_and_write_only_fields() {
         })
     };
     let mixed = record(json!([
-        field("server_id", "required", "read_only"),
-        field("secret", "required", "write_only"),
+        defaulted(field("server_id", "required", "read_only")),
+        defaulted(field("secret", "required", "write_only")),
         field("note", "optional", "write_only"),
     ]));
     let open = record(json!([
@@ -1027,23 +1198,26 @@ fn direction_controls_read_only_and_write_only_fields() {
         )),
         ["/server_id: field server_id is read_only and cannot cross the input boundary"]
     );
-    assert_eq!(
-        messages(violations(
-            mixed.clone(),
-            &named("Record"),
-            Direction::Input,
-            json!({"secret": "b"})
-        )),
-        ["/server_id: field server_id is read_only and cannot cross the input boundary"]
+    checked_in(
+        mixed.clone(),
+        &named("Record"),
+        Direction::Input,
+        json!({"secret": "b"}),
     );
     assert_eq!(
         messages(violations(
             mixed.clone(),
             &named("Record"),
             Direction::Output,
-            json!({"server_id": "a"})
+            json!({"server_id": "a", "secret": "b"})
         )),
         ["/secret: field secret is write_only and cannot cross the output boundary"]
+    );
+    checked_in(
+        mixed.clone(),
+        &named("Record"),
+        Direction::Output,
+        json!({"server_id": "a"}),
     );
     assert_eq!(
         messages(violations(
@@ -1052,10 +1226,7 @@ fn direction_controls_read_only_and_write_only_fields() {
             Direction::Output,
             json!({"server_id": "a", "note": "n"})
         )),
-        [
-            "/secret: field secret is write_only and cannot cross the output boundary",
-            "/note: field note is write_only and cannot cross the output boundary",
-        ]
+        ["/note: field note is write_only and cannot cross the output boundary"]
     );
     assert_eq!(
         messages(violations(
@@ -1064,10 +1235,7 @@ fn direction_controls_read_only_and_write_only_fields() {
             Direction::Input,
             json!({})
         )),
-        [
-            "/server_id: field server_id is read_only and cannot cross the input boundary",
-            "/secret: missing required field secret",
-        ]
+        ["/secret: missing required field secret"]
     );
     assert_eq!(
         messages(violations(
@@ -1121,7 +1289,10 @@ fn a_default_fills_the_key_a_direction_drops() {
             "/tenant: field tenant is write_only and cannot cross the output boundary",
         ),
     ] {
-        assert_eq!(checked(access, None, json!({})), [message]);
+        assert!(
+            contract(record(None, access)).validate().is_err(),
+            "{access}: a required key the dropping side waits for cannot be filled"
+        );
         assert!(checked(access, Some(json!("acme")), json!({})).is_empty());
         assert_eq!(
             checked(access, Some(json!("acme")), json!({"tenant": "acme"})),

@@ -2,7 +2,7 @@ use std::cmp::Ordering;
 
 use serde_json::{Map, Value};
 
-use crate::document::integer_magnitude;
+use crate::document::{Exact, exact_integer};
 use crate::violation::{IntegerProblem, Violation, describe};
 use crate::{
     Access, ByteEncoding, DecimalWire, Direction, Document, EnumRepr, Field, FieldDefault,
@@ -162,7 +162,7 @@ impl<'a> Validator<'a> {
             return;
         };
         let (bits, signed) = (*bits, *signed);
-        let Some(integer) = self.exact_integer(*wire, bits, signed, path, value) else {
+        let Some(integer) = self.wire_integer(*wire, bits, signed, path, value) else {
             return;
         };
         let problem = if below_native(integer, bits, signed) || above_native(integer, bits, signed)
@@ -194,7 +194,7 @@ impl<'a> Validator<'a> {
         });
     }
 
-    fn exact_integer(
+    fn wire_integer(
         &mut self,
         wire: IntegerWire,
         bits: u16,
@@ -207,14 +207,21 @@ impl<'a> Validator<'a> {
                 if !self.expect(path, "a number", value, Value::is_number) {
                     return None;
                 }
-                match integer_magnitude(value) {
-                    Some(integer) => Some(integer),
-                    None => {
+                match exact_integer(value) {
+                    Exact::Integer(integer) => Some(integer),
+                    Exact::Fraction => {
                         self.reject(Violation::Integer {
                             path: path.to_owned(),
                             problem: IntegerProblem::NotAnInteger {
                                 found: value.to_string(),
                             },
+                        });
+                        None
+                    }
+                    Exact::Beyond => {
+                        self.reject(Violation::Integer {
+                            path: path.to_owned(),
+                            problem: IntegerProblem::NativeRange { bits, signed },
                         });
                         None
                     }
@@ -335,10 +342,10 @@ impl<'a> Validator<'a> {
             };
             for (index, item) in items.iter().enumerate() {
                 let path = child(path, &index.to_string());
-                match integer_magnitude(item) {
-                    Some((false, byte)) if byte <= 255 => {}
-                    Some(_) => self.content_violation(&path, "a byte between 0 and 255", item),
-                    None => self.type_violation(&path, "a byte between 0 and 255", item),
+                match exact_integer(item) {
+                    Exact::Integer((false, byte)) if byte <= 255 => {}
+                    Exact::Fraction => self.type_violation(&path, "a byte between 0 and 255", item),
+                    _ => self.content_violation(&path, "a byte between 0 and 255", item),
                 }
             }
             return;
@@ -366,21 +373,20 @@ impl<'a> Validator<'a> {
         let Some(items) = value.as_array() else {
             return self.type_violation(path, "an array", value);
         };
-        let mut seen: Vec<(String, usize)> = Vec::new();
+        let mut seen: Vec<(&Value, usize)> = Vec::new();
         for (index, element) in items.iter().enumerate() {
             self.position.clear();
             self.check(item, &child(path, &index.to_string()), element);
             if unique != Some(true) {
                 continue;
             }
-            let rendered = element.to_string();
-            match seen.iter().find(|(other, _)| *other == rendered) {
+            match seen.iter().find(|(other, _)| same_item(other, element)) {
                 Some((_, first)) => self.reject(Violation::DuplicateItem {
                     path: path.to_owned(),
                     item: index,
                     first: *first,
                 }),
-                None => seen.push((rendered, index)),
+                None => seen.push((element, index)),
             }
         }
     }
@@ -730,6 +736,53 @@ fn child(path: &str, token: &str) -> String {
     format!("{path}/{}", token.replace('~', "~0").replace('/', "~1"))
 }
 
+fn same_item(left: &Value, right: &Value) -> bool {
+    match (left, right) {
+        (Value::Number(_), Value::Number(_)) => same_number(left, right),
+        (Value::Array(left), Value::Array(right)) => {
+            left.len() == right.len()
+                && left
+                    .iter()
+                    .zip(right)
+                    .all(|(left, right)| same_item(left, right))
+        }
+        (Value::Object(left), Value::Object(right)) => {
+            left.len() == right.len()
+                && left
+                    .iter()
+                    .all(|(key, value)| right.get(key).is_some_and(|found| same_item(value, found)))
+        }
+        _ => left == right,
+    }
+}
+
+fn same_number(left: &Value, right: &Value) -> bool {
+    let float = |value: &Value| {
+        value
+            .as_number()
+            .filter(|number| number.is_f64())
+            .and_then(|number| number.as_f64())
+    };
+    match (float(left), float(right)) {
+        (Some(left), Some(right)) => left == right,
+        (Some(number), None) => {
+            matches!(exact_integer(right), Exact::Integer(integer) if same_magnitude(number, integer))
+        }
+        (None, Some(number)) => {
+            matches!(exact_integer(left), Exact::Integer(integer) if same_magnitude(number, integer))
+        }
+        (None, None) => match (exact_integer(left), exact_integer(right)) {
+            (Exact::Integer(one), Exact::Integer(other)) => one == other,
+            _ => left == right,
+        },
+    }
+}
+
+fn same_magnitude(number: f64, (negative, magnitude): (bool, u128)) -> bool {
+    let found = if negative { -number } else { number };
+    found.is_finite() && number.fract() == 0.0 && found >= 0.0 && found as u128 == magnitude
+}
+
 fn native_bounds(bits: u16, signed: bool) -> Option<(u128, u128)> {
     if !matches!(bits, 8 | 16 | 32 | 64 | 128) {
         return None;
@@ -774,13 +827,16 @@ fn compare(left: (bool, u128), right: (bool, u128)) -> Ordering {
 fn bounded(integer: (bool, u128), bound: &Value) -> Ordering {
     compare(
         integer,
-        integer_magnitude(bound).unwrap_or((false, u128::MAX)),
+        match exact_integer(bound) {
+            Exact::Integer(bound) => bound,
+            _ => (false, u128::MAX),
+        },
     )
 }
 
 fn divisible(integer: (bool, u128), multiple_of: Option<&Value>) -> Option<IntegerProblem> {
     let step = multiple_of?;
-    let Some((negative, divisor)) = integer_magnitude(step) else {
+    let Exact::Integer((negative, divisor)) = exact_integer(step) else {
         return Some(IntegerProblem::UnreadableConstraint {
             constraint: step.to_string(),
         });

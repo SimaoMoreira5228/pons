@@ -295,7 +295,7 @@ impl<'a> Builder<'a> {
             } => {
                 let mut schema = json!({"type":"string"});
                 if let Some(format) = format {
-                    schema["format"] = json!(format);
+                    schema["x-pons-format"] = json!(format);
                 }
                 if let Some(minimum) = min_length {
                     schema["minLength"] = json!(minimum);
@@ -846,8 +846,9 @@ fn fields_schema_with<'a>(
 #[cfg(test)]
 mod tests {
     use pons_ir::{
-        Access, ByteEncoding, DecimalWire, Direction, EnumRepr, Field, InlineType, IntegerWire,
-        NamedRef, ObjectOpenness, Presence, TypeDef, TypeKind, TypeRef, Variant, VariantPayload,
+        Access, ByteEncoding, DecimalWire, Direction, EnumRepr, Field, FieldFormat, InlineType,
+        IntegerWire, NamedRef, ObjectOpenness, Presence, TypeDef, TypeKind, TypeRef, Variant,
+        VariantPayload,
     };
     use serde_json::{Value, json};
 
@@ -975,9 +976,19 @@ mod tests {
         })
     }
 
+    fn formatted(format: FieldFormat) -> TypeRef {
+        TypeRef::Inline(InlineType::String {
+            format: Some(format),
+            min_length: None,
+            max_length: None,
+            pattern: None,
+        })
+    }
+
     fn directional(wire: &str, access: Access) -> Field {
         Field {
             access: Some(access),
+            default: pons_ir::FieldDefault::Value(json!("x")),
             ..field(wire, string())
         }
     }
@@ -1137,6 +1148,67 @@ mod tests {
     }
 
     #[test]
+    fn a_string_format_is_annotated_because_nothing_enforces_it() {
+        let mut document = fixture();
+        document.types.insert(
+            "Contact".into(),
+            closed(
+                "contact",
+                vec![
+                    field("email", formatted(FieldFormat::Email)),
+                    field("text", string()),
+                ],
+                Vec::new(),
+            ),
+        );
+        document.types.insert(
+            "Handles".into(),
+            newtype(
+                "handles",
+                TypeRef::Inline(InlineType::Map {
+                    key: Box::new(formatted(FieldFormat::Uuid)),
+                    value: Box::new(string()),
+                }),
+            ),
+        );
+        let output: Value = serde_json::from_str(&crate::emit(&document).unwrap()).unwrap();
+        let properties = &output["components"]["schemas"]["Contact"]["properties"];
+
+        assert_eq!(properties["email"]["type"], "string");
+        assert_eq!(properties["email"]["x-pons-format"], json!("email"));
+        assert!(
+            properties["email"].get("format").is_none(),
+            "{:#}",
+            properties["email"]
+        );
+        for keyword in ["format", "x-pons-format"] {
+            assert!(
+                properties["text"].get(keyword).is_none(),
+                "a string with no format states neither: {:#}",
+                properties["text"]
+            );
+        }
+        let key = &output["components"]["schemas"]["Handles"]["propertyNames"];
+        assert_eq!(key["type"], "string");
+        assert_eq!(key["x-pons-format"], json!("uuid"));
+        assert!(key.get("format").is_none(), "{key:#}");
+
+        let instance = json!({"email": "not-an-email", "text": "x"});
+        assert!(
+            validates(&document, "Contact", instance.clone()),
+            "the document accepts what it never checks"
+        );
+        assert!(
+            jsonschema::options()
+                .should_validate_formats(true)
+                .build(&component_schema(&document, "Contact"))
+                .expect("the emitted schema must be a valid JSON Schema")
+                .is_valid(&instance),
+            "a consumer that asserts formats must not read a constraint this emitter no longer states"
+        );
+    }
+
+    #[test]
     fn flattened_members_inline_their_properties() {
         let mut document = fixture();
         document.types.insert(
@@ -1204,11 +1276,15 @@ mod tests {
         }
     }
 
-    fn validates(document: &pons_ir::Document, name: &str, instance: Value) -> bool {
+    fn component_schema(document: &pons_ir::Document, name: &str) -> Value {
         let output: Value = serde_json::from_str(&crate::emit(document).unwrap()).unwrap();
         let mut schema = json!({"$ref":format!("#/components/schemas/{name}")});
         schema["components"] = output["components"].clone();
-        jsonschema::Validator::new(&schema)
+        schema
+    }
+
+    fn validates(document: &pons_ir::Document, name: &str, instance: Value) -> bool {
+        jsonschema::Validator::new(&component_schema(document, name))
             .expect("the emitted schema must be a valid JSON Schema")
             .is_valid(&instance)
     }

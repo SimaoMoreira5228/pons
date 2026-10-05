@@ -782,6 +782,41 @@ mod tests {
     }
 
     #[test]
+    fn the_wire_validator_refuses_what_the_encoder_would_drop() {
+        let mut raw: serde_json::Value =
+            serde_json::from_str(include_str!("../../../fixtures/login.json")).unwrap();
+        raw["types"]["LoginRequest"] = json!({
+            "kind": "struct",
+            "name": ["login", "request"],
+            "direction": "both",
+            "openness": {"preserve_typed": {"value": {"kind": "string"}}},
+            "fields": [
+                {"wire": "email", "ident": ["email"], "ty": {"kind": "string"}, "presence": "required"},
+                {"wire": "id", "ident": ["id"], "ty": {"kind": "string"}, "presence": "optional", "access": "read_only"}
+            ]
+        });
+        let document: Document = serde_json::from_value(raw).unwrap();
+        let client = super::emit(&document)
+            .unwrap()
+            .into_iter()
+            .find(|file| file.path == "client.ts")
+            .unwrap()
+            .content;
+        assert!(
+            client.contains("is read_only and cannot cross the encode direction"),
+            "{client}"
+        );
+        assert!(
+            client.contains("validateWire(item, extra, mode"),
+            "the openness value types the extras it preserves: {client}"
+        );
+        assert!(
+            !client.contains("|| key !== undefined"),
+            "the unknown-key check cannot wait for a synthesized map key: {client}"
+        );
+    }
+
+    #[test]
     fn emits_fields_according_to_direction_and_access() {
         let mut raw: serde_json::Value =
             serde_json::from_str(include_str!("../../../fixtures/login.json")).unwrap();
@@ -793,7 +828,7 @@ mod tests {
             "fields": [
                 {"wire": "email", "ident": ["email"], "ty": {"kind": "string"}, "presence": "required"},
                 {"wire": "secret", "ident": ["secret"], "ty": {"kind": "string"}, "presence": "required", "access": "write_only"},
-                {"wire": "server_id", "ident": ["server", "id"], "ty": {"kind": "string"}, "presence": "required", "access": "read_only"}
+                {"wire": "server_id", "ident": ["server", "id"], "ty": {"kind": "string"}, "presence": "required", "access": "read_only", "default": "filled"}
             ]
         });
         raw["types"]["User"] = json!({
@@ -803,7 +838,7 @@ mod tests {
             "openness": "reject",
             "fields": [
                 {"wire": "id", "ident": ["id"], "ty": {"kind": "string"}, "presence": "required", "access": "read_only"},
-                {"wire": "secret", "ident": ["secret"], "ty": {"kind": "string"}, "presence": "required", "access": "write_only"},
+                {"wire": "secret", "ident": ["secret"], "ty": {"kind": "string"}, "presence": "required", "access": "write_only", "default": "hidden"},
                 {"wire": "value", "ident": ["value"], "ty": {"kind": "string"}, "presence": "required"}
             ]
         });
@@ -813,8 +848,8 @@ mod tests {
             "direction": "both",
             "openness": "reject",
             "fields": [
-                {"wire": "id", "ident": ["id"], "ty": {"kind": "string"}, "presence": "required", "access": "read_only"},
-                {"wire": "secret", "ident": ["secret"], "ty": {"kind": "string"}, "presence": "required", "access": "write_only"},
+                {"wire": "id", "ident": ["id"], "ty": {"kind": "string"}, "presence": "required", "access": "read_only", "default": "filled"},
+                {"wire": "secret", "ident": ["secret"], "ty": {"kind": "string"}, "presence": "required", "access": "write_only", "default": "hidden"},
                 {"wire": "value", "ident": ["value"], "ty": {"kind": "string"}, "presence": "required"}
             ]
         });

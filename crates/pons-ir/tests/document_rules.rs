@@ -320,6 +320,127 @@ fn a_required_read_only_field_is_refused_in_every_flat_input_carrier() {
 }
 
 #[test]
+fn a_field_the_input_side_drops_and_still_requires_is_refused_where_every_carrier_refuses_it() {
+    let tail = "the client drops the field on encode and every server built from the document waits for a key the client cannot send";
+
+    for position in ["json", "query", "form", "path"] {
+        let found = verdict(&carrier_document(
+            access_carrier("input", "required", "read_only", None),
+            position,
+        ));
+        assert!(
+            found
+                .iter()
+                .any(|error| error.contains("tenant") && error.contains(tail)),
+            "the {position} carrier must refuse a body no request can answer: {found:?}"
+        );
+        for legal in [
+            access_carrier("input", "required", "read_only", Some(json!("acme"))),
+            access_carrier("input", "optional", "read_only", None),
+            access_carrier("input", "required", "write_only", None),
+            access_carrier("input", "required", "read_write", None),
+        ] {
+            carrier_document(legal, position)
+                .validate()
+                .unwrap_or_else(|errors| panic!("{position} refused {errors:?}"));
+        }
+    }
+    refuses(
+        &contract(access_carrier("both", "required", "read_only", None)),
+        tail,
+    );
+    carrier_document(
+        access_carrier("both", "required", "read_only", Some(json!("acme"))),
+        "json",
+    )
+    .validate()
+    .unwrap();
+}
+
+#[test]
+fn a_field_the_output_side_drops_and_still_requires_is_the_same_rule_the_other_way() {
+    let tail = "the server drops the field on decode and every client built from the document waits for a field the server cannot send";
+
+    for direction in ["output", "both"] {
+        let found = verdict(&carrier_document(
+            access_carrier(direction, "required", "write_only", None),
+            "response",
+        ));
+        assert!(
+            found
+                .iter()
+                .any(|error| error.contains("tenant") && error.contains(tail)),
+            "a {direction} response must refuse a body no response can answer: {found:?}"
+        );
+        carrier_document(
+            access_carrier(direction, "required", "write_only", Some(json!("acme"))),
+            "response",
+        )
+        .validate()
+        .unwrap();
+        carrier_document(
+            access_carrier(direction, "optional", "write_only", None),
+            "response",
+        )
+        .validate()
+        .unwrap();
+    }
+    carrier_document(
+        access_carrier("output", "required", "read_only", None),
+        "response",
+    )
+    .validate()
+    .unwrap();
+    carrier_document(
+        access_carrier("input", "required", "write_only", None),
+        "json",
+    )
+    .validate()
+    .unwrap();
+}
+
+#[test]
+fn an_internally_tagged_variant_must_carry_an_object_payload() {
+    let choice = |repr: Value, payload: Value| {
+        contract(json!({
+            "Choice": {
+                "kind": "enum", "name": ["choice"], "direction": "both", "repr": repr,
+                "variants": [{"wire": "held", "ident": ["held"], "payload": payload}]
+            }
+        }))
+    };
+    let tuple = json!({"kind": "tuple", "items": [string(), string()]});
+
+    refuses(
+        &choice(json!({"kind": "internal", "tag": "code"}), tuple.clone()),
+        "internally tagged enum variant held must have an object payload, because the tag shares one object with it",
+    );
+    for repr in [
+        json!({"kind": "external"}),
+        json!({"kind": "adjacent", "tag": "code", "content": "value"}),
+        json!({"kind": "untagged"}),
+    ] {
+        choice(repr, tuple.clone())
+            .validate()
+            .unwrap_or_else(|errors| {
+                panic!("{tuple:?} is legal beside a tag of its own: {errors:?}")
+            });
+    }
+    choice(
+        json!({"kind": "internal", "tag": "code"}),
+        json!({"kind": "newtype", "ty": string()}),
+    )
+    .validate()
+    .unwrap();
+    choice(
+        json!({"kind": "internal", "tag": "code"}),
+        json!({"kind": "struct", "fields": [field("held", string(), "required")]}),
+    )
+    .validate()
+    .unwrap();
+}
+
+#[test]
 fn a_query_parameter_and_a_request_header_cannot_name_an_api_key_carrier() {
     let with_carrier = |location: &str, name: &str, collision: &str| {
         let mut document = fixture();
@@ -575,6 +696,11 @@ fn carrier_document(types: Value, carrier: &str) -> Document {
             operation["body"] =
                 json!({"ty": {"ref": "Carrier"}, "content": "form", "required": true})
         }
+        "json" => {
+            operation["body"] =
+                json!({"ty": {"ref": "Carrier"}, "content": "json", "required": true})
+        }
+        "response" => operation["responses"][0]["body"] = json!({"ref": "Carrier"}),
         _ => {
             operation["path"] = json!([
                 {"lit": "events"},
@@ -623,18 +749,11 @@ fn carried_by_every_carrier(types: Value) {
 
 fn refused_by_every_carrier(types: Value, blamed: &str) {
     for (carrier, found) in CARRIERS.iter().zip(agreed(types.clone())) {
-        assert_eq!(
-            found.len(),
-            1,
-            "one rule means one message from the {carrier} carrier: {found:?}"
-        );
         assert!(
-            found[0].contains(blamed),
+            found
+                .iter()
+                .any(|message| message.contains(blamed) && message.contains(carrier)),
             "the {carrier} carrier must name what it refused: {found:?}"
-        );
-        assert!(
-            found[0].contains(carrier),
-            "the {carrier} carrier must say which carrier it is: {found:?}"
         );
     }
 }
@@ -663,6 +782,17 @@ fn carrier_struct(openness: Value, fields: Vec<Value>, flattened: Vec<&str>) -> 
             "flattened": flattened.iter().map(|id| json!({"ref": id})).collect::<Vec<_>>()
         }
     })
+}
+
+fn access_carrier(direction: &str, presence: &str, access: &str, default: Option<Value>) -> Value {
+    let mut field = field("tenant", string(), presence);
+    field["access"] = json!(access);
+    if let Some(default) = default {
+        field["default"] = default;
+    }
+    let mut types = carrier_struct(json!("reject"), vec![field], vec![]);
+    types["Carrier"]["direction"] = json!(direction);
+    types
 }
 
 #[test]
@@ -1683,40 +1813,125 @@ fn a_websocket_message_needs_the_direction_the_operation_uses() {
 }
 
 #[test]
-fn an_integer_bound_written_with_an_exponent_is_refused() {
-    let bounded = |name: &str, text: &str| {
+fn an_integer_bound_spelled_with_an_exponent_is_the_integer_it_denotes() {
+    let bounded = |name: &str, text: &str, bits: u16| {
+        let bound = serde_json::from_str::<Value>(text).unwrap();
+        contract(json!({
+            "Count": {
+                "kind": "struct", "name": ["count"], "direction": "both", "openness": "reject",
+                "fields": [json!({"wire": "a", "ident": ["a"],
+                    "ty": {"kind": "int", "bits": bits, "signed": true, "wire": "number", name: bound},
+                    "presence": "optional"})]
+            }
+        }))
+    };
+
+    for name in ["minimum", "maximum", "multiple_of"] {
+        for text in ["1e2", "1E2", "1.5e2", "1e3", "1.0", "1e0", "100"] {
+            bounded(name, text, 32)
+                .validate()
+                .unwrap_or_else(|found| panic!("{name} {text} is an exact integer: {found:?}"));
+        }
+    }
+    for text in ["-1e2", "0e-2", "0"] {
+        for name in ["minimum", "maximum"] {
+            bounded(name, text, 32)
+                .validate()
+                .unwrap_or_else(|found| panic!("{name} {text} is an exact integer: {found:?}"));
+        }
+        refuses(
+            &bounded("multiple_of", text, 32),
+            "integer multiple_of must be greater than zero",
+        );
+    }
+    for text in ["1e-2", "1.5", "0.5e-1", "-1.5e-1"] {
+        for name in ["minimum", "maximum", "multiple_of"] {
+            refuses(
+                &bounded(name, text, 32),
+                &format!("integer {name} must be an integral value"),
+            );
+        }
+    }
+    for (name, text, bits, message) in [
+        (
+            "minimum",
+            "1e400",
+            128,
+            "integer minimum is above its native range",
+        ),
+        (
+            "maximum",
+            "1e400",
+            128,
+            "integer maximum is above its native range",
+        ),
+        (
+            "maximum",
+            "-1e400",
+            128,
+            "integer maximum is below its native range",
+        ),
+        (
+            "minimum",
+            "1e39",
+            128,
+            "integer minimum is above its native range",
+        ),
+        (
+            "multiple_of",
+            "1e400",
+            32,
+            "integer multiple_of is too large to be an exact integer",
+        ),
+    ] {
+        refuses(&bounded(name, text, bits), message);
+    }
+    refuses(
+        &bounded("minimum", "1e39", 32),
+        "integer minimum is above its native range",
+    );
+    bounded("maximum", "1e30", 128).validate().unwrap();
+    bounded("multiple_of", "1e30", 128).validate().unwrap();
+}
+
+#[test]
+fn a_bound_spelled_with_an_exponent_bounds_the_values_it_denotes() {
+    let counted = |name: &str, text: &str| {
         let bound = serde_json::from_str::<Value>(text).unwrap();
         contract(json!({
             "Count": {
                 "kind": "struct", "name": ["count"], "direction": "both", "openness": "reject",
                 "fields": [json!({"wire": "a", "ident": ["a"],
                     "ty": {"kind": "int", "bits": 32, "signed": true, "wire": "number", name: bound},
-                    "presence": "optional"})]
+                    "presence": "required"})]
             }
         }))
     };
+    let counted_value = |name: &str, text: &str, found: &str| {
+        let document = counted(name, text);
+        document.validate().unwrap();
+        validate_value(
+            &document,
+            field_type(&document, "Count", 0),
+            Direction::Both,
+            &serde_json::from_str::<Value>(found).unwrap(),
+        )
+    };
 
-    for text in ["1e2", "1E2", "1.5e2", "-1e2"] {
-        for (name, message) in [
-            (
-                "maximum",
-                "integer maximum must be written without an exponent",
-            ),
-            (
-                "minimum",
-                "integer minimum must be written without an exponent",
-            ),
-        ] {
-            let found = rejections(&bounded(name, text));
-            assert_eq!(found.len(), 1, "{text}: {found:?}");
-            assert!(found[0].contains(message), "{text}: {found:?}");
-        }
+    for (name, found, accepted) in [
+        ("minimum", "1000", true),
+        ("minimum", "1e3", true),
+        ("minimum", "999", false),
+        ("maximum", "1000", true),
+        ("maximum", "1e3", true),
+        ("maximum", "1001", false),
+    ] {
+        assert_eq!(
+            counted_value(name, "1e3", found).is_ok(),
+            accepted,
+            "{name} 1e3 against {found}"
+        );
     }
-    for text in ["100", "1e0", "0"] {
-        bounded("maximum", text).validate().unwrap();
-    }
-    refuses(
-        &bounded("maximum", "1e-2"),
-        "integer maximum must be an integral value, got 1e-2",
-    );
+    assert!(counted_value("multiple_of", "1e2", "300").is_ok());
+    assert!(counted_value("multiple_of", "1e2", "301").is_err());
 }

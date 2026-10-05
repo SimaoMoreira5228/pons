@@ -615,14 +615,28 @@ mod tests {
 
     #[cfg(target_os = "linux")]
     fn stub_emitter(name: &str, script: &str) -> std::path::PathBuf {
-        use std::os::unix::fs::PermissionsExt;
         use std::process;
 
         let path = std::env::temp_dir().join(format!("pons-plugin-{name}-{}", process::id()));
-        std::fs::write(&path, script).unwrap();
-        let mut permissions = std::fs::metadata(&path).unwrap().permissions();
-        permissions.set_mode(0o755);
-        std::fs::set_permissions(&path, permissions).unwrap();
+        
+        
+        
+        let mut writer = Command::new("sh")
+            .args(["-c", "cat > \"$1\" && chmod 755 \"$1\"", "sh"])
+            .arg(&path)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap();
+        writer
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(script.as_bytes())
+            .unwrap();
+        let status = writer.wait().unwrap();
+        assert!(status.success(), "cannot write the {name} stub: {status}");
         path
     }
 
@@ -635,6 +649,10 @@ mod tests {
         let pid_file = directory.join("pid");
         let marker = directory.join("marker");
         let _ = std::fs::remove_file(&marker);
+        
+        
+        let ready = directory.join("ready");
+        let _ = std::fs::remove_file(&ready);
 
         let running = format!(
             "echo $$ > {}; (sleep 0.5; touch {}) & sleep 5",
@@ -656,8 +674,11 @@ mod tests {
         assert_eq!(group_signals(pid), 1, "its group is signalled once");
 
         let escaped = format!(
-            "echo $$ > {}; setsid sh -c 'sleep 5' & exit 0",
-            pid_file.display()
+            "echo $$ > {}; setsid sh -c 'touch {}; sleep 5' & while [ ! -f {} ]; do :; done; \
+             exit 0",
+            pid_file.display(),
+            ready.display(),
+            ready.display()
         );
         let error = run_command_with_limits(
             OsStr::new("sh"),

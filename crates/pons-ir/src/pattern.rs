@@ -1,3 +1,5 @@
+const LIMIT: usize = 4096;
+
 #[derive(Debug, Clone)]
 enum Node {
     Empty,
@@ -7,6 +9,7 @@ enum Node {
         negated: bool,
         items: Vec<ClassItem>,
     },
+    Boundary(bool),
     Start,
     End,
     Concat(Vec<Node>),
@@ -21,7 +24,6 @@ enum Node {
 struct Bounds {
     min: u32,
     max: Option<u32>,
-    greedy: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -37,16 +39,16 @@ enum ClassItem {
 }
 
 impl ClassItem {
-    fn contains(&self, character: char) -> bool {
+    fn contains(&self, unit: u16) -> bool {
         match self {
-            Self::Single(expected) => character == *expected,
-            Self::Range(start, end) => (*start..=*end).contains(&character),
-            Self::Digit => character.is_ascii_digit(),
-            Self::NotDigit => !character.is_ascii_digit(),
-            Self::Word => character.is_ascii_alphanumeric() || character == '_',
-            Self::NotWord => !(character.is_ascii_alphanumeric() || character == '_'),
-            Self::Space => character.is_whitespace(),
-            Self::NotSpace => !character.is_whitespace(),
+            Self::Single(expected) => lead(*expected) == unit || trail(*expected) == unit,
+            Self::Range(start, end) => (lead(*start)..=trail(*end)).contains(&unit),
+            Self::Digit => (0x30..=0x39).contains(&unit),
+            Self::NotDigit => !(0x30..=0x39).contains(&unit),
+            Self::Word => word(unit),
+            Self::NotWord => !word(unit),
+            Self::Space => space(unit),
+            Self::NotSpace => !space(unit),
         }
     }
 
@@ -59,6 +61,38 @@ impl ClassItem {
             },
         }
     }
+}
+
+fn lead(character: char) -> u16 {
+    let code = character as u32;
+    if code > 0xffff {
+        (0xd800 | (code - 0x10000) >> 10) as u16
+    } else {
+        code as u16
+    }
+}
+
+fn trail(character: char) -> u16 {
+    let code = character as u32;
+    if code > 0xffff {
+        (0xdc00 | (code - 0x10000) & 0x3ff) as u16
+    } else {
+        code as u16
+    }
+}
+
+fn word(unit: u16) -> bool {
+    matches!(unit, 0x30..=0x39 | 0x41..=0x5a | 0x61..=0x7a | 0x5f)
+}
+
+fn space(unit: u16) -> bool {
+    matches!(unit,
+        0x0009..=0x000d | 0x0020 | 0x00a0 | 0x1680 | 0x2000..=0x200a | 0x2028 | 0x2029
+        | 0x202f | 0x205f | 0x3000 | 0xfeff)
+}
+
+fn line_terminator(unit: u16) -> bool {
+    matches!(unit, 0x000a | 0x000d | 0x2028 | 0x2029)
 }
 
 struct Parser<'a> {
@@ -131,6 +165,7 @@ impl Parser<'_> {
                 self.at += 1;
                 match self.bounds()? {
                     Some(bounds) => bounds,
+
                     None => {
                         self.at = start;
                         return Ok(node);
@@ -139,15 +174,13 @@ impl Parser<'_> {
             }
             _ => return Ok(node),
         };
-        let greedy = if self.peek() == Some('?') {
+
+        if self.peek() == Some('?') {
             self.at += 1;
-            false
-        } else {
-            true
-        };
+        }
         Ok(Node::Repeat {
             node: Box::new(node),
-            bounds: Bounds { min, max, greedy },
+            bounds: Bounds { min, max },
         })
     }
 
@@ -217,7 +250,17 @@ impl Parser<'_> {
             '(' => self.group(),
             '\\' => {
                 self.at += 1;
-                Ok(self.escape()?.node())
+                match self.peek() {
+                    Some('b') => {
+                        self.at += 1;
+                        Ok(Node::Boundary(false))
+                    }
+                    Some('B') => {
+                        self.at += 1;
+                        Ok(Node::Boundary(true))
+                    }
+                    _ => Ok(self.escape()?.node()),
+                }
             }
             '*' | '+' | '?' => Err(format!("nothing to repeat at offset {}", self.at)),
             ')' => Err(format!("unmatched ) at offset {}", self.at)),
@@ -286,7 +329,13 @@ impl Parser<'_> {
         };
         self.at += 1;
         if character == '\\' {
-            return self.escape();
+            return match self.peek() {
+                Some('b') => {
+                    self.at += 1;
+                    Ok(ClassItem::Single('\u{8}'))
+                }
+                _ => self.escape(),
+            };
         }
         Ok(ClassItem::Single(character))
     }
@@ -308,98 +357,253 @@ impl Parser<'_> {
             't' => ClassItem::Single('\t'),
             'f' => ClassItem::Single('\u{c}'),
             'v' => ClassItem::Single('\u{b}'),
+            '0' if self.peek().is_some_and(|next| next.is_ascii_digit()) => {
+                return Err("octal escapes are not supported".into());
+            }
             '0' => ClassItem::Single('\0'),
-            'b' | 'B' => return Err("word boundaries are not supported".into()),
-            'A' | 'z' | 'Z' | 'p' | 'P' | 'Q' | 'E' | 'G' | 'k' | 'R' | 'X' => {
+            'c' | 'A' | 'z' | 'Z' | 'p' | 'P' | 'Q' | 'E' | 'G' | 'k' | 'R' | 'X' => {
                 return Err(format!("escape \\{character} is not supported"));
             }
             '1'..='9' => return Err("backreferences are not supported".into()),
             'x' | 'u' => {
-                let braced = character == 'u' && self.peek() == Some('{');
-                let digits = if braced {
-                    let start = self.at + 1;
-                    let close = self.chars[start..]
-                        .iter()
-                        .position(|digit| *digit == '}')
-                        .map(|offset| start + offset)
-                        .ok_or("unterminated code point escape")?;
-                    let digits = self.chars[start..close].iter().collect::<String>();
-                    self.at = close + 1;
-                    digits
-                } else {
-                    let width = if character == 'x' { 2 } else { 4 };
-                    let Some(digits) = self.chars.get(self.at..self.at + width) else {
-                        return Err(format!("\\{character} needs {width} hexadecimal digits"));
-                    };
-                    self.at += width;
-                    digits.iter().collect::<String>()
+                let width = if character == 'x' { 2 } else { 4 };
+                let digits = self
+                    .chars
+                    .get(self.at..self.at + width)
+                    .map(|digits| digits.iter().collect::<String>())
+                    .filter(|digits| digits.chars().all(|digit| digit.is_ascii_hexdigit()));
+                let Some(digits) = digits else {
+                    return Ok(ClassItem::Single(character));
                 };
-                if !digits.chars().all(|digit| digit.is_ascii_hexdigit()) {
-                    return Err(format!("\\{character}{digits} is not a hexadecimal escape"));
-                }
+                self.at += width;
                 let code =
                     u32::from_str_radix(&digits, 16).map_err(|_| "escape is out of range")?;
-                ClassItem::Single(char::from_u32(code).ok_or("escape is not a character")?)
+                ClassItem::Single(char::from_u32(code).ok_or("escape is not an character")?)
             }
             literal => ClassItem::Single(literal),
         })
     }
 }
 
-fn walk(node: &Node, input: &[char], at: usize, next: &mut dyn FnMut(usize) -> bool) -> bool {
-    match node {
-        Node::Empty => next(at),
-        Node::Literal(expected) => input.get(at) == Some(expected) && next(at + 1),
-        Node::Any => matches!(input.get(at), Some(character) if *character != '\n') && next(at + 1),
-        Node::Class { negated, items } => {
-            let found = input.get(at).is_some_and(|character| {
-                items.iter().any(|item| item.contains(*character)) != *negated
-            });
-            found && next(at + 1)
+enum Step {
+    Unit(u16),
+    Any,
+    Class {
+        negated: bool,
+        items: Vec<ClassItem>,
+    },
+    Start,
+    End,
+    Boundary(bool),
+    Split(usize, usize),
+    Jump(usize),
+    Match,
+}
+
+struct Program {
+    steps: Vec<Step>,
+}
+
+impl Program {
+    fn here(&self) -> usize {
+        self.steps.len()
+    }
+
+    fn emit(&mut self, step: Step) -> usize {
+        self.steps.push(step);
+        self.steps.len() - 1
+    }
+
+    fn node(&mut self, node: &Node) -> Result<(), String> {
+        match node {
+            Node::Empty => {}
+            Node::Literal(character) => {
+                let lead = lead(*character);
+                self.emit(Step::Unit(lead));
+                if trail(*character) != lead {
+                    self.emit(Step::Unit(trail(*character)));
+                }
+            }
+            Node::Any => {
+                self.emit(Step::Any);
+            }
+            Node::Class { negated, items } => {
+                self.emit(Step::Class {
+                    negated: *negated,
+                    items: items.clone(),
+                });
+            }
+            Node::Boundary(negated) => {
+                self.emit(Step::Boundary(*negated));
+            }
+            Node::Start => {
+                self.emit(Step::Start);
+            }
+            Node::End => {
+                self.emit(Step::End);
+            }
+            Node::Concat(items) => {
+                for item in items {
+                    self.node(item)?;
+                }
+            }
+            Node::Alternate(branches) => self.alternate(branches)?,
+            Node::Repeat { node, bounds } => self.repeat(node, bounds)?,
         }
-        Node::Start => at == 0 && next(at),
-        Node::End => at == input.len() && next(at),
-        Node::Concat(items) => walk_items(items, input, at, next),
-        Node::Alternate(branches) => branches.iter().any(|branch| walk(branch, input, at, next)),
-        Node::Repeat { node, bounds } => walk_repeat(node, bounds, input, at, 0, next),
+        Ok(())
+    }
+
+    fn alternate(&mut self, branches: &[Node]) -> Result<(), String> {
+        let mut splits = Vec::new();
+        for _ in 1..branches.len() {
+            splits.push(self.emit(Step::Split(0, 0)));
+        }
+        let mut starts = Vec::new();
+        let mut jumps = Vec::new();
+        for (index, branch) in branches.iter().enumerate() {
+            starts.push(self.here());
+            self.node(branch)?;
+            if index + 1 < branches.len() {
+                jumps.push(self.emit(Step::Jump(0)));
+            }
+        }
+        let end = self.here();
+        let last = branches.len() - 1;
+        for (index, split) in splits.iter().copied().enumerate() {
+            let rest = if index + 1 < splits.len() {
+                split + 1
+            } else {
+                starts[last]
+            };
+            self.steps[split] = Step::Split(starts[index], rest);
+        }
+        for jump in jumps {
+            self.steps[jump] = Step::Jump(end);
+        }
+        Ok(())
+    }
+
+    fn repeat(&mut self, node: &Node, bounds: &Bounds) -> Result<(), String> {
+        let longest = bounds.max.unwrap_or(bounds.min + 1);
+        if longest as usize > LIMIT {
+            return Err(format!(
+                "a repetition of {longest} is too many steps to run"
+            ));
+        }
+        for _ in 0..bounds.min {
+            self.node(node)?;
+        }
+        match bounds.max {
+            None => self.star(node)?,
+            Some(max) => {
+                for _ in bounds.min..max {
+                    self.optional(node)?;
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn optional(&mut self, node: &Node) -> Result<(), String> {
+        let split = self.emit(Step::Split(0, 0));
+        self.node(node)?;
+        let end = self.here();
+        self.steps[split] = Step::Split(split + 1, end);
+        Ok(())
+    }
+
+    fn star(&mut self, node: &Node) -> Result<(), String> {
+        let split = self.emit(Step::Split(0, 0));
+        self.node(node)?;
+        self.emit(Step::Jump(split));
+        let end = self.here();
+        self.steps[split] = Step::Split(split + 1, end);
+        Ok(())
     }
 }
 
-fn walk_items(
-    items: &[Node],
-    input: &[char],
+fn compile(node: &Node) -> Result<Vec<Step>, String> {
+    let mut program = Program { steps: Vec::new() };
+    program.node(node)?;
+    program.emit(Step::Match);
+    Ok(program.steps)
+}
+
+fn enter(
+    steps: &[Step],
     at: usize,
-    next: &mut dyn FnMut(usize) -> bool,
-) -> bool {
-    match items.split_first() {
-        None => next(at),
-        Some((head, tail)) => walk(head, input, at, &mut |position| {
-            walk_items(tail, input, position, next)
-        }),
+    mut pc: usize,
+    input: &[u16],
+    marks: &mut [u32],
+    generation: u32,
+    live: &mut Vec<usize>,
+) {
+    loop {
+        if marks[pc] == generation {
+            return;
+        }
+        marks[pc] = generation;
+        match steps[pc] {
+            Step::Split(first, second) => {
+                enter(steps, at, first, input, marks, generation, live);
+                pc = second;
+            }
+            Step::Jump(target) => pc = target,
+            Step::Start if at == 0 => pc += 1,
+            Step::End if at == input.len() => pc += 1,
+            Step::Boundary(negated) if boundary(input, at) != negated => pc += 1,
+            Step::Start | Step::End | Step::Boundary(_) => return,
+            _ => {
+                live.push(pc);
+                return;
+            }
+        }
     }
 }
 
-fn walk_repeat(
-    node: &Node,
-    bounds: &Bounds,
-    input: &[char],
-    at: usize,
-    count: u32,
-    next: &mut dyn FnMut(usize) -> bool,
-) -> bool {
-    let may_stop = count >= bounds.min;
-    let may_continue = bounds.max.is_none_or(|max| count < max);
-    if may_stop && !bounds.greedy && next(at) {
-        return true;
+fn boundary(input: &[u16], at: usize) -> bool {
+    let before = at > 0 && word(input[at - 1]);
+    let after = at < input.len() && word(input[at]);
+    before != after
+}
+
+fn run(steps: &[Step], input: &[u16]) -> bool {
+    let finished = steps.len() - 1;
+    let mut marks = vec![0; steps.len()];
+    let mut live = Vec::with_capacity(steps.len());
+    let mut ahead = Vec::with_capacity(steps.len());
+    for at in 0..=input.len() {
+        let generation = 2 * at as u32 + 1;
+
+        enter(steps, at, 0, input, &mut marks, generation, &mut live);
+        if live.contains(&finished) {
+            return true;
+        }
+        ahead.clear();
+        let unit = input.get(at).copied();
+        for pc in live.iter().copied() {
+            let matched = match &steps[pc] {
+                Step::Unit(expected) => unit == Some(*expected),
+                Step::Any => unit.is_some_and(|unit| !line_terminator(unit)),
+                Step::Class { negated, items } => unit
+                    .is_some_and(|unit| items.iter().any(|item| item.contains(unit)) != *negated),
+                _ => false,
+            };
+            if matched {
+                enter(
+                    steps,
+                    at + 1,
+                    pc + 1,
+                    input,
+                    &mut marks,
+                    generation + 1,
+                    &mut ahead,
+                );
+            }
+        }
+        std::mem::swap(&mut live, &mut ahead);
     }
-    if may_continue
-        && walk(node, input, at, &mut |position| {
-            position > at && walk_repeat(node, bounds, input, position, count + 1, next)
-        })
-    {
-        return true;
-    }
-    may_stop && bounds.greedy && next(at)
+    false
 }
 
 fn parse(pattern: &str) -> Result<Node, String> {
@@ -412,11 +616,12 @@ fn parse(pattern: &str) -> Result<Node, String> {
 }
 
 pub(crate) fn compiles(pattern: &str) -> Result<(), String> {
-    parse(pattern).map(drop)
+    compile(&parse(pattern)?).map(drop)
 }
 
 pub(crate) fn matches(pattern: &str, value: &str) -> Result<bool, String> {
-    let node = parse(pattern)?;
-    let input = value.chars().collect::<Vec<_>>();
-    Ok((0..=input.len()).any(|at| walk(&node, &input, at, &mut |_| true)))
+    let steps = compile(&parse(pattern)?)?;
+
+    let input = value.encode_utf16().collect::<Vec<_>>();
+    Ok(run(&steps, &input))
 }

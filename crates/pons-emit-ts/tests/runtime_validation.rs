@@ -3829,8 +3829,8 @@ fn generated_client_validates_required_fields_by_direction_and_access() {
         "openness": "reject",
         "fields": [
             {"wire": "email", "ident": ["email"], "ty": {"kind": "string"}, "presence": "required"},
-            {"wire": "secret", "ident": ["secret"], "ty": {"kind": "string"}, "presence": "required", "access": "write_only"},
-            {"wire": "server_id", "ident": ["server", "id"], "ty": {"kind": "string"}, "presence": "required", "access": "read_only"}
+            {"wire": "secret", "ident": ["secret"], "ty": {"kind": "string"}, "presence": "required", "access": "write_only", "default": "sent"},
+            {"wire": "server_id", "ident": ["server", "id"], "ty": {"kind": "string"}, "presence": "required", "access": "read_only", "default": "filled"}
         ]
     });
     raw["types"]["User"] = serde_json::json!({
@@ -3839,8 +3839,8 @@ fn generated_client_validates_required_fields_by_direction_and_access() {
         "direction": "output",
         "openness": "reject",
         "fields": [
-            {"wire": "id", "ident": ["id"], "ty": {"kind": "string"}, "presence": "required", "access": "read_only"},
-            {"wire": "secret", "ident": ["secret"], "ty": {"kind": "string"}, "presence": "required", "access": "write_only"},
+            {"wire": "id", "ident": ["id"], "ty": {"kind": "string"}, "presence": "required", "access": "read_only", "default": "filled"},
+            {"wire": "secret", "ident": ["secret"], "ty": {"kind": "string"}, "presence": "required", "access": "write_only", "default": "hidden"},
             {"wire": "value", "ident": ["value"], "ty": {"kind": "string"}, "presence": "required"}
         ]
     });
@@ -4537,7 +4537,7 @@ const client = createClient({
   },
 });
 const value = await client.session.echo({
-  body: { note: "hello", secret: "client-secret", trace: "client-trace", extra: "carried" },
+  body: { note: "hello", secret: "client-secret", extra: "carried" },
 });
 if (codecCalls.join(",") !== "decode:wire:server-trace") {
   throw new Error(`direction-invisible field was encoded: ${codecCalls.join(",")}`);
@@ -4550,6 +4550,126 @@ if (!sent.includes("carried")) throw new Error(`unknown key was dropped: ${sent}
 if (Object.hasOwn(value, "secret")) throw new Error(`write_only field surfaced: ${JSON.stringify(value)}`);
 if (value.trace !== "plain:wire:server-trace") throw new Error(`read_only field was not decoded: ${JSON.stringify(value)}`);
 if (value.extra !== "kept") throw new Error(`unknown key was not preserved: ${JSON.stringify(value)}`);
+"#;
+    run_bun(&files, harness);
+}
+
+#[test]
+fn a_read_only_request_field_is_refused_where_it_would_be_dropped() {
+    let files = emit_with_strategy(
+        &read_only_request_document(),
+        EmitMode::Strict,
+        ErrorStrategy::Throw,
+    )
+    .unwrap()
+    .files;
+    let harness = r#"
+import { createClient } from "./client.ts";
+
+let fetched = 0;
+let sent = "";
+const client = createClient({
+  baseUrl: "https://example.test",
+  fetch: async (_url, init) => {
+    fetched += 1;
+    sent = String(init?.body);
+    return new Response(JSON.stringify({ id: "1" }), { status: 200, headers: { "content-type": "application/json" } });
+  },
+});
+const refuses = async (body: any, expected: string) => {
+  try {
+    await client.auth.login({ body });
+    throw new Error(`the client accepted ${JSON.stringify(body)}`);
+  } catch (cause) {
+    if (!JSON.stringify(cause).includes(expected)) throw new Error(`${JSON.stringify(body)} failed with ${JSON.stringify(cause)}`);
+  }
+};
+
+await refuses({ email: "person@example.test", id: "7" }, "field id is read_only");
+await refuses({ email: "person@example.test", id: "7", extra: "carried" }, "field id is read_only");
+if (fetched !== 0) throw new Error(`a refused body reached fetch: ${sent}`);
+if (sent !== "") throw new Error(`a refused body was sent: ${sent}`);
+
+const value = await client.auth.login({ body: { email: "person@example.test", extra: "carried" } });
+if (fetched !== 1) throw new Error("the legal body never reached fetch");
+if (!sent.includes("carried")) throw new Error(`an open key was dropped: ${sent}`);
+if (sent.includes("id")) throw new Error(`a dropped field was invented: ${sent}`);
+if (value.id !== "1") throw new Error(`the response was not decoded: ${JSON.stringify(value)}`);
+"#;
+    run_bun(&files, harness);
+}
+
+fn read_only_request_document() -> pons_ir::Document {
+    let mut raw: serde_json::Value =
+        serde_json::from_str(include_str!("../../../fixtures/login.json")).unwrap();
+    raw["types"]["LoginRequest"] = serde_json::json!({
+        "kind": "struct",
+        "name": ["login", "request"],
+        "direction": "both",
+        "openness": "preserve_opaque",
+        "fields": [
+            {"wire": "email", "ident": ["email"], "ty": {"kind": "string"}, "presence": "required"},
+            {"wire": "id", "ident": ["id"], "ty": {"kind": "string"}, "presence": "optional", "access": "read_only"}
+        ]
+    });
+    raw["operations"][0]["provides"] = serde_json::Value::Null;
+    serde_json::from_value(raw).unwrap()
+}
+
+#[test]
+fn an_untyped_openness_value_checks_the_extras_it_preserves() {
+    let mut raw: serde_json::Value =
+        serde_json::from_str(include_str!("../../../fixtures/login.json")).unwrap();
+    raw["types"]["Metadata"] = serde_json::json!({
+        "kind": "struct",
+        "name": ["metadata"],
+        "direction": "both",
+        "openness": {"preserve_typed": {"value": {"kind": "string"}}},
+        "fields": []
+    });
+    raw["operations"][0]["body"] = serde_json::json!({
+        "ty": {"ref": "Metadata"},
+        "content": "json",
+        "required": true
+    });
+    raw["operations"][0]["responses"][0]["body"] = serde_json::json!({"ref": "Metadata"});
+    raw["operations"][0]["provides"] = serde_json::Value::Null;
+    let document: pons_ir::Document = serde_json::from_value(raw).unwrap();
+    let openapi: serde_json::Value =
+        serde_json::from_str(&pons_emit_openapi::emit(&document).unwrap()).unwrap();
+    assert_eq!(
+        openapi["components"]["schemas"]["Metadata"]["additionalProperties"],
+        serde_json::json!({"type": "string"})
+    );
+    let files = emit_with_strategy(&document, EmitMode::Strict, ErrorStrategy::Throw)
+        .unwrap()
+        .files;
+    let harness = r#"
+import { createClient } from "./client.ts";
+
+let reply: any = { extra: "kept" };
+const client = createClient({
+  baseUrl: "https://example.test",
+  fetch: async () => new Response(JSON.stringify(reply), { status: 200, headers: { "content-type": "application/json" } }),
+});
+const login = async (body: any) => {
+  try { return { value: await client.auth.login({ body }) }; }
+  catch (cause) { return { failure: cause }; }
+};
+const refuses = (result: any, where: string) => {
+  if (!result.failure) throw new Error(`${where} was accepted: ${JSON.stringify(result)}`);
+  if (!String(result.failure.message).includes("expected string")) {
+    throw new Error(`${where} failed with ${JSON.stringify(result.failure)}`);
+  }
+};
+
+refuses(await login({ id: "1", extra: 2 }), "an untyped extra value");
+reply = { extra: 2 };
+refuses(await login({ id: "1", extra: "carried" }), "an untyped response value");
+reply = { extra: "kept" };
+const sent = await login({ id: "1", extra: "carried" });
+if (sent.failure) throw new Error(`a typed extra was rejected: ${JSON.stringify(sent.failure)}`);
+if (sent.value.extra !== "kept") throw new Error(`the extra was lost: ${JSON.stringify(sent.value)}`);
 "#;
     run_bun(&files, harness);
 }

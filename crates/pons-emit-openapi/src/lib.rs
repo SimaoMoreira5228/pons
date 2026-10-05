@@ -399,6 +399,9 @@ mod tests {
             .find(|schema| schema["properties"]["code"]["const"] == "locked")
             .unwrap();
         assert!(locked["properties"]["retry_after"]["format"].is_null());
+        let email = &output["components"]["schemas"]["LoginRequest"]["properties"]["email"];
+        assert_eq!(email["x-pons-format"], json!("email"));
+        assert!(email.get("format").is_none(), "{email:#}");
         assert!(
             output["x-pons"]["ext"]["source.note"]["kept"]
                 .as_bool()

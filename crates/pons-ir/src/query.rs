@@ -102,10 +102,11 @@ impl QueryRejection {
             }
             Self::NonScalarField(wire) => worded(carrier.scalar, wire),
             Self::RequiredNullable(wire) => worded(carrier.nullable, wire),
-            Self::ReadOnly(wire) => format!(
-                "{field} {wire:?} is read_only, but {subject} has no read/write direction: the client drops the field on encode and every server built from the document waits for a key the client cannot send",
-                field = carrier.field,
-                subject = carrier.subject
+            Self::ReadOnly(wire) => dropped_key(
+                carrier.field,
+                wire,
+                Access::ReadOnly,
+                &format!("{} has no read/write direction", carrier.subject),
             ),
             Self::DuplicateField(wire) => {
                 format!(
@@ -130,6 +131,23 @@ fn worded(template: &str, wire: &str) -> String {
     template
         .replace("{wire:?}", &format!("{wire:?}"))
         .replace("{wire}", wire)
+}
+
+pub(crate) fn waits_for_a_dropped_key(field: &Field, access: Access) -> bool {
+    field.presence == Presence::Required
+        && matches!(field.default, FieldDefault::Unspecified)
+        && field.access == Some(access)
+}
+
+pub(crate) fn dropped_key(field: &str, wire: &str, access: Access, subject: &str) -> String {
+    match access {
+        Access::ReadOnly => format!(
+            "{field} {wire:?} is read_only, but {subject}: the client drops the field on encode and every server built from the document waits for a key the client cannot send"
+        ),
+        _ => format!(
+            "{field} {wire:?} is write_only, but {subject}: the server drops the field on decode and every client built from the document waits for a field the server cannot send"
+        ),
+    }
 }
 
 pub fn query_fields<'a>(
@@ -252,7 +270,7 @@ fn is_flat_field(
     carrier: &Carrier,
     field: &Field,
 ) -> Result<(), QueryRejection> {
-    if waits_for_a_dropped_key(field) {
+    if waits_for_a_dropped_key(field, Access::ReadOnly) {
         return Err(QueryRejection::ReadOnly(field.wire.clone()));
     }
     if !encodes_nullable_as_absence(document, field) {
@@ -260,12 +278,6 @@ fn is_flat_field(
     }
     is_flat_value(document, carrier, &field.ty, carrier.array, &mut Vec::new())
         .map_err(|refusal| refusal.at(&field.wire))
-}
-
-fn waits_for_a_dropped_key(field: &Field) -> bool {
-    field.access == Some(Access::ReadOnly)
-        && field.presence == Presence::Required
-        && matches!(field.default, FieldDefault::Unspecified)
 }
 
 fn encodes_nullable_as_absence(document: &Document, field: &Field) -> bool {
