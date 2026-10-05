@@ -14,13 +14,6 @@ pub(super) fn emit(
 ) -> Result<String, EmitError> {
     let mut output = String::new();
     for (id, definition) in &document.types {
-        if let TypeKind::Newtype { inner } = &definition.definition
-            && newtype_cycle(id, inner, document)
-        {
-            return Err(EmitError(format!(
-                "the type {id} cannot be resolved because newtypes form a cycle"
-            )));
-        }
         let name = &names[id];
         output.push_str(&format!(
             "export type {name} = {};\n\n",
@@ -28,61 +21,6 @@ pub(super) fn emit(
         ));
     }
     Ok(output)
-}
-
-fn newtype_cycle(id: &str, inner: &TypeRef, document: &Document) -> bool {
-    reenters(id, inner, document, &mut BTreeSet::new())
-}
-
-fn reenters(
-    id: &str,
-    reference: &TypeRef,
-    document: &Document,
-    seen: &mut BTreeSet<(String, Option<String>)>,
-) -> bool {
-    match reference {
-        TypeRef::Named(named) => {
-            if named.id == id {
-                return true;
-            }
-            if !seen.insert((named.id.clone(), named.variant.clone())) {
-                return false;
-            }
-            let Some(definition) = document
-                .types
-                .get(&named.id)
-                .map(|definition| &definition.definition)
-            else {
-                return false;
-            };
-            let next: Vec<&TypeRef> = match definition {
-                TypeKind::Newtype { inner } => vec![inner],
-                TypeKind::Enum { variants, .. } => match named
-                    .variant
-                    .as_deref()
-                    .and_then(|variant| variants.iter().find(|entry| entry.wire == variant))
-                {
-                    Some(Variant {
-                        payload: VariantPayload::Newtype { ty },
-                        ..
-                    }) => vec![ty],
-                    _ => return false,
-                },
-                TypeKind::Struct { .. } => return false,
-            };
-            next.into_iter()
-                .any(|reference| reenters(id, reference, document, seen))
-        }
-        TypeRef::Inline(InlineType::Nullable { inner }) => reenters(id, inner, document, seen),
-        TypeRef::Inline(InlineType::Array { item, .. }) => reenters(id, item, document, seen),
-        TypeRef::Inline(InlineType::Map { key, value }) => {
-            reenters(id, key, document, seen) || reenters(id, value, document, seen)
-        }
-        TypeRef::Inline(InlineType::Tuple { items }) => {
-            items.iter().any(|item| reenters(id, item, document, seen))
-        }
-        _ => false,
-    }
 }
 
 fn definition_type(
@@ -231,9 +169,6 @@ fn collect_flattened_field_types(
         }
         return Err(not_a_struct_member(reference));
     };
-    if named.variant.is_some() {
-        return Err(not_a_struct_member(reference));
-    }
     if visiting.contains(&named.id) {
         return Err(EmitError(format!(
             "the type {} cannot be inlined because flattened members form a cycle",

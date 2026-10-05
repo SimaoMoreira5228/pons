@@ -951,27 +951,33 @@ fn a_request_header_the_runtime_owns_is_refused() {
         document.operations[0].headers.clear();
         document
     };
+    let message = "is owned by the request body or the security model, so every client and server built from the document writes it too";
 
-    for wire in [
-        "accept",
-        "Accept",
-        "authorization",
-        "content-type",
-        "cookie",
-    ] {
+    for wire in ["accept", "Accept", "authorization", "cookie"] {
         refuses(
             &with_header(wire),
-            &format!(
-                "request header {wire} is owned by the request body or the security model, so every client and server built from the document writes it too"
-            ),
+            &format!("request header {wire} {message}"),
         );
     }
+    with_header("content-type").validate().unwrap();
     with_header("X-Request-ID").validate().unwrap();
+
+    let mut with_body = fixture();
+    for wire in ["accept", "authorization", "content-type", "cookie"] {
+        with_body.operations[0].headers =
+            vec![serde_json::from_value(json!({
+            "wire": wire, "ident": ["owned"], "ty": {"kind": "string"}, "presence": "required"
+        }))
+        .unwrap()];
+        refuses(&with_body, &format!("request header {wire} {message}"));
+    }
+
     let mut response = fixture();
     response.operations[0].responses.push(
         serde_json::from_value(json!({
             "status": 201, "content": "empty", "headers": [
-                {"wire": "Set-Cookie", "ty": {"kind": "string"}, "presence": "required"}
+                {"wire": "Set-Cookie", "ty": {"kind": "string"}, "presence": "required"},
+                {"wire": "Content-Type", "ty": {"kind": "string"}, "presence": "required"}
             ]
         }))
         .unwrap(),
@@ -980,7 +986,7 @@ fn a_request_header_the_runtime_owns_is_refused() {
 }
 
 #[test]
-fn a_typed_openness_value_that_contradicts_a_field_is_refused() {
+fn a_typed_openness_value_types_only_the_extra_keys() {
     let openness = |fields: Vec<Value>, flattened: Vec<&str>, value: Value| {
         with(
             json!({
@@ -999,44 +1005,102 @@ fn a_typed_openness_value_that_contradicts_a_field_is_refused() {
     };
     let number = json!({"kind": "int", "bits": 32, "signed": false, "wire": "number"});
 
-    refuses(
-        &contract(openness(
-            vec![field("kind", string(), "required")],
-            vec![],
-            number.clone(),
-        )),
-        "the typed openness value {\"kind\":\"int\",\"bits\":32,\"signed\":false,\"wire\":\"number\"} contradicts the field kind of type {\"kind\":\"string\"}",
-    );
-    refuses(
-        &contract(openness(vec![], vec!["Nested"], number)),
-        "contradicts the field deep of type {\"ref\":\"Value\"}",
-    );
-
     for accepted in [
         openness(
-            vec![field(
-                "kind",
-                json!({"kind": "string", "format": "email"}),
-                "required",
-            )],
+            vec![field("kind", string(), "required")],
             vec![],
-            string(),
+            json!({"kind": "map", "key": string(), "value": number}),
         ),
-        openness(vec![], vec!["Nested"], json!({"ref": "Value"})),
+        openness(
+            vec![field("count", number.clone(), "required")],
+            vec![],
+            json!({"kind": "map", "key": string(), "value": string()}),
+        ),
+        openness(vec![], vec!["Nested"], string()),
+        openness(vec![], vec!["Nested"], number.clone()),
         openness(vec![], vec![], string()),
     ] {
         contract(accepted).validate().unwrap();
     }
+
+    refuses(
+        &contract(openness(
+            vec![],
+            vec![],
+            json!({"kind": "map", "key": number, "value": number}),
+        )),
+        "map keys must use an inline string type",
+    );
+}
+
+#[test]
+fn a_typed_openness_value_spares_a_field_its_own_direction_drops() {
+    let read_only = |wire: &str| {
+        json!({"wire": wire, "ident": [wire], "ty": string(), "presence": "optional",
+            "access": "read_only"})
+    };
+    let carrier = |direction: &str, hidden: Value| {
+        contract(json!({
+            "Nested": {
+                "kind": "struct", "name": ["nested"], "direction": direction, "openness": "reject",
+                "fields": [hidden]
+            },
+            "Carrier": struct_type(
+                "carrier",
+                vec![],
+                vec![json!({"ref": "Nested"})],
+                json!({"preserve_typed": {"value": {
+                    "kind": "map", "key": string(),
+                    "value": {"kind": "int", "bits": 32, "signed": false, "wire": "number"}
+                }}})
+            )
+        }))
+    };
+
     contract(with(
         json!({"Carrier": {
             "kind": "struct", "name": ["carrier"], "direction": "input", "openness": "reject",
-            "fields": [json!({"wire": "kind", "ident": ["kind"], "ty": {"kind": "string"},
-                "presence": "required", "access": "read_only"})]
+            "fields": [read_only("kind")]
         }}),
         json!({}),
     ))
     .validate()
     .unwrap();
+    carrier("input", read_only("kind")).validate().unwrap();
+    carrier("output", read_only("kind")).validate().unwrap();
+    carrier("input", field("kind", string(), "required"))
+        .validate()
+        .unwrap();
+}
+
+#[test]
+fn a_typed_openness_value_meets_a_wide_integer_on_its_own_number_shape() {
+    let carrier = |field_type: Value, extra: Value| {
+        contract(json!({
+            "Carrier": struct_type(
+                "carrier",
+                vec![field("count", field_type, "required")],
+                vec![],
+                json!({"preserve_typed": {"value": {
+                    "kind": "map", "key": string(), "value": extra
+                }}})
+            )
+        }))
+    };
+    let number = |bits| json!({"kind": "int", "bits": bits, "signed": false, "wire": "number"});
+
+    for (field_type, extra) in [
+        (number(64), number(32)),
+        (number(64), number(64)),
+        (number(32), number(64)),
+        (json!({"kind": "float", "bits": 64}), number(16)),
+        (
+            json!({"kind": "int", "bits": 64, "signed": false, "wire": "string"}),
+            string(),
+        ),
+    ] {
+        carrier(field_type, extra).validate().unwrap();
+    }
 }
 
 fn struct_type(name: &str, fields: Vec<Value>, flattened: Vec<Value>, openness: Value) -> Value {
@@ -1047,17 +1111,41 @@ fn struct_type(name: &str, fields: Vec<Value>, flattened: Vec<Value>, openness: 
 }
 
 #[test]
-fn a_flattened_member_must_be_a_struct() {
+fn a_flattened_member_is_a_struct_or_a_transparent_carrier_over_one() {
+    let newtype_over = |name: &str, inner: Value| json!({"kind": "newtype", "name": [name], "direction": "both", "inner": inner});
+    let opaque = json!({"kind": "opaque", "codec": "example", "wire": "unknown"});
     let flattened_document = |member: Value| {
-        request_body(json!({
+        let mut document = request_body(json!({
             "Envelope": struct_type("envelope", vec![field("a", string(), "required")], vec![member], json!("reject")),
             "Seal": struct_type("seal", vec![field("b", string(), "required")], vec![], json!("reject")),
+            "Deep": struct_type("deep", vec![], vec![json!({"ref": "Seal"})], json!("reject")),
             "Choice": {
                 "kind": "enum", "name": ["choice"], "direction": "both",
                 "repr": {"kind": "string"},
                 "variants": [{"wire": "one", "ident": ["one"], "payload": {"kind": "unit"}}]
             }
-        }))
+        }));
+        for (id, definition) in [
+            ("Alias", newtype_over("alias", json!({"ref": "Seal"}))),
+            ("Opaque", newtype_over("opaque", opaque.clone())),
+            (
+                "OpaqueAlias",
+                newtype_over("opaque", json!({"ref": "Opaque"})),
+            ),
+            ("OverChoice", newtype_over("over", json!({"ref": "Choice"}))),
+            (
+                "OverMap",
+                newtype_over(
+                    "over",
+                    json!({"kind": "map", "key": string(), "value": string()}),
+                ),
+            ),
+        ] {
+            document
+                .types
+                .insert(id.into(), serde_json::from_value(definition).unwrap());
+        }
+        document
     };
 
     for (member, blamed) in [
@@ -1070,6 +1158,14 @@ fn a_flattened_member_must_be_a_struct() {
             "flattened {\"kind\":\"map\",\"key\":{\"kind\":\"string\"},\"value\":{\"kind\":\"string\"}} is not a struct",
         ),
         (
+            json!({"kind": "array", "item": string()}),
+            "flattened {\"kind\":\"array\",\"item\":{\"kind\":\"string\"}} is not a struct",
+        ),
+        (
+            json!({"kind": "tuple", "items": [string()]}),
+            "flattened {\"kind\":\"tuple\",\"items\":[{\"kind\":\"string\"}]} is not a struct",
+        ),
+        (
             json!({"ref": "Choice", "variant": "one"}),
             "flattened {\"ref\":\"Choice\",\"variant\":\"one\"} is not a struct",
         ),
@@ -1078,38 +1174,38 @@ fn a_flattened_member_must_be_a_struct() {
             "flattened {\"ref\":\"Choice\"} is not a struct",
         ),
         (
-            json!({"ref": "Alias", "variant": "one"}),
-            "flattened {\"ref\":\"Alias\",\"variant\":\"one\"} is not a struct",
+            json!({"ref": "OverChoice"}),
+            "flattened {\"ref\":\"OverChoice\"} is not a struct",
+        ),
+        (
+            json!({"ref": "OverChoice", "variant": "one"}),
+            "flattened {\"ref\":\"OverChoice\",\"variant\":\"one\"} is not a struct",
+        ),
+        (
+            json!({"ref": "OverMap"}),
+            "flattened {\"ref\":\"OverMap\"} is not a struct",
+        ),
+        (
+            json!({"ref": "Seal", "variant": "one"}),
+            "flattened {\"ref\":\"Seal\",\"variant\":\"one\"} is not a struct",
+        ),
+        (
+            json!({"kind": "nullable", "inner": {"ref": "Seal"}}),
+            "nullable flattened types are not representable",
         ),
     ] {
-        let mut document = flattened_document(member.clone());
-        if blamed.contains("Alias") {
-            document.types.insert(
-                "Alias".into(),
-                serde_json::from_value(json!({
-                    "kind": "newtype", "name": ["alias"], "direction": "both", "inner": {"ref": "Choice"}
-                }))
-                .unwrap(),
-            );
-        }
-        refuses(&document, blamed);
+        refuses(&flattened_document(member), blamed);
     }
 
     for member in [
         json!({"ref": "Seal"}),
+        json!({"ref": "Alias"}),
+        json!({"ref": "Deep"}),
         json!({"ref": "Opaque"}),
-        json!({"kind": "opaque", "codec": "example", "wire": "unknown"}),
+        json!({"ref": "OpaqueAlias"}),
+        opaque.clone(),
     ] {
-        let mut document = flattened_document(member);
-        document.types.insert(
-            "Opaque".into(),
-            serde_json::from_value(json!({
-                "kind": "newtype", "name": ["opaque"], "direction": "both",
-                "inner": {"kind": "opaque", "codec": "example", "wire": "unknown"}
-            }))
-            .unwrap(),
-        );
-        document.validate().unwrap();
+        flattened_document(member).validate().unwrap();
     }
 }
 
@@ -1135,6 +1231,50 @@ fn a_reserved_tag_reached_through_a_flattened_member_is_refused() {
     enveloped(json!({"kind": "newtype", "ty": string()}))
         .validate()
         .unwrap();
+}
+
+#[test]
+fn a_flatten_cycle_is_refused() {
+    let cycles = |blamed: &str| {
+        format!("the type {blamed} cannot be inlined because flattened members form a cycle")
+    };
+
+    for (types, blamed) in [
+        (
+            json!({
+                "Envelope": struct_type("envelope", vec![], vec![json!({"ref": "Alias"})], json!("reject")),
+                "Alias": {"kind": "newtype", "name": ["alias"], "direction": "both", "inner": {"ref": "Inner"}},
+                "Inner": struct_type("inner", vec![field("b", string(), "required")], vec![json!({"ref": "Alias"})], json!("reject"))
+            }),
+            "Alias",
+        ),
+        (
+            json!({
+                "Envelope": struct_type("envelope", vec![], vec![json!({"ref": "Outer"})], json!("reject")),
+                "Outer": struct_type("outer", vec![], vec![json!({"ref": "Envelope"})], json!("reject"))
+            }),
+            "Envelope",
+        ),
+        (
+            json!({
+                "Envelope": struct_type("envelope", vec![], vec![json!({"ref": "Envelope"})], json!("reject"))
+            }),
+            "Envelope",
+        ),
+    ] {
+        refuses(&request_body(types), &cycles(blamed));
+    }
+
+    contract(json!({
+        "Loop": struct_type("loop",
+            vec![field("again", json!({"kind": "array", "item": {"ref": "Loop"}}), "optional")],
+            vec![], json!("reject")),
+        "Alias": {"kind": "newtype", "name": ["alias"], "direction": "both", "inner": {"ref": "Seal"}},
+        "Seal": struct_type("seal", vec![field("b", string(), "required")], vec![], json!("reject")),
+        "Nested": struct_type("nested", vec![], vec![json!({"ref": "Seal"})], json!("reject"))
+    }))
+    .validate()
+    .unwrap();
 }
 
 #[test]
@@ -1255,27 +1395,48 @@ fn a_stream_request_body_is_refused() {
 }
 
 #[test]
-fn a_default_error_cannot_answer_for_a_status_a_named_response_answers() {
+fn a_default_error_collides_only_with_a_catch_all_success() {
     let with_statuses = |response: pons_ir::ResponseStatus, error: ErrorStatus| {
         let mut document = fixture();
-        document.operations[0].responses[0].status = response;
+        let declared = &mut document.operations[0].responses[0];
+        declared.status = response;
+        if matches!(response, pons_ir::ResponseStatus::Exact(status) if matches!(status, 100..=199 | 204 | 205 | 304))
+        {
+            declared.content = pons_ir::ContentKind::Empty;
+            declared.body = None;
+        }
         document.operations[0].errors[0].status = error;
         document
     };
+    let exact = |status| pons_ir::ResponseStatus::Exact(status);
     let collides = "collides with a success response";
 
     refuses(
-        &with_statuses(pons_ir::ResponseStatus::Exact(404), ErrorStatus::Default),
-        collides,
+        &with_statuses(pons_ir::ResponseStatus::Default, ErrorStatus::Default),
+        &format!("error status Default {collides}"),
     );
     refuses(
-        &with_statuses(pons_ir::ResponseStatus::Class(4), ErrorStatus::Default),
-        collides,
+        &with_statuses(pons_ir::ResponseStatus::Unknown, ErrorStatus::Default),
+        &format!("error status Default {collides}"),
     );
+    refuses(
+        &with_statuses(pons_ir::ResponseStatus::Default, ErrorStatus::Exact(200)),
+        &format!("error status Exact(200) {collides}"),
+    );
+    refuses(
+        &with_statuses(pons_ir::ResponseStatus::Default, ErrorStatus::Class(2)),
+        &format!("error status Class(2) {collides}"),
+    );
+
     for document in [
-        with_statuses(pons_ir::ResponseStatus::Exact(200), ErrorStatus::Default),
+        with_statuses(exact(200), ErrorStatus::Default),
+        with_statuses(exact(204), ErrorStatus::Default),
+        with_statuses(exact(302), ErrorStatus::Default),
+        with_statuses(exact(404), ErrorStatus::Default),
+        with_statuses(pons_ir::ResponseStatus::Class(4), ErrorStatus::Default),
         with_statuses(pons_ir::ResponseStatus::Class(2), ErrorStatus::Default),
-        with_statuses(pons_ir::ResponseStatus::Exact(404), ErrorStatus::Class(5)),
+        with_statuses(pons_ir::ResponseStatus::Default, ErrorStatus::Exact(404)),
+        with_statuses(exact(404), ErrorStatus::Class(5)),
     ] {
         document.validate().unwrap();
     }
@@ -1398,15 +1559,56 @@ fn an_oauth_flow_url_must_be_an_absolute_https_url() {
 }
 
 #[test]
-fn scopes_on_a_scheme_that_is_not_oauth2_are_refused() {
-    let mut document = fixture();
-    document.operations[1].auth.scopes = BTreeMap::from([("tenant".into(), vec!["read".into()])]);
+fn scopes_are_legal_on_every_auth_scheme() {
+    let with_scopes = |schemes: Value, scopes: &[&str]| {
+        let mut document = fixture();
+        document
+            .auth_schemes
+            .extend(serde_json::from_value::<BTreeMap<String, _>>(schemes).unwrap());
+        document.operations[1].auth.alternatives = vec![vec!["tenant".into()]];
+        document.operations[1].auth.scopes = BTreeMap::from([(
+            "tenant".to_owned(),
+            scopes.iter().map(|scope| (*scope).to_owned()).collect(),
+        )]);
+        document
+    };
+    let oauth = |scopes: Value| {
+        json!({
+            "tenant": {
+                "kind": "o_auth2",
+                "flows": [{
+                    "kind": "client_credentials",
+                    "token_url": "https://auth.example.test/token",
+                    "scopes": scopes
+                }]
+            }
+        })
+    };
+
+    for scheme in [
+        json!({"tenant": {"kind": "bearer", "format": "jwt"}}),
+        json!({"tenant": {"kind": "api_key", "in": "header", "name": "X-Tenant"}}),
+        json!({"tenant": {"kind": "custom", "description": "per tenant"}}),
+        oauth(json!({"read": "Read"})),
+    ] {
+        with_scopes(scheme, &["read"]).validate().unwrap();
+    }
+
     refuses(
-        &document,
-        "auth scheme tenant has scopes but is not an OAuth2 scheme, because no other scheme declares them",
+        &with_scopes(oauth(json!({"write": "Write"})), &["read"]),
+        "the OAuth2 scheme tenant does not declare the read scope",
     );
-    document.operations[1].auth.scopes = BTreeMap::new();
-    document.validate().unwrap();
+    refuses(
+        &with_scopes(
+            json!({"tenant": {"kind": "bearer", "format": "jwt"}}),
+            &["read", "read"],
+        ),
+        "auth scheme tenant repeats scope read",
+    );
+    refuses(
+        &with_scopes(json!({"tenant": {"kind": "bearer", "format": "jwt"}}), &[]),
+        "auth scheme tenant has an empty scope list",
+    );
 }
 
 #[test]

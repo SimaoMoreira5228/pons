@@ -1343,23 +1343,6 @@ mod tests {
                 .0
                 .contains("1 stream descriptions and 0 stream responses")
         );
-
-        let mut document = fixture();
-        document
-            .operations
-            .iter_mut()
-            .find(|operation| operation.id[0][0] == "auth")
-            .unwrap()
-            .body
-            .as_mut()
-            .unwrap()
-            .content = ContentKind::Stream;
-        assert!(
-            super::emit(&document)
-                .unwrap_err()
-                .0
-                .contains("OpenAPI cannot describe streaming request bodies")
-        );
     }
 
     #[test]
@@ -1414,18 +1397,11 @@ mod tests {
         );
 
         let mut document = fixture();
-        document
-            .operations
-            .iter_mut()
-            .find(|operation| operation.stream.is_some())
-            .unwrap()
-            .headers[0]
-            .wire = "Content-Type".into();
+        document.operations[1].headers[0].wire = "Accept".into();
         assert!(
-            super::emit(&document)
-                .unwrap_err()
-                .0
-                .contains("OpenAPI ignores request header Content-Type")
+            super::emit(&document).unwrap_err().0.contains(
+                "request header Accept is owned by the request body or the security model"
+            )
         );
 
         let mut document = fixture();
@@ -1445,7 +1421,7 @@ mod tests {
             super::emit(&document)
                 .unwrap_err()
                 .0
-                .contains("absolute HTTPS URL")
+                .contains("OAuth2 token URL for oauth must be an absolute HTTPS URL")
         );
 
         let mut document = fixture();
@@ -1465,7 +1441,7 @@ mod tests {
             super::emit(&document)
                 .unwrap_err()
                 .0
-                .contains("absolute HTTPS URL")
+                .contains("OAuth2 token URL for oauth must be an absolute HTTPS URL")
         );
     }
 

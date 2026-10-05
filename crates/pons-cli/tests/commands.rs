@@ -1097,7 +1097,7 @@ fn emit_bounds_the_log_it_echoes_from_an_external_target() {
         &plugin,
         r##"#!/bin/sh
 if [ "$1" = describe ]; then
-  printf '%s' '{"name":"python","version":"1.0.0","protocol":{"min":"2.0","max":"2.0"},"ir_version":{"min":"0.2","max":"0.2"},"capabilities":{"streaming":["sse","ndjson","stream_body"],"enum_reprs":["string","external","internal","adjacent","untagged"],"direction_split":true,"provides":true,"flattened":true,"opaque":true,"object_openness":["reject","preserve_typed","preserve_opaque"]}}'
+  printf '%s' '{"name":"python","version":"1.0.0","protocol":{"min":"2.0","max":"2.0"},"ir_version":{"min":"0.2","max":"0.2"},"capabilities":{"streaming":["sse","ndjson","bytes"],"enum_reprs":["string","external","internal","adjacent","untagged"],"direction_split":true,"provides":true,"flattened":true,"opaque":true,"object_openness":["reject","preserve_typed","preserve_opaque"]}}'
 elif [ "$1" = emit ]; then
   cat > /dev/null
   printf 'log head\n' >&2

@@ -4172,7 +4172,7 @@ fn rejects_multipart_media_type_overrides() {
         serde_json::from_str(include_str!("../../../fixtures/login.json")).unwrap();
     let body = document.operations[0].body.as_mut().unwrap();
     body.content = ContentKind::Multipart;
-    body.media_type = Some("application/vnd.acme+multipart".into());
+    body.media_type = Some("multipart/mixed".into());
     let error = emit_with_strategy(&document, EmitMode::Strict, ErrorStrategy::Throw).unwrap_err();
     assert!(error.0.contains("multipart media type overrides"));
 }
@@ -4663,7 +4663,7 @@ fn follows_cross_origin_redirects_that_carry_no_credentials() {
         serde_json::from_str(include_str!("../../../fixtures/login.json")).unwrap();
     document.operations[1].auth.alternatives = Vec::new();
     document.operations[1].headers = vec![pons_ir::HeaderParameter {
-        wire: "Accept".into(),
+        wire: "X-Accept".into(),
         ident: vec!["accept".into()],
         ty: TypeRef::Inline(InlineType::String {
             format: None,
@@ -4686,7 +4686,7 @@ const client = createClient({
   baseUrl: "https://a.test",
   fetch: async (url, init) => {
     calls += 1;
-    requested.push(`${url.origin}${url.pathname} ${new Headers(init?.headers).get("accept")}`);
+    requested.push(`${url.origin}${url.pathname} ${new Headers(init?.headers).get("x-accept")}`);
     if (calls === 1) return new Response(null, { status: 302, headers: { location: "https://b.test/events/redirected" } });
     return new Response(new ReadableStream({ start(controller) { controller.close(); } }), {
       status: 200,
@@ -4694,7 +4694,7 @@ const client = createClient({
     });
   },
 });
-await client.events.watch({ path: { cursor: "cursor" }, query: {}, headers: { Accept: "application/json" } });
+await client.events.watch({ path: { cursor: "cursor" }, query: {}, headers: { "X-Accept": "application/json" } });
 if (calls !== 2) throw new Error(`cross-origin redirect was refused: ${JSON.stringify(requested)}`);
 if (!requested[1].startsWith("https://b.test/events/redirected application/json")) {
   throw new Error(`wrong redirect target: ${requested[1]}`);
@@ -4888,7 +4888,7 @@ if (String(failure.cause?.message).includes("stream") === false) {
 
 #[test]
 fn rejects_request_headers_the_runtime_overwrites() {
-    let mut document: pons_ir::Document =
+    let document: pons_ir::Document =
         serde_json::from_str(include_str!("../../../fixtures/login.json")).unwrap();
     let mut header = document.operations[1].headers[0].clone();
     header.presence = Presence::Required;
@@ -4896,31 +4896,27 @@ fn rejects_request_headers_the_runtime_overwrites() {
         emit_with_strategy(&document, EmitMode::Strict, ErrorStrategy::Throw).is_ok(),
         "a request header the runtime keeps must still emit"
     );
-    header.wire = "Content-Type".into();
-    header.ident = vec!["content".into(), "type".into()];
-    document.operations[0].headers = vec![header.clone()];
-    let rejection = emit_with_strategy(&document, EmitMode::Strict, ErrorStrategy::Throw)
-        .expect_err("a request header the runtime overwrites must be rejected");
-    assert!(
-        rejection.0.contains("Content-Type")
-            && rejection.0.contains("operations[0].headers")
-            && rejection.0.contains("overwrites"),
-        "{}",
-        rejection
-    );
-
-    let mut authorization = header;
-    authorization.wire = "authorization".into();
-    authorization.ident = vec!["authorization".into()];
-    document.operations[0].headers = Vec::new();
-    document.operations[1].headers = vec![authorization];
-    let rejection = emit_with_strategy(&document, EmitMode::Strict, ErrorStrategy::Throw)
-        .expect_err("an authorization request header must be rejected");
-    assert!(
-        rejection.0.contains("authorization") && rejection.0.contains("operations[1].headers"),
-        "{}",
-        rejection
-    );
+    for wire in ["Content-Type", "authorization"] {
+        let mut named = header.clone();
+        named.wire = wire.into();
+        named.ident = vec![wire.to_ascii_lowercase()];
+        let mut refused = document.clone();
+        if wire == "authorization" {
+            refused.operations[0].headers = Vec::new();
+            refused.operations[1].headers = vec![named];
+        } else {
+            refused.operations[0].headers = vec![named];
+        }
+        let rejection = emit_with_strategy(&refused, EmitMode::Strict, ErrorStrategy::Throw)
+            .expect_err("a request header the runtime overwrites must be rejected");
+        assert!(
+            rejection.0.contains(wire)
+                && rejection
+                    .0
+                    .contains("is owned by the request body or the security model"),
+            "{rejection}"
+        );
+    }
 }
 
 #[test]
@@ -4962,38 +4958,6 @@ fn rejects_request_headers_a_header_credential_overwrites() {
         emit_with_strategy(&cookie_document, EmitMode::Strict, ErrorStrategy::Throw).is_ok(),
         "a cookie credential merges into the cookie header instead of discarding the declared one"
     );
-}
-
-#[test]
-fn keeps_a_content_type_header_on_a_bodyless_operation() {
-    let mut document: pons_ir::Document =
-        serde_json::from_str(include_str!("../../../fixtures/login.json")).unwrap();
-    let mut header = document.operations[1].headers[0].clone();
-    header.wire = "Content-Type".into();
-    header.ident = vec!["content".into(), "type".into()];
-    document.operations[1].headers = vec![header];
-    let files = emit_with_strategy(&document, EmitMode::Strict, ErrorStrategy::Throw)
-        .expect("a bodyless operation keeps its content type header")
-        .files;
-    let harness = r#"
-import { createClient } from "./client.ts";
-
-let seen: string | null = null;
-const client = createClient({
-  baseUrl: "https://a.test",
-  auth: { tenant: { get: async () => ({ value: "tenant" }), set: async () => {}, clear: async () => {} } },
-  fetch: async (_url, init) => {
-    seen = new Headers(init?.headers).get("content-type");
-    return new Response(new ReadableStream({ start(controller) { controller.close(); } }), {
-      status: 200,
-      headers: { "content-type": "text/event-stream", "X-Trace-ID": "trace" },
-    });
-  },
-});
-await client.events.watch({ path: { cursor: "cursor" }, query: {}, headers: { "Content-Type": "application/vnd.declared" } });
-if (seen !== "application/vnd.declared") throw new Error(`the declared content type was lost: ${seen}`);
-"#;
-    run_bun(&files, harness);
 }
 
 #[test]
@@ -5155,13 +5119,9 @@ if (value.value.id !== "1") throw new Error(`the body was not decoded: ${JSON.st
 
 #[test]
 fn a_default_error_takes_every_status_no_success_declares() {
-    // NOTE: a range success stands in for the catch-all success here because the IR rejects a
-
     let mut document: pons_ir::Document =
         serde_json::from_str(include_str!("../../../fixtures/login.json")).unwrap();
-    let mut unavailable = document.operations[0].responses[0].clone();
-    unavailable.status = pons_ir::ResponseStatus::Class(5);
-    document.operations[0].responses.push(unavailable);
+    document.operations[0].responses.clear();
     document.operations[0].errors[0].status = pons_ir::ErrorStatus::Default;
     let files = emit_with_strategy(&document, EmitMode::Strict, ErrorStrategy::Throw)
         .unwrap()
@@ -5169,35 +5129,20 @@ fn a_default_error_takes_every_status_no_success_declares() {
     let harness = r#"
 import { createClient } from "./client.ts";
 
-const answering = async (status: number) => createClient({
+const answering = (status: number) => createClient({
   baseUrl: "https://example.test",
-  fetch: async () => new Response(JSON.stringify({ id: "1" }), {
+  fetch: async () => new Response(JSON.stringify({ code: "invalid" }), {
     status,
     headers: { "content-type": "application/json" },
   }),
 });
-const created = await answering(200);
-const value = await created.auth.login({ body: { email: "person@example.test" } });
-if (value.id !== "1" || value.status !== undefined) {
-  throw new Error(`the specific 2xx success lost to the default error: ${JSON.stringify(value)}`);
+for (const status of [200, 201, 503]) {
+  const failure: any = await answering(status).auth.login({ body: { email: "person@example.test" } })
+    .then(() => undefined, (cause) => cause);
+  if (failure?.kind !== "http") throw new Error(`${status} was not the default error: ${JSON.stringify(failure)}`);
+  if (failure.status !== status) throw new Error(`the error status was lost: ${JSON.stringify(failure)}`);
+  if (failure.body?.code !== "invalid") throw new Error(`the typed error body was lost: ${JSON.stringify(failure)}`);
 }
-
-const unavailable = await answering(503);
-const body = await unavailable.auth.login({ body: { email: "person@example.test" } });
-if (body.id !== "1") throw new Error(`the 5xx success lost to the default error: ${JSON.stringify(body)}`);
-
-const undeclared = createClient({
-  baseUrl: "https://example.test",
-  fetch: async () => new Response(JSON.stringify({ code: "invalid" }), {
-    status: 201,
-    headers: { "content-type": "application/json" },
-  }),
-});
-const failure: any = await undeclared.auth.login({ body: { email: "person@example.test" } })
-  .then(() => undefined, (cause) => cause);
-if (failure?.kind !== "http") throw new Error(`an undeclared 2xx was not the default error: ${JSON.stringify(failure)}`);
-if (failure.status !== 201) throw new Error(`the error status was lost: ${JSON.stringify(failure)}`);
-if (failure.body?.code !== "invalid") throw new Error(`the typed error body was lost: ${JSON.stringify(failure)}`);
 "#;
     run_bun(&files, harness);
 }

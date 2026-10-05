@@ -62,17 +62,8 @@ impl Builder<'_> {
                         continue;
                     }
                     let scopes = match definition {
-                        AuthScheme::OAuth2 { flows } => {
-                            let scopes =
-                                operation.auth.scopes.get(scheme).cloned().unwrap_or_default();
-                            for scope in &scopes {
-                                if !flows.iter().any(|flow| flow.scopes.contains_key(scope)) {
-                                    return Err(EmitError(format!(
-                                        "the OAuth2 scheme {scheme} does not declare the {scope} scope"
-                                    )));
-                                }
-                            }
-                            scopes
+                        AuthScheme::OAuth2 { .. } => {
+                            operation.auth.scopes.get(scheme).cloned().unwrap_or_default()
                         }
                         _ => Vec::new(),
                     };
@@ -116,8 +107,6 @@ impl Builder<'_> {
                             "OAuth2 authorizationCode flow in {id} needs a token URL"
                         ))
                     })?;
-                    validate_https_url(id, "authorization", authorization_url)?;
-                    validate_https_url(id, "token", token_url)?;
                     value.insert("authorizationUrl".into(), json!(authorization_url));
                     value.insert("tokenUrl".into(), json!(token_url));
                 }
@@ -132,7 +121,6 @@ impl Builder<'_> {
                             "OAuth2 implicit flow in {id} needs an authorization URL"
                         ))
                     })?;
-                    validate_https_url(id, "authorization", authorization_url)?;
                     value.insert("authorizationUrl".into(), json!(authorization_url));
                 }
                 OAuthFlowKind::Password | OAuthFlowKind::ClientCredentials => {
@@ -145,7 +133,6 @@ impl Builder<'_> {
                     let token_url = flow.token_url.as_deref().ok_or_else(|| {
                         EmitError(format!("OAuth2 {name} flow in {id} needs a token URL"))
                     })?;
-                    validate_https_url(id, "token", token_url)?;
                     value.insert("tokenUrl".into(), json!(token_url));
                 }
             }
@@ -153,22 +140,6 @@ impl Builder<'_> {
             result.insert(name.into(), Value::Object(value));
         }
         Ok(json!({"type":"oauth2","flows":result}))
-    }
-}
-
-fn validate_https_url(id: &str, kind: &str, value: &str) -> Result<(), EmitError> {
-    let valid = value.strip_prefix("https://").is_some_and(|rest| {
-        let end = rest.find(['/', '?', '#']).unwrap_or(rest.len());
-        let authority = &rest[..end];
-        let host = authority.rsplit('@').next().unwrap_or_default();
-        !host.is_empty() && !rest.chars().any(char::is_whitespace)
-    });
-    if valid {
-        Ok(())
-    } else {
-        Err(EmitError(format!(
-            "OAuth2 {kind} URL for {id} must be an absolute HTTPS URL"
-        )))
     }
 }
 
@@ -337,7 +308,7 @@ mod tests {
             .insert("oauth".into(), vec!["events:write".into()]);
         assert_eq!(
             crate::emit(&document).unwrap_err().0,
-            "the OAuth2 scheme oauth does not declare the events:write scope"
+            "operation [[\"events\"], [\"watch\"]]: the OAuth2 scheme oauth does not declare the events:write scope"
         );
     }
 }

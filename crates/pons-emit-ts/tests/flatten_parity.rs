@@ -37,7 +37,7 @@ fn rejects(types: Value, message: &str) {
 fn both_emitters_reject_a_flattened_enum() {
     rejects(
         json!({"Outer": struct_type("outer", "a", json!([{"ref": "LoginError"}]))}),
-        "the type LoginError cannot be inlined into a struct",
+        "is not a struct, because a flattened member contributes its fields to one object",
     );
 }
 
@@ -47,7 +47,7 @@ fn both_emitters_reject_a_narrowed_flattened_variant() {
         json!({
             "Outer": struct_type("outer", "a", json!([{"ref": "LoginError", "variant": "invalid"}]))
         }),
-        "the invalid variant of the type LoginError cannot be inlined into a struct",
+        "is not a struct, because a flattened member contributes its fields to one object",
     );
 }
 

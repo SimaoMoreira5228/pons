@@ -9,9 +9,9 @@ use crate::operation::{
     ErrorStatus, Method, OAuthFlowKind, Operation, PathSegment, ResponseStatus, StreamKind,
 };
 use crate::types::{
-    Access, DecimalWire, Diagnostic, DiagnosticSeverity, Direction, EnumRepr, Field, FieldDefault,
-    InlineType, IntegerWire, ObjectOpenness, OpaqueWire, Presence, TypeDef, TypeKind, TypeRef,
-    Variant, VariantPayload,
+    Access, Diagnostic, DiagnosticSeverity, Direction, EnumRepr, Field, FieldDefault, InlineType,
+    IntegerWire, ObjectOpenness, OpaqueWire, Presence, TypeDef, TypeKind, TypeRef, Variant,
+    VariantPayload,
 };
 use crate::violation::direction_name;
 
@@ -64,15 +64,16 @@ fn response_status_conflicts(response: ResponseStatus, error: &ErrorStatus) -> b
             response_answers_success(ResponseStatus::Class(*class))
         }
         (ResponseStatus::Default | ResponseStatus::Unknown, ErrorStatus::Default) => true,
-        (_, ErrorStatus::Default) => !response_answers_success(response),
+        _ => false,
     }
 }
 
-fn owns_request_header(wire: &str) -> bool {
-    matches!(
-        wire.to_ascii_lowercase().as_str(),
-        "accept" | "authorization" | "content-type" | "cookie"
-    )
+fn owns_request_header(wire: &str, has_body: bool) -> bool {
+    match wire.to_ascii_lowercase().as_str() {
+        "content-type" => has_body,
+        "accept" | "authorization" | "cookie" => true,
+        _ => false,
+    }
 }
 
 fn absolute_https_url(value: &str) -> bool {
@@ -177,31 +178,8 @@ fn field_crosses(field: &Field, boundary: Boundary) -> bool {
     )
 }
 
-fn field_crosses_every_side(field: &Field, direction: Direction) -> bool {
-    !matches!(
-        (direction, field.access),
-        (Direction::Input, Some(Access::ReadOnly)) | (Direction::Output, Some(Access::WriteOnly))
-    )
-}
-
 fn render(ty: &TypeRef) -> String {
     serde_json::to_string(ty).unwrap_or_default()
-}
-
-#[derive(PartialEq, Eq)]
-enum Shape<'a> {
-    Named(&'a str, Option<&'a str>),
-    Bool,
-    Number,
-    BigInt,
-    Text,
-    Bytes,
-    Null,
-    Opaque,
-    Array(Box<Shape<'a>>),
-    Map(Box<Shape<'a>>),
-    Tuple(Vec<Shape<'a>>),
-    Nullable(Box<Shape<'a>>),
 }
 
 fn carrier_key(location: ApiKeyLocation, name: &str) -> String {
@@ -561,7 +539,7 @@ impl Document {
                         ),
                     });
                 }
-                if owns_request_header(&header.wire) {
+                if owns_request_header(&header.wire, operation.body.is_some()) {
                     errors.push(ValidationError::InvalidValue {
                         path: owner.clone(),
                         message: format!(
@@ -663,26 +641,17 @@ impl Document {
                         scheme: scheme.clone(),
                     });
                 }
-                match self.auth_schemes.get(scheme) {
-                    Some(AuthScheme::OAuth2 { flows }) => {
-                        for scope in scopes {
-                            if !flows.iter().any(|flow| flow.scopes.contains_key(scope)) {
-                                errors.push(ValidationError::InvalidValue {
-                                    path: owner.clone(),
-                                    message: format!(
-                                        "the OAuth2 scheme {scheme} does not declare the {scope} scope"
-                                    ),
-                                });
-                            }
+                if let Some(AuthScheme::OAuth2 { flows }) = self.auth_schemes.get(scheme) {
+                    for scope in scopes {
+                        if !flows.iter().any(|flow| flow.scopes.contains_key(scope)) {
+                            errors.push(ValidationError::InvalidValue {
+                                path: owner.clone(),
+                                message: format!(
+                                    "the OAuth2 scheme {scheme} does not declare the {scope} scope"
+                                ),
+                            });
                         }
                     }
-                    Some(_) => errors.push(ValidationError::InvalidValue {
-                        path: owner.clone(),
-                        message: format!(
-                            "auth scheme {scheme} has scopes but is not an OAuth2 scheme, because no other scheme declares them"
-                        ),
-                    }),
-                    None => {}
                 }
                 if !operation
                     .auth
@@ -1297,14 +1266,19 @@ impl Document {
                         ),
                     });
                 }
+                if let Some(repeated) = self.flatten_cycle(ty, &mut vec![id.to_owned()]) {
+                    errors.push(ValidationError::InvalidValue {
+                        path: format!("{owner}.flattened[{index}]"),
+                        message: format!(
+                            "the type {repeated} cannot be inlined because flattened members form a cycle"
+                        ),
+                    });
+                }
             }
         }
 
         match &definition.definition {
-            TypeKind::Struct { fields, .. } => {
-                self.validate_fields(&owner, fields, errors);
-                self.validate_openness(&owner, definition, errors);
-            }
+            TypeKind::Struct { fields, .. } => self.validate_fields(&owner, fields, errors),
             TypeKind::Enum { repr, variants } => {
                 match repr {
                     EnumRepr::Internal { tag } if tag.is_empty() => {
@@ -1397,114 +1371,6 @@ impl Document {
         }
     }
 
-    fn validate_openness(
-        &self,
-        owner: &str,
-        definition: &TypeDef,
-        errors: &mut Vec<ValidationError>,
-    ) {
-        let TypeKind::Struct {
-            fields,
-            flattened,
-            openness: ObjectOpenness::PreserveTyped { value },
-        } = &definition.definition
-        else {
-            return;
-        };
-        let value = self.openness_value(value);
-        let shape = self.shape(value);
-        let mut members: Vec<(String, &TypeRef)> = fields
-            .iter()
-            .filter(|field| field_crosses_every_side(field, definition.direction))
-            .map(|field| (format!("field {}", field.wire), &field.ty))
-            .collect();
-        for member in flattened {
-            self.flattened_member_types(member, &mut BTreeSet::new(), &mut members);
-        }
-        for (label, ty) in members {
-            if self.shape(ty) != shape {
-                errors.push(ValidationError::InvalidValue {
-                    path: owner.into(),
-                    message: format!(
-                        "the typed openness value {} contradicts the {label} of type {}, because every key of the object has one declared type",
-                        render(value),
-                        render(ty)
-                    ),
-                });
-            }
-        }
-    }
-
-    fn shape<'a>(&'a self, ty: &'a TypeRef) -> Shape<'a> {
-        match self.peeled(ty) {
-            TypeRef::Named(named) => Shape::Named(&named.id, named.variant.as_deref()),
-            TypeRef::Inline(inline) => match inline {
-                InlineType::Bool => Shape::Bool,
-                InlineType::Int { bits, wire, .. } => match (wire, *bits > 53) {
-                    (IntegerWire::String, _) => Shape::Text,
-                    (IntegerWire::Number, true) => Shape::BigInt,
-                    (IntegerWire::Number, false) => Shape::Number,
-                },
-                InlineType::Float { .. } => Shape::Number,
-                InlineType::Decimal { wire } => match wire {
-                    DecimalWire::Number => Shape::Number,
-                    DecimalWire::String => Shape::Text,
-                },
-                InlineType::String { .. } => Shape::Text,
-                InlineType::Bytes { .. } => Shape::Bytes,
-                InlineType::Null => Shape::Null,
-                InlineType::Any | InlineType::Opaque { .. } => Shape::Opaque,
-                InlineType::Nullable { inner } => Shape::Nullable(Box::new(self.shape(inner))),
-                InlineType::Array { item, .. } => Shape::Array(Box::new(self.shape(item))),
-                InlineType::Map { value, .. } => Shape::Map(Box::new(self.shape(value))),
-                InlineType::Tuple { items } => {
-                    Shape::Tuple(items.iter().map(|item| self.shape(item)).collect())
-                }
-            },
-        }
-    }
-
-    fn flattened_member_types<'a>(
-        &'a self,
-        member: &'a TypeRef,
-        seen: &mut BTreeSet<String>,
-        members: &mut Vec<(String, &'a TypeRef)>,
-    ) {
-        let TypeRef::Named(named) = member else {
-            return;
-        };
-        if named.variant.is_some() || !seen.insert(named.id.clone()) {
-            return;
-        }
-        let Some(definition) = self.types.get(&named.id) else {
-            return;
-        };
-        match &definition.definition {
-            TypeKind::Newtype { inner } => self.flattened_member_types(inner, seen, members),
-            TypeKind::Struct {
-                fields,
-                flattened,
-                openness,
-            } => {
-                members.extend(
-                    fields
-                        .iter()
-                        .map(|field| (format!("field {}", field.wire), &field.ty)),
-                );
-                if let ObjectOpenness::PreserveTyped { value } = openness {
-                    members.push((
-                        format!("openness value of the type {}", named.id),
-                        self.openness_value(value),
-                    ));
-                }
-                for member in flattened {
-                    self.flattened_member_types(member, seen, members);
-                }
-            }
-            TypeKind::Enum { .. } => {}
-        }
-    }
-
     fn inlines_a_struct(&self, ty: &TypeRef, seen: &mut BTreeSet<String>) -> bool {
         match ty {
             TypeRef::Inline(InlineType::Opaque { .. }) => true,
@@ -1524,26 +1390,24 @@ impl Document {
         }
     }
 
-    fn peeled<'a>(&'a self, ty: &'a TypeRef) -> &'a TypeRef {
-        let mut current = ty;
-        let mut seen = BTreeSet::new();
-        while let TypeRef::Named(named) = current
-            && named.variant.is_none()
-            && seen.insert(named.id.clone())
-        {
-            match self.types.get(&named.id).map(|found| &found.definition) {
-                Some(TypeKind::Newtype { inner }) => current = inner,
-                _ => return current,
-            }
+    fn flatten_cycle(&self, member: &TypeRef, visiting: &mut Vec<String>) -> Option<String> {
+        let TypeRef::Named(named) = member else {
+            return None;
+        };
+        if visiting.contains(&named.id) {
+            return Some(named.id.clone());
         }
-        current
-    }
-
-    fn openness_value<'a>(&'a self, ty: &'a TypeRef) -> &'a TypeRef {
-        match self.peeled(ty) {
-            TypeRef::Inline(InlineType::Map { value, .. }) => value,
-            other => other,
-        }
+        let definition = self.types.get(&named.id)?;
+        visiting.push(named.id.clone());
+        let cyclic = match &definition.definition {
+            TypeKind::Newtype { inner } => self.flatten_cycle(inner, visiting),
+            TypeKind::Struct { flattened, .. } => flattened
+                .iter()
+                .find_map(|member| self.flatten_cycle(member, visiting)),
+            TypeKind::Enum { .. } => None,
+        };
+        visiting.pop();
+        cyclic
     }
 
     fn reenters(

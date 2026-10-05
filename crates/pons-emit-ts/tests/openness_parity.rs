@@ -203,18 +203,12 @@ fn a_flattened_map_is_rejected_by_both() {
         "flattened": [map(string())],
     });
     let document: Document = serde_json::from_value(raw).unwrap();
-    assert!(
-        pons_emit_openapi::emit(&document)
-            .unwrap_err()
-            .0
-            .contains("an inline map cannot be inlined into a struct")
-    );
-    assert!(
-        pons_emit_ts::emit(&document)
-            .unwrap_err()
-            .0
-            .contains("an inline map cannot be inlined into a struct")
-    );
+    assert!(pons_emit_openapi::emit(&document).unwrap_err().0.contains(
+        "is not a struct, because a flattened member contributes its fields to one object"
+    ));
+    assert!(pons_emit_ts::emit(&document).unwrap_err().0.contains(
+        "is not a struct, because a flattened member contributes its fields to one object"
+    ));
 }
 
 #[test]

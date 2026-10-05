@@ -2,16 +2,14 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Component, Path};
 
 use pons_ir::{
-    AuthScheme, ContentKind, CoverageLevel, Document, EnumRepr, ObjectOpenness, StreamKind,
-    TypeKind,
+    AuthScheme, CoverageLevel, Document, EnumRepr, ObjectOpenness, StreamKind, TypeKind,
 };
 use serde::de::{self, Deserializer};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 pub const PROTOCOL_VERSION: u32 = 2;
-const STREAM_BODY: &str = "stream_body";
-const STREAMING: &[&str] = &["sse", "ndjson", "bytes", "websocket", STREAM_BODY];
+const STREAMING: &[&str] = &["sse", "ndjson", "bytes", "websocket"];
 const ENUM_REPRS: &[&str] = &["string", "external", "internal", "adjacent", "untagged"];
 const OBJECT_OPENNESS: &[&str] = &["reject", "preserve_typed", "preserve_opaque"];
 const DEVICE_INDEXES: &[&str] = &["1", "2", "3", "4", "5", "6", "7", "8", "9", "¹", "²", "³"];
@@ -251,22 +249,6 @@ impl EmitterManifest {
             )));
         }
         for operation in &document.operations {
-            if operation
-                .body
-                .as_ref()
-                .is_some_and(|body| body.content == ContentKind::Stream)
-                && !self
-                    .capabilities
-                    .streaming
-                    .iter()
-                    .any(|value| value == STREAM_BODY)
-            {
-                warnings.push(CapabilityWarning(format!(
-                    "{} does not declare {STREAM_BODY} support in {}",
-                    self.name,
-                    operation_subject(operation)
-                )));
-            }
             for kind in stream_kinds(operation) {
                 if !self
                     .capabilities
@@ -692,11 +674,7 @@ mod tests {
             serde_json::from_str(include_str!("../../../fixtures/login.json")).unwrap();
         streaming_body["operations"][0]["body"]["content"] = serde_json::json!("stream");
         let streaming_body: Document = serde_json::from_value(streaming_body).unwrap();
-        streaming_body.validate().unwrap();
-        assert_eq!(
-            stream_warnings(&sse, &streaming_body),
-            vec!["fixture does not declare stream_body support in auth.login"]
-        );
+        refuses_stream_body(&streaming_body);
 
         let mut bytes_only = manifest();
         bytes_only.capabilities.streaming = vec!["bytes".into()];
@@ -706,8 +684,7 @@ mod tests {
         );
 
         let mut framed = sse.clone();
-        framed.capabilities.streaming = vec!["sse".into(), "bytes".into(), "stream_body".into()];
-        assert!(stream_warnings(&framed, &streaming_body).is_empty());
+        framed.capabilities.streaming = vec!["sse".into(), "bytes".into()];
         assert!(stream_warnings(&framed, &document).is_empty());
 
         let mut duplex: serde_json::Value =
@@ -720,19 +697,14 @@ mod tests {
             "events": [{ "event": "user", "data": { "ref": "User" } }]
         });
         let duplex: Document = serde_json::from_value(duplex).unwrap();
-        duplex.validate().unwrap();
+        refuses_stream_body(&duplex);
         assert_eq!(
             stream_warnings(&bytes_only, &duplex),
             vec![
-                "fixture does not declare stream_body support in auth.login",
                 "fixture does not declare support for sse streams in auth.login",
                 "fixture does not declare support for sse streams in events.watch",
             ],
             "a streaming request body must not hide the response stream"
-        );
-        assert_eq!(
-            stream_warnings(&sse, &duplex),
-            vec!["fixture does not declare stream_body support in auth.login"]
         );
         assert!(stream_warnings(&framed, &duplex).is_empty());
 
@@ -776,48 +748,38 @@ mod tests {
         );
     }
 
+    fn refuses_stream_body(document: &Document) {
+        let refusal = document
+            .validate()
+            .expect_err("the IR refuses a stream request body")
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            refusal.contains(
+                "a request body cannot be stream content, because no built-in target reads one"
+            ),
+            "{refusal}"
+        );
+    }
+
     fn stream_warnings(manifest: &EmitterManifest, document: &Document) -> Vec<String> {
         manifest
             .unsupported_features(document)
             .into_iter()
             .map(|warning| warning.0)
-            .filter(|message| {
-                message.contains(" streams in ")
-                    || message.contains(&format!("{STREAM_BODY} support in "))
-            })
+            .filter(|message| message.contains(" streams in "))
             .collect()
     }
 
     #[test]
-    fn a_streamed_request_body_needs_its_own_capability() {
+    fn the_ir_refuses_a_streamed_request_body() {
         let mut value: serde_json::Value =
             serde_json::from_str(include_str!("../../../fixtures/login.json")).unwrap();
         value["operations"][0]["body"]["content"] = serde_json::json!("stream");
         let document: Document = serde_json::from_value(value).unwrap();
-        document.validate().unwrap();
-        let refusal = "fixture does not declare stream_body support in auth.login";
-
-        let mut framed = manifest();
-        framed.capabilities.streaming = vec!["sse".into(), "ndjson".into()];
-        assert_eq!(stream_warnings(&framed, &document), vec![refusal]);
-        framed.capabilities.streaming.push("stream_body".into());
-        assert!(stream_warnings(&framed, &document).is_empty());
-
-        let mut bytes_only = manifest();
-        bytes_only.capabilities.streaming = vec!["bytes".into()];
-        assert_eq!(
-            stream_warnings(&bytes_only, &document),
-            vec![
-                refusal,
-                "fixture does not declare support for sse streams in events.watch"
-            ],
-            "a bytes response capability does not carry a streamed request body"
-        );
-        bytes_only.capabilities.streaming.push("stream_body".into());
-        assert_eq!(
-            stream_warnings(&bytes_only, &document),
-            vec!["fixture does not declare support for sse streams in events.watch"]
-        );
+        refuses_stream_body(&document);
     }
 
     #[test]
@@ -1035,9 +997,17 @@ mod tests {
 
         let every_value = manifest_with(
             "streaming",
-            serde_json::json!(["sse", "ndjson", "bytes", "websocket", "stream_body"]),
+            serde_json::json!(["sse", "ndjson", "bytes", "websocket"]),
         );
         assert!(every_value.validate("0.2").is_ok());
+
+        let error = manifest_with("streaming", serde_json::json!(["stream_body"]))
+            .validate("0.2")
+            .unwrap_err();
+        assert_eq!(
+            error, "emitter capabilities name an unknown streaming value stream_body",
+            "a request body the IR refuses to describe has no capability to declare"
+        );
     }
 
     fn manifest_with(list: &str, values: serde_json::Value) -> EmitterManifest {

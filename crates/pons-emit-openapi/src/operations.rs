@@ -105,12 +105,6 @@ impl Builder<'_> {
             self.query_parameters(query, &mut parameters)?;
         }
         for header in &operation.headers {
-            if is_ignored_request_header(&header.wire) {
-                return Err(EmitError(format!(
-                    "OpenAPI ignores request header {}",
-                    header.wire
-                )));
-            }
             parameters.push(json!({
                 "name": header.wire,
                 "in": "header",
@@ -118,19 +112,6 @@ impl Builder<'_> {
                 "schema": self.type_schema(&header.ty)?,
                 "x-pons":{"ident":header.ident,"presence":header.presence,"ext":header.ext},
             }));
-        }
-        let mut seen = std::collections::BTreeSet::new();
-        for parameter in &parameters {
-            let location = parameter["in"].as_str().unwrap_or_default();
-            let name = parameter["name"].as_str().unwrap_or_default();
-            let key = if location == "header" {
-                name.to_ascii_lowercase()
-            } else {
-                name.to_owned()
-            };
-            if !seen.insert((location.to_owned(), key)) {
-                return Err(EmitError(format!("duplicate {location} parameter {name}")));
-            }
         }
         Ok(parameters)
     }
@@ -156,13 +137,8 @@ impl Builder<'_> {
     }
 
     fn request_body(&self, body: &pons_ir::Body) -> Result<Value, EmitError> {
-        if body.content == ContentKind::Stream {
-            return Err(EmitError(
-                "OpenAPI cannot describe streaming request bodies".into(),
-            ));
-        }
         let media = media_type(body.content, None, body.media_type.as_deref())?
-            .ok_or_else(|| EmitError("request body cannot use empty or stream content".into()))?;
+            .ok_or_else(|| EmitError("request body cannot use empty content".into()))?;
         let schema = if body.content == ContentKind::Bytes {
             json!({})
         } else {
@@ -245,9 +221,6 @@ impl Builder<'_> {
                     let media = media.ok_or_else(|| {
                         EmitError("byte response is missing its media type".into())
                     })?;
-                    if response.body.is_none() {
-                        return Err(EmitError("byte response is missing its body type".into()));
-                    }
                     value["content"] = media_content(media, json!({}));
                 }
                 _ => {
@@ -268,7 +241,7 @@ impl Builder<'_> {
             }
             add_response_headers(self, &response.headers, &mut value, "response")?;
             value["x-pons"] = json!({"status":response.status,"body":response.body,"content":response.content,"media_type":response.media_type,"ext":response.ext});
-            insert_response(&mut responses, success_status(response.status), value)?;
+            responses.insert(success_status(response.status), value);
         }
         let errors = if operation.errors_inherit {
             operation
@@ -302,7 +275,7 @@ impl Builder<'_> {
                 value["x-pons-retryable"] = json!(retryable);
             }
             value["x-pons"] = json!({"name":error.name,"body":error.body,"headers":error.headers,"content":error.content,"media_type":error.media_type,"doc":error.doc,"ext":error.ext});
-            insert_response(&mut responses, status, value)?;
+            responses.insert(status, value);
         }
         if responses.is_empty() {
             return Err(EmitError(format!(
@@ -443,13 +416,6 @@ fn add_parameter_doc(parameter: &mut Value, doc: Option<&pons_ir::Doc>) {
     }
 }
 
-fn is_ignored_request_header(name: &str) -> bool {
-    matches!(
-        name.to_ascii_lowercase().as_str(),
-        "accept" | "authorization" | "content-type" | "cookie"
-    )
-}
-
 fn media_type(
     content: ContentKind,
     stream: Option<&pons_ir::StreamDescription>,
@@ -582,19 +548,6 @@ fn error_status(status: &ErrorStatus) -> String {
         ErrorStatus::Class(class) => format!("{class}XX"),
         ErrorStatus::Default => "default".into(),
     }
-}
-
-fn insert_response(
-    responses: &mut Map<String, Value>,
-    status: String,
-    value: Value,
-) -> Result<(), EmitError> {
-    if responses.insert(status.clone(), value).is_some() {
-        return Err(EmitError(format!(
-            "multiple response definitions use status {status}"
-        )));
-    }
-    Ok(())
 }
 
 #[cfg(test)]

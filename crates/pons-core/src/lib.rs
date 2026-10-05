@@ -141,9 +141,9 @@ impl TypeCx {
         let mut seen = BTreeSet::new();
         loop {
             let TypeRef::Named(reference) = current else {
-                return false;
+                return matches!(current, TypeRef::Inline(InlineType::Opaque { .. }));
             };
-            if !seen.insert(reference.id.clone()) {
+            if reference.variant.is_some() || !seen.insert(reference.id.clone()) {
                 return false;
             }
             match self

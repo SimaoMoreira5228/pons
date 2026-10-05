@@ -94,16 +94,6 @@ pub fn emit_with_strategy(
         ));
     }
     if document.operations.iter().any(|operation| {
-        operation
-            .body
-            .as_ref()
-            .is_some_and(|body| body.content == pons_ir::ContentKind::Stream)
-    }) {
-        return Err(EmitError(
-            "the TypeScript emitter does not support streaming request bodies".into(),
-        ));
-    }
-    if document.operations.iter().any(|operation| {
         operation.stream.as_ref().is_some_and(|stream| {
             !matches!(
                 &stream.kind,
@@ -133,12 +123,6 @@ pub fn emit_with_strategy(
     for (index, operation) in document.operations.iter().enumerate() {
         for header in &operation.headers {
             let name = header.wire.to_ascii_lowercase();
-            if name == "authorization" || (name == "content-type" && operation.body.is_some()) {
-                return Err(EmitError(format!(
-                    "the TypeScript emitter rejects the request header at operations[{index}].headers that the runtime overwrites: {}",
-                    header.wire
-                )));
-            }
             if let Some(scheme) = api_key_headers.get(&name) {
                 return Err(EmitError(format!(
                     "the TypeScript emitter rejects the request header at operations[{index}].headers that the {scheme} credential overwrites: {}",
@@ -149,7 +133,6 @@ pub fn emit_with_strategy(
     }
     let coverage = pons_plugin::coverage_for_document(&document, mode == EmitMode::Lossy)
         .map_err(EmitError)?;
-    validate_query_types(&document)?;
     let type_scan = scan_type_references(&document);
     if let Some(path) = type_scan.fractional_constraint_paths.first() {
         return Err(EmitError(format!(
@@ -206,21 +189,6 @@ fn strict_coverage_error(mode: EmitMode, coverage: &Coverage) -> Result<(), Emit
             .map_or(Ok(()), Err),
         EmitMode::Lossy => Ok(()),
     }
-}
-
-fn validate_query_types(document: &Document) -> Result<(), EmitError> {
-    for (index, operation) in document.operations.iter().enumerate() {
-        let Some(query) = &operation.query else {
-            continue;
-        };
-        pons_ir::query_fields(document, query).map_err(|rejection| {
-            EmitError(format!(
-                "the TypeScript emitter rejects this query at operations[{index}].query: {}",
-                rejection.message()
-            ))
-        })?;
-    }
-    Ok(())
 }
 
 #[derive(Default)]
@@ -896,6 +864,9 @@ mod tests {
     fn checks_typed_openness_against_flattened_fields() {
         let mut raw: serde_json::Value =
             serde_json::from_str(include_str!("../../../fixtures/login.json")).unwrap();
+        raw["types"]["Tag"] = json!({
+            "kind": "newtype", "name": ["tag"], "direction": "both", "inner": {"kind": "string"}
+        });
         raw["types"]["Metadata"] = json!({
             "kind": "struct",
             "name": ["metadata"],
@@ -930,19 +901,16 @@ mod tests {
         else {
             unreachable!()
         };
-        fields[0].ty = TypeRef::Inline(InlineType::Int {
-            bits: 32,
-            signed: false,
-            wire: IntegerWire::Number,
-            minimum: None,
-            maximum: None,
-            multiple_of: None,
+        fields[0].ty = TypeRef::Named(pons_ir::NamedRef {
+            id: "Tag".into(),
+            variant: None,
         });
         assert!(
             super::emit(&document)
                 .unwrap_err()
                 .0
-                .contains("direct or flattened fields")
+                .contains("direct or flattened fields"),
+            "one shape under two names is the check the IR shape rule cannot make"
         );
     }
 
@@ -956,12 +924,9 @@ mod tests {
             "value": {"kind": "string"}
         }]);
         let document: Document = serde_json::from_value(raw).unwrap();
-        assert!(
-            super::emit(&document)
-                .unwrap_err()
-                .0
-                .contains("an inline map cannot be inlined into a struct")
-        );
+        assert!(super::emit(&document).unwrap_err().0.contains(
+            "is not a struct, because a flattened member contributes its fields to one object"
+        ));
     }
 
     #[test]
@@ -1046,7 +1011,13 @@ mod tests {
         document.operations[0].body.as_mut().unwrap().content = ContentKind::Stream;
         for mode in [super::EmitMode::Strict, super::EmitMode::Lossy] {
             let error = super::emit_with_mode(&document, mode).unwrap_err();
-            assert!(error.0.contains("streaming request bodies"), "{}", error.0);
+            assert!(
+                error.0.contains(
+                    "a request body cannot be stream content, because no built-in target reads one"
+                ),
+                "{}",
+                error.0
+            );
         }
     }
 

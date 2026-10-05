@@ -97,13 +97,6 @@ impl<'a> Builder<'a> {
     pub(super) fn schemas(&self) -> Result<Map<String, Value>, EmitError> {
         let mut schemas = Map::new();
         for (id, definition) in &self.document.types {
-            if let TypeKind::Newtype { inner } = &definition.definition
-                && newtype_cycle(id, inner, self.document)
-            {
-                return Err(EmitError(format!(
-                    "the type {id} cannot be resolved because newtypes form a cycle"
-                )));
-            }
             let mut schema = self.definition_schema(definition)?;
             add_doc(&mut schema, definition.doc.as_ref());
             let openness = match &definition.definition {
@@ -156,9 +149,6 @@ impl<'a> Builder<'a> {
         let TypeRef::Named(named) = ty else {
             return Err(not_a_struct_member(ty));
         };
-        if named.variant.is_some() {
-            return Err(not_a_struct_member(ty));
-        }
         if visiting.contains(&named.id) {
             return Err(EmitError(format!(
                 "the type {} cannot be inlined because flattened members form a cycle",
@@ -655,29 +645,6 @@ pub(super) enum Place {
     Header,
 
     Part { required: bool },
-}
-
-fn newtype_cycle(id: &str, inner: &TypeRef, document: &Document) -> bool {
-    let mut current = inner;
-    let mut visited = Vec::new();
-    while let TypeRef::Named(named) = current {
-        if named.id == id {
-            return true;
-        }
-        if visited.contains(&named.id) {
-            return false;
-        }
-        let Some(TypeKind::Newtype { inner }) = document
-            .types
-            .get(&named.id)
-            .map(|definition| &definition.definition)
-        else {
-            return false;
-        };
-        visited.push(named.id.clone());
-        current = inner;
-    }
-    false
 }
 
 fn stated_pattern(pattern: &str) -> Result<Value, EmitError> {
@@ -1296,12 +1263,9 @@ mod tests {
             "Outer".into(),
             closed("outer", vec![field("a", string())], vec![map()]),
         );
-        assert!(
-            crate::emit(&document)
-                .unwrap_err()
-                .0
-                .contains("an inline map cannot be inlined into a struct")
-        );
+        assert!(crate::emit(&document).unwrap_err().0.contains(
+            "is not a struct, because a flattened member contributes its fields to one object"
+        ));
     }
 
     #[test]
@@ -1312,12 +1276,9 @@ mod tests {
             "Outer".into(),
             closed("outer", vec![field("a", string())], vec![named("Choice")]),
         );
-        assert!(
-            crate::emit(&document)
-                .unwrap_err()
-                .0
-                .contains("the type Choice cannot be inlined into a struct")
-        );
+        assert!(crate::emit(&document).unwrap_err().0.contains(
+            "is not a struct, because a flattened member contributes its fields to one object"
+        ));
     }
 
     #[test]
