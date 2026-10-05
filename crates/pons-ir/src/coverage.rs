@@ -2,7 +2,8 @@ use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
 use serde_json::{Map, Value};
 
-use crate::{Document, Operation, operation_path};
+use crate::Document;
+use crate::reported_coverage::{operation_subject, type_subject};
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord)]
 pub enum CoverageLevel {
@@ -24,20 +25,17 @@ impl CoverageLevel {
     }
 }
 
-fn type_subject(id: &str) -> String {
-    format!("types.{id}")
-}
-
-fn operation_subject(operation: &Operation) -> String {
-    format!("operations.{}", operation_path(&operation.id))
-}
-
 pub fn coverage_subjects(document: &Document) -> BTreeSet<String> {
     document
         .types
         .keys()
         .map(|id| type_subject(id))
-        .chain(document.operations.iter().map(operation_subject))
+        .chain(
+            document
+                .operations
+                .iter()
+                .map(|operation| format!("operations.{}", operation_subject(operation))),
+        )
         .collect()
 }
 
@@ -97,7 +95,10 @@ pub fn canonical_coverage(
                     .map_or(CoverageLevel::Exact, |errors| graph.level(errors)),
             );
         }
-        coverage.insert(operation_subject(document_operation), level);
+        coverage.insert(
+            format!("operations.{}", operation_subject(document_operation)),
+            level,
+        );
     }
     Ok(coverage)
 }

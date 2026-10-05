@@ -1,4 +1,8 @@
-use std::{fs, path::PathBuf, process::Command};
+use std::{
+    fs,
+    path::{Path, PathBuf},
+    process::Command,
+};
 
 use pons_emit_ts::{EmitMode, ErrorStrategy, GeneratedFile, emit_with_strategy};
 use pons_ir::Document;
@@ -107,17 +111,22 @@ fn compiler_candidates() -> Vec<Compiler> {
     .collect()
 }
 
-fn workspace_typescript() -> Option<PathBuf> {
+fn workspace_bin_directories() -> Vec<PathBuf> {
     let mut directory = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let mut directories = Vec::new();
     loop {
-        let candidate = directory.join("node_modules").join(".bin").join("tsc");
-        if candidate.is_file() {
-            return Some(candidate);
-        }
+        directories.push(directory.join("node_modules").join(".bin"));
         if !directory.pop() {
-            return None;
+            return directories;
         }
     }
+}
+
+fn workspace_typescript() -> Option<PathBuf> {
+    workspace_bin_directories()
+        .into_iter()
+        .flat_map(|bin| [bin.join("tsc"), bin.join("tsc.cmd")])
+        .find(|candidate| candidate.is_file())
 }
 
 fn is_compiler_version(stdout: &str) -> bool {
@@ -142,9 +151,11 @@ fn tsc_command() -> Compiler {
         }
     }
     panic!(
-        "no TypeScript compiler for the generated TypeScript type tests, tried {candidates:?}; the \
-         deprecated npm package named tsc prints a banner instead of compiling, so install the \
-         compiler itself with `npm install --save-dev typescript` or `bun add --dev typescript`"
+        "no TypeScript compiler for the generated TypeScript type tests, tried {candidates:?} and \
+         every tsc and tsc.cmd in {directories:?}; the deprecated npm package named tsc prints a \
+         banner instead of compiling, so install the compiler itself with \
+         `npm install --save-dev typescript` or `bun add --dev typescript`",
+        directories = workspace_bin_directories(),
     );
 }
 
@@ -216,7 +227,10 @@ fn every_candidate_invokes_the_typescript_compiler_and_nothing_else() {
         "`tsc tsc --project` mixes a source file with --project, which the compiler refuses as TS5042"
     );
     for (program, arguments) in &runners {
-        if program.ends_with("node_modules/.bin/tsc") {
+        if Path::new(program)
+            .file_name()
+            .is_some_and(|name| name == "tsc" || name == "tsc.cmd")
+        {
             assert!(
                 arguments.is_empty(),
                 "{program} is the compiler itself, so `tsc tsc --project` would be TS5042: {arguments:?}"

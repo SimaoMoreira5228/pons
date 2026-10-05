@@ -7,10 +7,10 @@ mod wire_validation;
 use std::collections::{BTreeMap, BTreeSet};
 
 use pons_ir::{
-    ApiKeyLocation, AuthScheme, Document, InlineType, IntegerWire, ObjectOpenness, PathSegment,
-    StreamKind, TypeDef, TypeKind, TypeRef, VariantPayload,
+    ApiKeyLocation, AuthScheme, Coverage, Document, InlineType, IntegerWire, ObjectOpenness,
+    PathSegment, StreamKind, TypeDef, TypeKind, TypeRef, VariantPayload, coverage_for_document,
+    strict_violation_message,
 };
-use pons_plugin::Coverage;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GeneratedFile {
@@ -131,8 +131,7 @@ pub fn emit_with_strategy(
             }
         }
     }
-    let coverage = pons_plugin::coverage_for_document(&document, mode == EmitMode::Lossy)
-        .map_err(EmitError)?;
+    let coverage = coverage_for_document(&document, mode == EmitMode::Lossy).map_err(EmitError)?;
     let type_scan = scan_type_references(&document);
     if let Some(path) = type_scan.fractional_constraint_paths.first() {
         return Err(EmitError(format!(
@@ -184,7 +183,7 @@ pub fn emit_with_strategy(
 
 fn strict_coverage_error(mode: EmitMode, coverage: &Coverage) -> Result<(), EmitError> {
     match mode {
-        EmitMode::Strict => pons_plugin::strict_violation_message(coverage)
+        EmitMode::Strict => strict_violation_message(coverage)
             .map(|violations| EmitError(format!("the TypeScript emitter reported {violations}")))
             .map_or(Ok(()), Err),
         EmitMode::Lossy => Ok(()),

@@ -351,7 +351,7 @@ fn operation_function(
             )
         })
         .unwrap_or_else(|| "undefined".into());
-    let method = format!("{:?}", operation.method).to_uppercase();
+    let method = operation.method.as_str();
     let (args_type, options) = if args.is_empty() {
         ("(_options?: CallOptions) =>".to_owned(), "_options")
     } else {
@@ -860,5 +860,66 @@ fn normalize_integer_constraints(value: &mut serde_json::Value) {
             }
         }
         _ => {}
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::BTreeMap;
+
+    use serde_json::{Value, json};
+
+    fn client_of(operations: Value) -> String {
+        let raw = json!({
+            "ir_version": pons_ir::IR_VERSION,
+            "info": {"title": "Verbs", "version": "1"},
+            "operations": operations,
+        });
+        let document: pons_ir::Document = serde_json::from_value(raw).unwrap();
+        crate::emit(&document)
+            .unwrap()
+            .into_iter()
+            .find(|file| file.path == "client.ts")
+            .unwrap()
+            .content
+    }
+
+    #[test]
+    fn every_operation_sends_the_verb_the_document_names_and_not_the_variant() {
+        let methods = ["GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"];
+        let operations = methods
+            .iter()
+            .map(|method| {
+                let name = method.to_lowercase();
+                json!({
+                    "id": [["verbs"], [name]],
+                    "method": method,
+                    "path": [{"lit": name}],
+                    "auth": {"alternatives": [], "optional": false},
+                    "semantics": {"safe": false, "idempotent": false},
+                    "responses": [{"status": 200, "content": "empty"}],
+                })
+            })
+            .collect::<Vec<_>>();
+        let client = client_of(Value::Array(operations));
+        let sent = client
+            .lines()
+            .filter_map(|line| {
+                let after = line.split_once("configured, ")?.1;
+                let verb = after.split(',').next().unwrap().trim();
+                let path = line
+                    .split("encodePathSegment(\"")
+                    .nth(1)?
+                    .split('"')
+                    .next()
+                    .unwrap();
+                Some((path.to_owned(), verb.to_owned()))
+            })
+            .collect::<BTreeMap<_, _>>();
+        assert_eq!(sent.len(), methods.len(), "{client}");
+        for method in methods {
+            let name = method.to_lowercase();
+            assert_eq!(sent[&name], format!("\"{method}\""), "{client}");
+        }
     }
 }

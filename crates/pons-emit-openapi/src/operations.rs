@@ -1,8 +1,8 @@
 use std::collections::BTreeMap;
 
 use pons_ir::{
-    ContentKind, ErrorContent, ErrorStatus, Method, Operation, PathSegment, Presence,
-    ResponseHeader, ResponseStatus, TypeRef, is_valid_media_type,
+    ContentKind, ErrorContent, ErrorStatus, Operation, PathSegment, Presence, ResponseHeader,
+    ResponseStatus, TypeRef, is_valid_media_type,
 };
 use serde_json::{Map, Value, json};
 
@@ -16,7 +16,8 @@ impl Builder<'_> {
         let mut routes = BTreeMap::<String, String>::new();
         for operation in &self.document.operations {
             let path = openapi_path(operation)?;
-            let method = method_name(operation.method);
+
+            let method = operation.method.as_str().to_ascii_lowercase();
             let id = operation_id(operation);
             if !operation_ids.insert(id.clone()) {
                 return Err(EmitError(format!("duplicate OpenAPI operationId {id}")));
@@ -32,12 +33,12 @@ impl Builder<'_> {
                 routes.insert(route, path.clone());
             }
             let item = paths.entry(path.clone()).or_default();
-            if item.contains_key(method) {
+            if item.contains_key(method.as_str()) {
                 return Err(EmitError(format!(
                     "multiple operations use {method} {path}"
                 )));
             }
-            item.insert(method.into(), self.operation(operation)?);
+            item.insert(method, self.operation(operation)?);
         }
         Ok(Value::Object(
             paths
@@ -392,18 +393,6 @@ fn valid_path_parameter_name(name: &str) -> bool {
         && name
             .bytes()
             .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'.' | b'_' | b'~'))
-}
-
-fn method_name(method: Method) -> &'static str {
-    match method {
-        Method::Get => "get",
-        Method::Post => "post",
-        Method::Put => "put",
-        Method::Patch => "patch",
-        Method::Delete => "delete",
-        Method::Head => "head",
-        Method::Options => "options",
-    }
 }
 
 fn add_parameter_doc(parameter: &mut Value, doc: Option<&pons_ir::Doc>) {

@@ -1,5 +1,5 @@
 use std::collections::BTreeMap;
-use std::ffi::OsStr;
+use std::ffi::{OsStr, OsString};
 use std::io::{Read, Write};
 #[cfg(unix)]
 use std::os::unix::process::CommandExt;
@@ -61,7 +61,8 @@ pub fn invoke(
     })?;
     let ir = &canonical;
 
-    let manifest_output = run_command(executable, &["describe"], None)?;
+    let resolved = resolve_executable(executable)?;
+    let manifest_output = run_command(&resolved.program, &resolved.command("describe"), None)?;
     ensure_success(
         executable,
         "describe",
@@ -112,7 +113,7 @@ pub fn invoke(
     };
     let input = serde_json::to_vec(&request)
         .map_err(|error| PluginError(format!("cannot encode emitter request: {error}")))?;
-    let output = run_command(executable, &["emit"], Some(input))?;
+    let output = run_command(&resolved.program, &resolved.command("emit"), Some(input))?;
     ensure_success(executable, "emit", &output.status, &output.stderr)?;
     let mut logs = manifest_output.stderr;
     logs.extend(&output.stderr);
@@ -137,7 +138,7 @@ pub fn invoke(
 
 fn run_command(
     executable: &OsStr,
-    args: &[&str],
+    args: &[impl AsRef<OsStr>],
     input: Option<Vec<u8>>,
 ) -> Result<Output, PluginError> {
     run_command_with_limits(
@@ -151,7 +152,7 @@ fn run_command(
 
 fn run_command_with_limits(
     executable: &OsStr,
-    args: &[&str],
+    args: &[impl AsRef<OsStr>],
     input: Option<Vec<u8>>,
     timeout: Duration,
     output_limit: usize,
@@ -209,7 +210,10 @@ fn run_command_with_limits(
     });
 
     let deadline = Instant::now() + timeout;
-    let command_name = args.first().copied().unwrap_or("plugin");
+    let command_name = args
+        .first()
+        .map(|argument| argument.as_ref().to_string_lossy().into_owned())
+        .unwrap_or_else(|| "plugin".to_owned());
     let reaped = loop {
         if let Some(error) = output_error.lock().ok().and_then(|error| error.clone()) {
             terminate_before_reap(&mut child);
@@ -220,7 +224,7 @@ fn run_command_with_limits(
             Ok(Leader::ExitedReaped) => break true,
             Ok(Leader::Running) if Instant::now() >= deadline => {
                 terminate_before_reap(&mut child);
-                return Err(timeout_error(executable, command_name));
+                return Err(timeout_error(executable, &command_name));
             }
             Ok(Leader::Running) => thread::sleep(PLUGIN_POLL_INTERVAL),
             Err(error) => {
@@ -245,7 +249,7 @@ fn run_command_with_limits(
     (|| {
         if let Some(writer) = writer
             && let Err(error) =
-                join_before(writer, deadline, executable, command_name, "stdin writer")?
+                join_before(writer, deadline, executable, &command_name, "stdin writer")?
             && error.kind() != std::io::ErrorKind::BrokenPipe
         {
             return Err(PluginError(format!(
@@ -256,14 +260,14 @@ fn run_command_with_limits(
             stdout_reader,
             deadline,
             executable,
-            command_name,
+            &command_name,
             "stdout reader",
         )??;
         let stderr = join_before(
             stderr_reader,
             deadline,
             executable,
-            command_name,
+            &command_name,
             "stderr reader",
         )??;
         Ok(Output {
@@ -316,9 +320,21 @@ fn timeout_error(executable: &OsStr, command: &str) -> PluginError {
 }
 
 fn terminate_before_reap(child: &mut std::process::Child) {
-    signal_process_group(child);
+    terminate_process_tree(child);
     let _ = child.kill();
     let _ = child.wait();
+}
+
+fn terminate_process_tree(child: &std::process::Child) {
+    signal_process_group(child);
+    #[cfg(windows)]
+    #[cfg(windows)]
+    let _ = std::process::Command::new("taskkill")
+        .args(["/PID", &child.id().to_string(), "/T", "/F"])
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status();
 }
 
 #[cfg_attr(not(unix), allow(dead_code))]
@@ -380,6 +396,90 @@ fn waitid_unsupported(error: &std::io::Error) -> bool {
         error.raw_os_error(),
         Some(libc::EINVAL) | Some(libc::ENOSYS)
     )
+}
+
+#[cfg_attr(not(unix), allow(unused_variables))]
+#[derive(Debug)]
+struct Executable {
+    program: OsString,
+    prefix: Vec<OsString>,
+}
+
+impl Executable {
+    fn command(&self, name: &str) -> Vec<OsString> {
+        let mut arguments = self.prefix.clone();
+        arguments.push(name.into());
+        arguments
+    }
+}
+
+const EXECUTABLE_SUFFIXES: &[&str] = if cfg!(windows) {
+    &["", ".exe", ".cmd", ".bat"]
+} else {
+    &[""]
+};
+
+fn resolve_executable(executable: &OsStr) -> Result<Executable, PluginError> {
+    let name = executable.to_string_lossy();
+    let found = if name.contains(std::path::MAIN_SEPARATOR) {
+        None
+    } else {
+        std::env::var_os("PATH")
+            .and_then(|search| find_in_path(&name, EXECUTABLE_SUFFIXES, &search).ok())
+    };
+    match found {
+        Some((path, suffix)) => start_resolved(path, suffix),
+        None => Ok(Executable {
+            program: executable.to_owned(),
+            prefix: Vec::new(),
+        }),
+    }
+}
+
+fn start_resolved(
+    path: std::path::PathBuf,
+    suffix: &'static str,
+) -> Result<Executable, PluginError> {
+    if suffix.is_empty() {
+        return Ok(Executable {
+            program: path.into_os_string(),
+            prefix: Vec::new(),
+        });
+    }
+    if !cfg!(windows) {
+        return Err(PluginError(format!(
+            "cannot run {}: a {suffix} emitter needs a windows host",
+            path.display()
+        )));
+    }
+    Ok(Executable {
+        program: OsString::from("cmd"),
+        prefix: vec![OsString::from("/c"), path.into_os_string()],
+    })
+}
+
+fn find_in_path(
+    name: &str,
+    suffixes: &[&'static str],
+    search: &OsStr,
+) -> std::io::Result<(std::path::PathBuf, &'static str)> {
+    for directory in std::env::split_paths(search) {
+        let trimmed = directory.to_string_lossy();
+        let trimmed = trimmed
+            .strip_prefix('"')
+            .and_then(|trimmed| trimmed.strip_suffix('"'))
+            .unwrap_or(&trimmed);
+        for suffix in suffixes {
+            let candidate = std::path::Path::new(trimmed).join(format!("{name}{suffix}"));
+            if candidate.is_file() {
+                return Ok((candidate, suffix));
+            }
+        }
+    }
+    Err(std::io::Error::new(
+        std::io::ErrorKind::NotFound,
+        format!("{name} is not on the search path"),
+    ))
 }
 
 #[cfg_attr(not(unix), allow(unused_variables))]
@@ -468,6 +568,83 @@ mod tests {
     use super::*;
     #[cfg(target_os = "linux")]
     use std::path::Path;
+
+    #[test]
+    fn an_emitter_is_resolved_by_the_names_a_host_can_start() {
+        let directory = tempfile::tempdir().unwrap();
+        let suffixes = ["", ".exe", ".cmd", ".bat"];
+        for suffix in suffixes {
+            std::fs::write(
+                directory.path().join(format!("pons-emit-py{suffix}")),
+                b"#!/bin/sh\n",
+            )
+            .unwrap();
+        }
+        let search = std::env::join_paths([directory.path()]).unwrap();
+        let (path, suffix) = find_in_path("pons-emit-py", &suffixes, &search).unwrap();
+        assert_eq!(path, directory.path().join("pons-emit-py"));
+        assert_eq!(suffix, "");
+
+        let (path, suffix) = find_in_path("pons-emit-py", &suffixes[1..], &search).unwrap();
+        assert_eq!(path, directory.path().join("pons-emit-py.exe"));
+        assert_eq!(suffix, ".exe");
+
+        let (path, suffix) = find_in_path("pons-emit-py", &suffixes[2..], &search).unwrap();
+        assert_eq!(path, directory.path().join("pons-emit-py.cmd"));
+        assert_eq!(suffix, ".cmd");
+
+        let (path, suffix) = find_in_path("pons-emit-py", &suffixes[3..], &search).unwrap();
+        assert_eq!(path, directory.path().join("pons-emit-py.bat"));
+        assert_eq!(suffix, ".bat");
+
+        assert!(
+            find_in_path("pons-emit-absent", &suffixes, &search)
+                .unwrap_err()
+                .to_string()
+                .contains("pons-emit-absent")
+        );
+    }
+
+    #[test]
+    fn a_quoted_search_entry_is_still_searched() {
+        let directory = tempfile::tempdir().unwrap();
+        std::fs::write(directory.path().join("pons-emit-py"), b"#!/bin/sh\n").unwrap();
+        let search = std::env::join_paths([std::path::PathBuf::from(format!(
+            "\"{}\"",
+            directory.path().display()
+        ))])
+        .unwrap();
+        let (path, _) = find_in_path("pons-emit-py", &[""], &search).unwrap();
+        assert_eq!(path, directory.path().join("pons-emit-py"));
+    }
+
+    #[test]
+    fn a_windows_script_is_only_started_on_a_windows_host() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("pons-emit-py.cmd");
+        std::fs::write(&path, b"@echo off\n").unwrap();
+        if cfg!(windows) {
+            let resolved = start_resolved(path.clone(), ".cmd").unwrap();
+            assert_eq!(resolved.program, OsString::from("cmd"));
+            assert_eq!(resolved.command("emit")[0], OsString::from("/c"));
+            assert_eq!(resolved.command("emit")[1], path.into_os_string());
+            assert_eq!(resolved.command("emit")[2], OsString::from("emit"));
+        } else {
+            let error = start_resolved(path, ".cmd").unwrap_err();
+            assert!(error.0.contains("needs a windows host"), "{}", error.0);
+        }
+    }
+
+    #[test]
+    fn a_name_given_as_a_path_is_run_where_it_sits() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("pons-emit-py");
+        std::fs::write(&path, b"#!/bin/sh\n").unwrap();
+        let resolved = resolve_executable(OsStr::new(&path)).unwrap();
+        assert_eq!(resolved.program, path);
+        assert!(resolved.prefix.is_empty());
+        assert_eq!(resolved.command("emit"), vec![OsString::from("emit")]);
+    }
 
     #[test]
     fn rejects_invalid_ir_before_starting_plugin() {
@@ -618,9 +795,7 @@ mod tests {
         use std::process;
 
         let path = std::env::temp_dir().join(format!("pons-plugin-{name}-{}", process::id()));
-        
-        
-        
+
         let mut writer = Command::new("sh")
             .args(["-c", "cat > \"$1\" && chmod 755 \"$1\"", "sh"])
             .arg(&path)
@@ -649,8 +824,7 @@ mod tests {
         let pid_file = directory.join("pid");
         let marker = directory.join("marker");
         let _ = std::fs::remove_file(&marker);
-        
-        
+
         let ready = directory.join("ready");
         let _ = std::fs::remove_file(&ready);
 

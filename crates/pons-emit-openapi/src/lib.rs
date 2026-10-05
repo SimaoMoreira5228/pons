@@ -4,8 +4,9 @@ mod security;
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use pons_ir::Document;
-use pons_plugin::{Coverage, operation_subject};
+use pons_ir::{
+    Coverage, Document, coverage_for_document, operation_subject, strict_violation_message,
+};
 use serde_json::{Map, Value, json};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -129,8 +130,8 @@ pub fn emit_with_mode(document: &Document, mode: EmitMode) -> Result<EmitOutput,
     let mut content = serde_json::to_string_pretty(&Value::Object(output))
         .map_err(|error| EmitError(format!("cannot serialize OpenAPI document: {error}")))?;
     content.push('\n');
-    let mut coverage = pons_plugin::coverage_for_document(&document, mode == EmitMode::Lossy)
-        .map_err(EmitError)?;
+    let mut coverage =
+        coverage_for_document(&document, mode == EmitMode::Lossy).map_err(EmitError)?;
     for operation in &document.operations {
         if operation.stream.is_some() || operation.provides.is_some() {
             let subject = format!("operations.{}", operation_subject(operation));
@@ -147,7 +148,7 @@ pub fn emit_with_mode(document: &Document, mode: EmitMode) -> Result<EmitOutput,
 
 fn coverage_warnings(mode: EmitMode, coverage: &Coverage) -> Result<Vec<String>, EmitError> {
     if mode == EmitMode::Strict {
-        if let Some(violations) = pons_plugin::strict_violation_message(coverage) {
+        if let Some(violations) = strict_violation_message(coverage) {
             return Err(EmitError(format!("OpenAPI emitter reported {violations}")));
         }
         return Ok(Vec::new());
@@ -276,11 +277,10 @@ fn readable_name(words: &[String]) -> String {
 #[cfg(test)]
 mod tests {
     use pons_ir::{
-        AuthScheme, ByteEncoding, ContentKind, Direction, ErrorStatus, InlineType, NamedRef,
-        OAuthFlow, OAuthFlowKind, ObjectOpenness, OpaqueWire, PathSegment, Presence,
+        AuthScheme, ByteEncoding, ContentKind, Coverage, Direction, ErrorStatus, InlineType,
+        NamedRef, OAuthFlow, OAuthFlowKind, ObjectOpenness, OpaqueWire, PathSegment, Presence,
         ResponseHeader, ResponseStatus, StreamKind, TypeDef, TypeKind, TypeRef,
     };
-    use pons_plugin::Coverage;
     use serde_json::{Value, json};
     use std::collections::BTreeMap;
 

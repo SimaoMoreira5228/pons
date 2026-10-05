@@ -211,6 +211,31 @@ fn write_files(output: &Path, files: Vec<OutputFile>) -> Result<(), CliError> {
     Ok(())
 }
 
+pub(crate) fn replace_file(
+    temporary: tempfile::NamedTempFile,
+    destination: &Path,
+) -> Result<(), CliError> {
+    let mut pending = temporary;
+    for attempt in 0..5 {
+        match pending.persist(destination) {
+            Ok(_) => return Ok(()),
+            Err(error) => {
+                if attempt == 4 || error.error.kind() != std::io::ErrorKind::PermissionDenied {
+                    return Err(CliError::Failure(format!(
+                        "cannot replace {}: {}",
+                        destination.display(),
+                        error.error
+                    )));
+                }
+
+                std::thread::sleep(std::time::Duration::from_millis(50 * (attempt + 1)));
+                pending = error.file;
+            }
+        }
+    }
+    Ok(())
+}
+
 fn write_file(root: &Path, file: &OutputFile) -> Result<(), CliError> {
     let relative = Path::new(&file.path);
     let mut parent = root.to_path_buf();
@@ -270,13 +295,7 @@ fn write_file(root: &Path, file: &OutputFile) -> Result<(), CliError> {
         } else {
             set_default_permissions(temporary.as_file())?;
         }
-        temporary.persist(&parent).map_err(|error| {
-            CliError::Failure(format!(
-                "cannot replace {}: {}",
-                parent.display(),
-                error.error
-            ))
-        })?;
+        replace_file(temporary, &parent)?;
     }
     Ok(())
 }
@@ -297,34 +316,37 @@ fn probe_default_mode() -> Result<u32, CliError> {
 
     static ATTEMPT: AtomicU32 = AtomicU32::new(0);
 
-    let probe = std::env::temp_dir().join(format!(
-        ".pons-mode-{}-{}",
-        std::process::id(),
-        ATTEMPT.fetch_add(1, Ordering::Relaxed)
-    ));
-    let created = fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(&probe)
-        .map_err(|error| {
-            CliError::Failure(format!(
-                "cannot probe the default file mode at {}: {error}",
-                probe.display()
-            ))
+    for _ in 0..16 {
+        let probe = std::env::temp_dir().join(format!(
+            ".pons-mode-{}-{}",
+            std::process::id(),
+            ATTEMPT.fetch_add(1, Ordering::Relaxed)
+        ));
+        let created = match fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&probe)
+        {
+            Ok(created) => created,
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(error) => {
+                return Err(CliError::Failure(format!(
+                    "cannot probe the default file mode at {}: {error}",
+                    probe.display()
+                )));
+            }
+        };
+        let mode = created.metadata().map_err(|error| {
+            CliError::Failure(format!("cannot inspect {}: {error}", probe.display()))
         })?;
-    let mode = created
-        .metadata()
-        .map_err(|error| CliError::Failure(format!("cannot inspect {}: {error}", probe.display())))?
-        .permissions()
-        .mode();
-    drop(created);
-    fs::remove_file(&probe).map_err(|error| {
-        CliError::Failure(format!(
-            "cannot remove the mode probe {}: {error}",
-            probe.display()
-        ))
-    })?;
-    Ok(mode)
+        let mode = mode.permissions().mode();
+        drop(created);
+        let _ = fs::remove_file(&probe);
+        return Ok(mode);
+    }
+    Err(CliError::Failure(
+        "cannot probe the default file mode: a stale probe keeps every name".to_owned(),
+    ))
 }
 
 #[cfg(not(unix))]
@@ -723,5 +745,33 @@ mod tests {
         .unwrap();
 
         assert_eq!(fs::read_to_string(&probe).unwrap(), "not a probe");
+    }
+
+    #[test]
+    fn a_stale_mode_probe_does_not_stop_an_emit() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().join("output");
+        fs::create_dir(&root).unwrap();
+        for attempt in 0..8 {
+            let probe =
+                std::env::temp_dir().join(format!(".pons-mode-{}-{attempt}", std::process::id()));
+            fs::write(&probe, "left by a process that died").unwrap();
+        }
+
+        write_files(
+            &root,
+            vec![OutputFile {
+                path: "client.ts".into(),
+                content: "new".into(),
+            }],
+        )
+        .unwrap();
+
+        assert_eq!(fs::read_to_string(root.join("client.ts")).unwrap(), "new");
+        for attempt in 0..8 {
+            let probe =
+                std::env::temp_dir().join(format!(".pons-mode-{}-{attempt}", std::process::id()));
+            let _ = fs::remove_file(probe);
+        }
     }
 }

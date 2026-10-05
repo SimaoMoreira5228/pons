@@ -53,7 +53,7 @@ fn integer_bounds(bits: u16, signed: bool) -> Option<(Value, Value)> {
         if bits == 64 {
             return Some((json!(i64::MIN), json!(i64::MAX)));
         }
-        if bits < 64 {
+        if (1..64).contains(&bits) {
             let edge = 1_i64 << (bits - 1);
             return Some((json!(-edge), json!(edge - 1)));
         }
@@ -61,7 +61,7 @@ fn integer_bounds(bits: u16, signed: bool) -> Option<(Value, Value)> {
         return Some((json!(0), json!(u128::MAX)));
     } else if bits == 64 {
         return Some((json!(0), json!(u64::MAX)));
-    } else if bits < 64 {
+    } else if (1..64).contains(&bits) {
         return Some((json!(0), json!((1_u64 << bits) - 1)));
     }
     None
@@ -1471,6 +1471,31 @@ mod tests {
             properties["signed"]["maximum"].to_string(),
             "170141183460469231731687303715884105727"
         );
+    }
+
+    #[test]
+    fn a_width_no_client_can_send_is_no_range_rather_than_a_shift_by_the_whole_word() {
+        for signed in [true, false] {
+            assert_eq!(
+                super::integer_bounds(0, signed),
+                None,
+                "a width of zero is refused by the IR, and the emitter must survive a caller \
+                 that skipped that check"
+            );
+        }
+        for (bits, signed, minimum, maximum) in [
+            (8, true, json!(-128), json!(127)),
+            (8, false, json!(0), json!(255)),
+            (16, true, json!(-32768), json!(32767)),
+            (16, false, json!(0), json!(65535)),
+            (32, true, json!(-2147483648), json!(2147483647)),
+            (32, false, json!(0), json!(4294967295_u32)),
+        ] {
+            assert_eq!(
+                super::integer_bounds(bits, signed),
+                Some((minimum, maximum))
+            );
+        }
     }
 
     #[test]

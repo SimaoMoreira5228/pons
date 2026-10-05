@@ -259,14 +259,7 @@ fn rewrite_canonical(path: &Path, document: &Document) -> Result<(), CliError> {
         .as_file()
         .set_permissions(metadata.permissions())
         .map_err(|error| CliError::Failure(format!("cannot preserve file permissions: {error}")))?;
-    temporary.persist(path).map_err(|error| {
-        CliError::Failure(format!(
-            "cannot replace {}: {}",
-            path.display(),
-            error.error
-        ))
-    })?;
-    Ok(())
+    crate::emit::replace_file(temporary, path)
 }
 
 #[derive(Debug)]

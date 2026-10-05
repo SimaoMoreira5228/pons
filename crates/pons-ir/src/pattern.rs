@@ -534,8 +534,8 @@ fn enter(
     at: usize,
     mut pc: usize,
     input: &[u16],
-    marks: &mut [u32],
-    generation: u32,
+    marks: &mut [u64],
+    generation: u64,
     live: &mut Vec<usize>,
 ) {
     loop {
@@ -567,13 +567,17 @@ fn boundary(input: &[u16], at: usize) -> bool {
     before != after
 }
 
+fn generation(at: usize) -> u64 {
+    2 * at as u64 + 1
+}
+
 fn run(steps: &[Step], input: &[u16]) -> bool {
     let finished = steps.len() - 1;
     let mut marks = vec![0; steps.len()];
     let mut live = Vec::with_capacity(steps.len());
     let mut ahead = Vec::with_capacity(steps.len());
     for at in 0..=input.len() {
-        let generation = 2 * at as u32 + 1;
+        let generation = generation(at);
 
         enter(steps, at, 0, input, &mut marks, generation, &mut live);
         if live.contains(&finished) {
@@ -624,4 +628,39 @@ pub(crate) fn matches(pattern: &str, value: &str) -> Result<bool, String> {
 
     let input = value.encode_utf16().collect::<Vec<_>>();
     Ok(run(&steps, &input))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::generation;
+
+    #[test]
+    fn a_generation_is_never_reused_so_a_mark_never_looks_visited_early() {
+        let mut positions = vec![0, 1, 2, u32::MAX as usize / 2, u32::MAX as usize];
+        positions.push(isize::MAX as usize / 2);
+        positions.push(usize::MAX / 2);
+        positions.sort_unstable();
+        assert_eq!(
+            generation(0),
+            1,
+            "0 is never a generation, so nothing looks visited"
+        );
+        for pair in positions.windows(2) {
+            let (before, after) = (pair[0], pair[1]);
+            assert!(
+                generation(before) < generation(after),
+                "position {after} reuses the generation of {before}, so a mark written for one \
+                 reads as written for the other"
+            );
+            assert!(
+                generation(before) + 1 < generation(after),
+                "the lookahead generation at {before} must differ from the one at {after}"
+            );
+        }
+        assert_eq!(
+            generation(usize::MAX / 2),
+            2 * (usize::MAX / 2) as u64 + 1,
+            "the widest input a host can hold must not overflow the counter"
+        );
+    }
 }
