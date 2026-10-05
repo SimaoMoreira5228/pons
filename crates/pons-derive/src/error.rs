@@ -55,6 +55,14 @@ pub(super) fn expand(input: &DeriveInput) -> TokenStream {
             Ok(value) => value,
             Err(error) => return error.into_compile_error(),
         };
+        let media_type = match error_media_type(&variant.original.attrs, variant_ident) {
+            Ok(value) => value,
+            Err(error) => return error.into_compile_error(),
+        };
+        let headers = match error_headers(&variant.original.attrs, variant_ident) {
+            Ok(value) => value,
+            Err(error) => return error.into_compile_error(),
+        };
         quote!({
             let mut body = reference.clone();
             if let ::pons_core::ir::TypeRef::Named(named) = &mut body {
@@ -64,9 +72,9 @@ pub(super) fn expand(input: &DeriveInput) -> TokenStream {
                 status: #status,
                 name: #error_name,
                 content: #content,
-                media_type: None,
+                media_type: #media_type,
                 body: #body_field,
-                headers: Vec::new(),
+                headers: #headers,
                 retryable: #retryable,
                 doc: #doc,
                 ext: Default::default(),
@@ -152,29 +160,156 @@ fn error_content(
     Ok((content, body))
 }
 
-fn attribute_value(attrs: &[syn::Attribute], key: &str) -> Option<TokenStream> {
-    for attribute in attrs
-        .iter()
-        .filter(|attribute| attribute.path().is_ident("pons"))
-    {
-        let syn::Meta::List(list) = &attribute.meta else {
+fn error_media_type(attrs: &[syn::Attribute], variant: &syn::Ident) -> syn::Result<TokenStream> {
+    let Some(value) = attribute_value(attrs, "media_type") else {
+        return Ok(quote!(None));
+    };
+    let literal: syn::LitStr = syn::parse2(value).map_err(|_| {
+        syn::Error::new_spanned(variant, "ApiError media_type must be a string literal")
+    })?;
+    Ok(quote!(Some(#literal.to_owned())))
+}
+
+fn error_headers(attrs: &[syn::Attribute], variant: &syn::Ident) -> syn::Result<TokenStream> {
+    let mut headers = Vec::new();
+    for meta in pons_metas(attrs) {
+        let presence = if meta.path().is_ident("header") {
+            quote!(::pons_core::ir::Presence::Required)
+        } else if meta.path().is_ident("optional_header") {
+            quote!(::pons_core::ir::Presence::Optional)
+        } else {
             continue;
         };
-        let parser = syn::punctuated::Punctuated::<syn::Meta, syn::Token![,]>::parse_terminated;
-        let parsed = syn::parse::Parser::parse2(parser, list.tokens.clone()).ok()?;
-        for meta in parsed {
-            if !meta.path().is_ident(key) {
-                continue;
+        let syn::Meta::NameValue(value) = &meta else {
+            return Err(header_refusal(variant));
+        };
+        let syn::Expr::Path(spec) = &value.value else {
+            return Err(header_refusal(variant));
+        };
+        headers.push(quote!(::pons_axum::error_header::<#spec>(cx, #presence)));
+    }
+    Ok(quote!(vec![#(#headers),*]))
+}
+
+fn header_refusal(variant: &syn::Ident) -> syn::Error {
+    syn::Error::new_spanned(
+        variant,
+        "ApiError headers name the type that implements HeaderSpec, as in #[pons(header = TraceId)]",
+    )
+}
+
+fn pons_metas(attrs: &[syn::Attribute]) -> Vec<syn::Meta> {
+    let parser = syn::punctuated::Punctuated::<syn::Meta, syn::Token![,]>::parse_terminated;
+    attrs
+        .iter()
+        .filter(|attribute| attribute.path().is_ident("pons"))
+        .filter_map(|attribute| match &attribute.meta {
+            syn::Meta::List(list) => syn::parse::Parser::parse2(parser, list.tokens.clone()).ok(),
+            _ => None,
+        })
+        .flatten()
+        .collect()
+}
+
+fn attribute_value(attrs: &[syn::Attribute], key: &str) -> Option<TokenStream> {
+    pons_metas(attrs).into_iter().find_map(|meta| {
+        if !meta.path().is_ident(key) {
+            return None;
+        }
+        match meta {
+            syn::Meta::NameValue(value) => {
+                let expression = value.value;
+                Some(quote!(#expression))
             }
-            return match meta {
-                syn::Meta::NameValue(value) => {
-                    let expression = value.value;
-                    Some(quote!(#expression))
-                }
-                syn::Meta::Path(_) if key == "retryable" => Some(quote!(true)),
-                _ => None,
-            };
+            syn::Meta::Path(_) if key == "retryable" => Some(quote!(true)),
+            _ => None,
+        }
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use syn::parse_quote;
+
+    fn variant(attrs: Vec<syn::Attribute>) -> syn::Ident {
+        let variant: syn::Variant = parse_quote! {
+            #(#attrs)*
+            Limited
+        };
+        variant.ident
+    }
+
+    fn expanded(tokens: TokenStream) -> String {
+        tokens.to_string().replace(' ', "")
+    }
+
+    #[test]
+    fn a_media_type_is_the_string_the_variant_names() {
+        let media_type = error_media_type(
+            &[parse_quote!(#[pons(status = 429, media_type = "application/problem+json")])],
+            &variant(Vec::new()),
+        )
+        .unwrap();
+        assert_eq!(
+            expanded(media_type),
+            expanded(quote!(Some("application/problem+json".to_owned())))
+        );
+        assert_eq!(
+            expanded(error_media_type(&[], &variant(Vec::new())).unwrap()),
+            expanded(quote!(None))
+        );
+    }
+
+    #[test]
+    fn a_media_type_that_is_no_string_literal_is_a_diagnostic() {
+        let error = error_media_type(
+            &[parse_quote!(#[pons(media_type = 42)])],
+            &variant(Vec::new()),
+        )
+        .unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "ApiError media_type must be a string literal"
+        );
+    }
+
+    #[test]
+    fn a_header_names_the_spec_and_the_presence_it_is_written_with() {
+        let headers = error_headers(
+            &[
+                parse_quote!(#[pons(header = TraceId)]),
+                parse_quote!(#[pons(optional_header = RetryAfter)]),
+            ],
+            &variant(Vec::new()),
+        )
+        .unwrap();
+        assert_eq!(
+            expanded(headers),
+            expanded(quote! {
+                vec![
+                    ::pons_axum::error_header::<TraceId>(cx, ::pons_core::ir::Presence::Required),
+                    ::pons_axum::error_header::<RetryAfter>(cx, ::pons_core::ir::Presence::Optional)
+                ]
+            })
+        );
+        assert_eq!(
+            expanded(error_headers(&[], &variant(Vec::new())).unwrap()),
+            expanded(quote!(vec![]))
+        );
+    }
+
+    #[test]
+    fn a_header_that_names_no_type_is_a_diagnostic() {
+        for attribute in [
+            parse_quote!(#[pons(header = "Retry-After")]),
+            parse_quote!(#[pons(header)]),
+        ] {
+            let error = error_headers(&[attribute], &variant(Vec::new())).unwrap_err();
+            assert_eq!(
+                error.to_string(),
+                "ApiError headers name the type that implements HeaderSpec, as in #[pons(header = TraceId)]"
+            );
         }
     }
-    None
 }

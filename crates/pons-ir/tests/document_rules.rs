@@ -1,6 +1,6 @@
 use pons_ir::{
-    Direction, Document, ErrorStatus, NamedRef, PathSegment, TypeKind, TypeRef, Violation,
-    validate_value,
+    Diagnostic, Direction, Document, ErrorStatus, InlineType, NamedRef, PathSegment, TypeKind,
+    TypeRef, Violation, validate_value,
 };
 use serde_json::{Value, json};
 use std::collections::BTreeMap;
@@ -1934,4 +1934,267 @@ fn a_bound_spelled_with_an_exponent_bounds_the_values_it_denotes() {
     }
     assert!(counted_value("multiple_of", "1e2", "300").is_ok());
     assert!(counted_value("multiple_of", "1e2", "301").is_err());
+}
+
+#[test]
+fn extension_keys_carry_a_reverse_dns_namespace_and_a_version() {
+    let with_key = |key: &str| {
+        let mut document = fixture();
+        document
+            .ext
+            .insert(key.to_owned(), serde_json::json!({"kept": true}));
+        document
+    };
+
+    for key in [
+        "com.example.cursor/v1",
+        "test.example.source/v1",
+        "a.b-c.d-e/v0",
+        "x.y1.z1/v12",
+    ] {
+        with_key(key).validate().unwrap_or_else(|errors| {
+            panic!("{key} should be accepted: {errors:?}");
+        });
+    }
+
+    for (key, message) in [
+        ("source.note", "is not shaped reverse-dns.namespace/vN"),
+        ("com.example/v1", "is not shaped reverse-dns.namespace/vN"),
+        (
+            "com.example.cursor",
+            "is not shaped reverse-dns.namespace/vN",
+        ),
+        (
+            "com.example.cursor/extra/v1",
+            "is not shaped reverse-dns.namespace/vN",
+        ),
+        (
+            "com.example.cursor/v",
+            "is not shaped reverse-dns.namespace/vN",
+        ),
+        (
+            "com.example.cursor/v01",
+            "is not shaped reverse-dns.namespace/vN",
+        ),
+        (
+            "com.example.cursor/1",
+            "is not shaped reverse-dns.namespace/vN",
+        ),
+        ("com.example./v1", "is not shaped reverse-dns.namespace/vN"),
+        ("comexample/v1", "is not shaped reverse-dns.namespace/vN"),
+        (
+            "Com.Example/cursor/v1",
+            "is not shaped reverse-dns.namespace/vN",
+        ),
+        (
+            "com.example.Cursor/v1",
+            "is not shaped reverse-dns.namespace/vN",
+        ),
+        (
+            "com.example.a_b/v1",
+            "is not shaped reverse-dns.namespace/vN",
+        ),
+        (
+            "x-pons.internal/cursor/v1",
+            "starts with \"x-pons\", which this project reserves for itself",
+        ),
+        (
+            "x-pons",
+            "starts with \"x-pons\", which this project reserves for itself",
+        ),
+    ] {
+        refuses(&with_key(key), message);
+    }
+}
+
+#[test]
+fn every_object_carrying_an_extension_names_its_owner() {
+    let mut document = fixture();
+    let bad = |key: &str| BTreeMap::from([(key.to_owned(), serde_json::json!(1))]);
+    document.ext = bad("note");
+    document.info.ext = bad("note");
+    document.types.get_mut("User").unwrap().ext = bad("note");
+    document.auth_schemes.insert(
+        "custom".into(),
+        pons_ir::AuthScheme::Custom {
+            description: "d".into(),
+            ext: bad("note"),
+        },
+    );
+    document.operations[0].ext = bad("note");
+    document.operations[0].auth.ext = bad("note");
+    document.operations[0].body.as_mut().unwrap().ext = bad("note");
+    document.operations[0].provides.as_mut().unwrap().ext = bad("note");
+    document.operations[0].errors[0].ext = bad("note");
+    document.operations[0].responses[0].ext = bad("note");
+    document.operations[1].headers[0].ext = bad("note");
+    document
+        .common_errors
+        .push(document.operations[0].errors[0].clone());
+    document.diagnostics.push(Diagnostic {
+        severity: pons_ir::DiagnosticSeverity::Info,
+        code: "C".into(),
+        message: "m".into(),
+        origin: None,
+        ext: bad("note"),
+    });
+
+    let found = rejections(&document);
+    for owner in [
+        "document:",
+        "info:",
+        "type User:",
+        "auth scheme custom:",
+        "operations[0]:",
+        "operations[0].auth:",
+        "operations[0].body:",
+        "operations[0].provides:",
+        "operations[0].errors[0]:",
+        "operations[0].responses[0]:",
+        "operations[1].headers[0]:",
+        "common_errors[0]:",
+        "document diagnostics[0]:",
+    ] {
+        assert!(
+            found
+                .iter()
+                .any(|error| error.starts_with(&format!("{owner} extension key \"note\""))),
+            "{owner} did not report the key: {found:?}"
+        );
+    }
+}
+
+#[test]
+fn an_opaque_value_carries_its_own_extensions() {
+    let mut document = fixture();
+    let TypeKind::Struct { fields, .. } = &mut document.types.get_mut("User").unwrap().definition
+    else {
+        panic!()
+    };
+    fields[0].ty = TypeRef::Inline(InlineType::Opaque {
+        codec: "example".into(),
+        wire: pons_ir::OpaqueWire::Json,
+        ext: BTreeMap::from([("com.example.codec/v1".into(), serde_json::json!(true))]),
+    });
+    document.validate().unwrap();
+
+    let raw = serde_json::to_value(&document).unwrap();
+    assert_eq!(
+        raw["types"]["User"]["fields"][0]["ty"]["ext"]["com.example.codec/v1"],
+        serde_json::json!(true)
+    );
+    assert!(
+        raw["types"]["User"]["fields"][0]["ty"]["ext"]
+            .as_object()
+            .is_some_and(|ext| !ext.is_empty())
+    );
+
+    let TypeKind::Struct { fields, .. } = &mut document.types.get_mut("User").unwrap().definition
+    else {
+        panic!()
+    };
+    let TypeRef::Inline(InlineType::Opaque { ext, .. }) = &mut fields[0].ty else {
+        panic!()
+    };
+    ext.insert("note".into(), serde_json::json!(true));
+    refuses(
+        &document,
+        "extension key \"note\" is not shaped reverse-dns.namespace/vN",
+    );
+}
+
+#[test]
+fn an_opaque_value_must_name_a_codec() {
+    let mut document = fixture();
+    let TypeKind::Struct { fields, .. } = &mut document.types.get_mut("User").unwrap().definition
+    else {
+        panic!()
+    };
+    fields[0].ty = TypeRef::Inline(InlineType::Opaque {
+        codec: "   ".into(),
+        wire: pons_ir::OpaqueWire::Json,
+        ext: BTreeMap::new(),
+    });
+    refuses(&document, "opaque codec cannot be empty");
+}
+
+#[test]
+fn semantics_refuse_a_pagination_the_ir_does_not_model() {
+    let mut raw: Value = serde_json::from_str(fixture_json()).unwrap();
+    raw["operations"][1]["semantics"]["pagination"] = json!({
+        "request": {"from": "query", "name": "cursor"},
+        "items": "/items",
+        "next": "/next_cursor"
+    });
+    let error = pons_ir::decode(&serde_json::to_vec(&raw).unwrap()).unwrap_err();
+    assert_eq!(
+        error.to_string(),
+        "operations[1].semantics.pagination: unknown field `pagination`, expected `safe` or `idempotent`"
+    );
+}
+
+#[test]
+fn decoding_refuses_a_version_it_does_not_read_before_reading_anything_else() {
+    let mut raw: Value = serde_json::from_str(fixture_json()).unwrap();
+    raw["ir_version"] = json!("0.3");
+    raw["operations"][0]["method"] = json!("BREW");
+    let error = pons_ir::decode(&serde_json::to_vec(&raw).unwrap()).unwrap_err();
+    assert_eq!(
+        error.to_string(),
+        "unsupported IR version 0.3, this build reads 0.2"
+    );
+
+    let mut raw: Value = serde_json::from_str(fixture_json()).unwrap();
+    raw.as_object_mut().unwrap().remove("ir_version");
+    let error = pons_ir::decode(&serde_json::to_vec(&raw).unwrap()).unwrap_err();
+    assert_eq!(
+        error.to_string(),
+        "ir_version: the document does not carry a string ir_version"
+    );
+
+    let error = pons_ir::decode(b"{\"ir_version\": ").unwrap_err();
+    assert!(error.to_string().starts_with("invalid JSON: "), "{error}");
+}
+
+#[test]
+fn decoding_names_the_member_it_stopped_on() {
+    let mut raw: Value = serde_json::from_str(fixture_json()).unwrap();
+    raw["operations"][0]["responses"][0]["status"] = json!("nope");
+    let error = pons_ir::decode(&serde_json::to_vec(&raw).unwrap()).unwrap_err();
+    assert_eq!(
+        error.to_string(),
+        "operations[0].responses[0].status: invalid HTTP status class nope"
+    );
+
+    let mut raw: Value = serde_json::from_str(fixture_json()).unwrap();
+    raw["operations"][0]["path"][0]["l1t"] = json!("x");
+    let error = pons_ir::decode(&serde_json::to_vec(&raw).unwrap()).unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .starts_with("operations[0].path[0]: data did not match any variant"),
+        "{error}"
+    );
+
+    let mut raw: Value = serde_json::from_str(fixture_json()).unwrap();
+    raw["operations"][1]["headers"][0]["presence"] = json!("maybe");
+    let error = pons_ir::decode(&serde_json::to_vec(&raw).unwrap()).unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .starts_with("operations[1].headers[0].presence: unknown variant `maybe`"),
+        "{error}"
+    );
+
+    let mut raw: Value = serde_json::from_str(fixture_json()).unwrap();
+    raw["types"]["LoginError"]["repr"]["tag"] = json!(5);
+    let error = pons_ir::decode(&serde_json::to_vec(&raw).unwrap()).unwrap_err();
+    assert_eq!(
+        error.to_string(),
+        "types.LoginError: invalid type: integer `5`, expected a string"
+    );
+}
+
+fn fixture_json() -> &'static str {
+    include_str!("../../../fixtures/login.json")
 }

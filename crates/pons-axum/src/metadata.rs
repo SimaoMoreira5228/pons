@@ -5,6 +5,13 @@ pub struct OperationMeta {
     pub(crate) doc: Doc,
     pub(crate) provides: Option<CredentialProvision>,
     pub(crate) expires_at: Option<CredentialLocator>,
+    pub(crate) semantics: Semantics,
+}
+
+#[derive(Default)]
+pub(crate) struct Semantics {
+    pub(crate) safe: Option<bool>,
+    pub(crate) idempotent: Option<bool>,
 }
 
 impl OperationMeta {
@@ -32,6 +39,7 @@ impl OperationMeta {
             },
             provides: None,
             expires_at: None,
+            semantics: Semantics::default(),
         }
     }
 
@@ -71,6 +79,16 @@ impl OperationMeta {
         } else {
             self.expires_at = Some(locator);
         }
+        self
+    }
+
+    pub fn safe(mut self, safe: bool) -> Self {
+        self.semantics.safe = Some(safe);
+        self
+    }
+
+    pub fn idempotent(mut self, idempotent: bool) -> Self {
+        self.semantics.idempotent = Some(idempotent);
         self
     }
 }

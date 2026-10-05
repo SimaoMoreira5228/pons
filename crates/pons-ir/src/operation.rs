@@ -739,8 +739,6 @@ fn find_line_separator(name: &str) -> Option<char> {
 pub struct OperationSemantics {
     pub safe: bool,
     pub idempotent: bool,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub pagination: Option<Value>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]

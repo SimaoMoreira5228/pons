@@ -6,7 +6,7 @@
     "servers": ["https://api.example.test"]
   },
   "ext": {
-    "source.note": {"kept": true}
+    "test.example.source/v1": {"kept": true}
   },
   "types": {
     "User": {
@@ -14,14 +14,14 @@
       "openness": "preserve_opaque",
       "name": ["user"],
       "direction": "output",
-      "ext": {"source.type": "kept"},
+      "ext": {"test.example.source/v1": "kept"},
       "fields": [
         {
           "wire": "id",
           "ident": ["id"],
           "ty": {"kind": "int", "bits": 64, "signed": false, "wire": "string"},
           "presence": "required",
-          "ext": {"source.field": 1}
+          "ext": {"test.example.source/v1": 1}
         },
         {
           "wire": "nickname",

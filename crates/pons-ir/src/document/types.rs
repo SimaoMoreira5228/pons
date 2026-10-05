@@ -544,11 +544,14 @@ impl Document {
                     });
                 }
             }
-            InlineType::Opaque { codec, .. } if codec.trim().is_empty() => {
-                errors.push(ValidationError::InvalidValue {
-                    path: owner.into(),
-                    message: "opaque codec cannot be empty".into(),
-                });
+            InlineType::Opaque { codec, ext, .. } => {
+                if codec.trim().is_empty() {
+                    errors.push(ValidationError::InvalidValue {
+                        path: owner.into(),
+                        message: "opaque codec cannot be empty".into(),
+                    });
+                }
+                crate::ext::check(owner, ext, errors);
             }
             InlineType::Map { key, .. }
                 if !matches!(key.as_ref(), TypeRef::Inline(InlineType::String { .. })) =>

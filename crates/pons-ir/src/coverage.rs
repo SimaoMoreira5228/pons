@@ -163,19 +163,15 @@ impl<'a> CoverageGraph<'a> {
         while let Some((index, value)) = self.pending.pop() {
             match value {
                 Value::Object(fields) => {
-                    let mut level = self.subject_level(fields);
+                    let level = self.subject_level(fields);
                     if let Some(referenced) = referenced_value(fields, self.types) {
                         self.add_edge(index, referenced);
                     }
                     for (key, child) in fields {
-                        match key.as_str() {
-                            "ext" | "default" => continue,
-                            "pagination" if !child.is_null() => {
-                                level = level.max(CoverageLevel::Opaque);
-                            }
-                            "pagination" => {}
-                            _ => self.add_edge(index, child),
+                        if matches!(key.as_str(), "ext" | "default") {
+                            continue;
                         }
+                        self.add_edge(index, child);
                     }
                     self.nodes[index].level = level;
                 }

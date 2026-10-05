@@ -75,6 +75,7 @@ fn a_document_of_raw_extractors_reports_diagnostics_it_does_not_validate() {
         TypeRef::Inline(InlineType::Opaque {
             codec: "axum.form".into(),
             wire: OpaqueWire::Unknown,
+            ext: Default::default(),
         })
     );
     assert!(form.diagnostics.iter().any(|diagnostic| {

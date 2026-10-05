@@ -46,6 +46,7 @@ fn opaque_document() -> pons_ir::Document {
     fields[0].ty = TypeRef::Inline(InlineType::Opaque {
         codec: "example.codec".into(),
         wire: OpaqueWire::Json,
+        ext: Default::default(),
     });
     let login = document.types.get_mut("LoginRequest").unwrap();
     let TypeKind::Struct { fields, .. } = &mut login.definition else {
@@ -54,6 +55,7 @@ fn opaque_document() -> pons_ir::Document {
     fields[0].ty = TypeRef::Inline(InlineType::Opaque {
         codec: "example.codec".into(),
         wire: OpaqueWire::Json,
+        ext: Default::default(),
     });
     document
 }
@@ -71,6 +73,7 @@ fn flattened_opaque_document() -> pons_ir::Document {
             flattened: vec![TypeRef::Inline(InlineType::Opaque {
                 codec: "flatten.codec".into(),
                 wire: OpaqueWire::Json,
+                ext: Default::default(),
             })],
             openness: pons_ir::ObjectOpenness::Reject,
         };
@@ -137,6 +140,7 @@ fn flattened_with_sibling_opaque_document() -> pons_ir::Document {
         fields[0].ty = TypeRef::Inline(InlineType::Opaque {
             codec: "sibling.codec".into(),
             wire: OpaqueWire::Json,
+            ext: Default::default(),
         });
     }
     document
@@ -576,6 +580,7 @@ fn runtime_codecs_accept_only_own_proto_codecs() {
         fields[0].ty = TypeRef::Inline(InlineType::Opaque {
             codec: "__proto__".into(),
             wire: OpaqueWire::Json,
+            ext: Default::default(),
         });
     }
     let files = emit_with_strategy(&document, EmitMode::Strict, ErrorStrategy::Throw)
@@ -901,6 +906,7 @@ fn captures_body_credentials_before_opaque_decoding() {
     fields[0].ty = TypeRef::Inline(InlineType::Opaque {
         codec: "auth.codec".into(),
         wire: OpaqueWire::Json,
+        ext: Default::default(),
     });
     document.operations[0].provides.as_mut().unwrap().value = CredentialLocator::Body {
         pointer: "/id".into(),
@@ -959,6 +965,7 @@ fn captures_body_credentials_when_opaque_decoding_fails() {
     fields[0].ty = TypeRef::Inline(InlineType::Opaque {
         codec: "missing.codec".into(),
         wire: OpaqueWire::Json,
+        ext: Default::default(),
     });
     document.operations[0].provides.as_mut().unwrap().value = CredentialLocator::Body {
         pointer: "/id".into(),

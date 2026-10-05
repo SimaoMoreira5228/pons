@@ -27,7 +27,9 @@ pub use describe::{
     DescribeRequest, DescribeResponse, Header, HeaderRejection, HeaderSpec, NoContent, OperationCx,
     OptionalHeader, StatusResponse, WithHeader, WithOptionalHeader, WithStatus,
 };
-pub use error::{Violation, ViolationReport, WithErrorHeader, WithOptionalErrorHeader};
+pub use error::{
+    Violation, ViolationReport, WithErrorHeader, WithOptionalErrorHeader, error_header,
+};
 pub use handler::DescribeHandler;
 pub use layer::DocumentedLayer;
 pub use metadata::OperationMeta;
@@ -741,7 +743,6 @@ mod tests {
             semantics: pons_ir::OperationSemantics {
                 safe: false,
                 idempotent: false,
-                pagination: None,
             },
             doc: None,
             origin: None,

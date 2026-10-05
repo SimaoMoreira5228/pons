@@ -941,6 +941,10 @@
             "codec": {
               "type": "string"
             },
+            "ext": {
+              "type": "object",
+              "additionalProperties": true
+            },
             "kind": {
               "type": "string",
               "const": "opaque"
@@ -1318,7 +1322,6 @@
         "idempotent": {
           "type": "boolean"
         },
-        "pagination": true,
         "safe": {
           "type": "boolean"
         }

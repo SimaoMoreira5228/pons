@@ -123,14 +123,6 @@ fn diff_operation(
     if route_shape(&old.path) != route_shape(&new.path) {
         add(diff, ChangeLevel::NonBreaking, path, "route URL changed");
     }
-    if old.semantics.pagination != new.semantics.pagination {
-        add(
-            diff,
-            ChangeLevel::Warning,
-            format!("{path}.semantics.pagination"),
-            "operation pagination changed",
-        );
-    }
     if old.path != new.path {
         let old_params: Vec<_> = old
             .path

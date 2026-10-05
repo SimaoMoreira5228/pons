@@ -41,6 +41,16 @@ impl From<Direction> for DirectionKey {
     }
 }
 
+impl From<DirectionKey> for Direction {
+    fn from(key: DirectionKey) -> Self {
+        match key {
+            DirectionKey::Input => Self::Input,
+            DirectionKey::Output => Self::Output,
+            DirectionKey::Both => Self::Both,
+        }
+    }
+}
+
 impl TypeCx {
     pub fn new() -> Self {
         Self::default()
@@ -59,7 +69,9 @@ impl TypeCx {
             Direction::Input => format!("{base}#input"),
             Direction::Output => format!("{base}#output"),
         };
-        self.define((base, direction.into()), id, name, direction, doc, build)
+
+        let origin = Some(base.clone());
+        self.define((base, direction.into()), id, origin, name, doc, build)
     }
 
     pub fn register_as(
@@ -76,11 +88,15 @@ impl TypeCx {
             return reference;
         };
         let direction = definition.direction;
+        let origin = match direction {
+            Direction::Both => Some(id.clone()),
+            _ => Some(definition.origin.clone().unwrap_or_else(|| id.clone())),
+        };
         self.define(
             (id.clone(), direction.into()),
             id,
+            origin,
             definition.name,
-            direction,
             definition.doc,
             move |_| definition.definition,
         )
@@ -90,11 +106,12 @@ impl TypeCx {
         &mut self,
         key: (String, DirectionKey),
         id: String,
+        origin: Option<String>,
         name: Name,
-        direction: Direction,
         doc: Option<Doc>,
         build: impl FnOnce(&mut Self) -> TypeKind,
     ) -> TypeRef {
+        let direction = key.1.into();
         if self.registered.insert(key) {
             let definition = build(self);
             self.definitions.insert(
@@ -103,7 +120,7 @@ impl TypeCx {
                     name,
                     direction,
                     definition,
-                    origin: None,
+                    origin,
                     doc,
                     diagnostics: Vec::new(),
                     ext: BTreeMap::new(),

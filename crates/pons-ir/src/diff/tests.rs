@@ -120,7 +120,9 @@ fn worst_reports_the_highest_level() {
     assert_eq!(old.diff(&old).worst(), None);
 
     let mut warned = old.clone();
-    warned.operations[0].semantics.pagination = Some(serde_json::json!({"cursor": true}));
+    warned.operations[0]
+        .ext
+        .insert("test.example.source/v1".into(), serde_json::json!(1));
     let diff = old.diff(&warned);
     assert_eq!(diff.worst(), Some(ChangeLevel::Warning));
     assert!(!diff.has_breaking_changes());
@@ -807,17 +809,17 @@ fn request_body_auth_and_provision_metadata_are_warnings() {
         .as_mut()
         .unwrap()
         .ext
-        .insert("source.body".into(), serde_json::json!(1));
+        .insert("test.example.source/v1".into(), serde_json::json!(1));
     annotated.operations[0]
         .auth
         .ext
-        .insert("source.auth".into(), serde_json::json!(1));
+        .insert("test.example.source/v1".into(), serde_json::json!(1));
     annotated.operations[0]
         .provides
         .as_mut()
         .unwrap()
         .ext
-        .insert("source.provision".into(), serde_json::json!(1));
+        .insert("test.example.source/v1".into(), serde_json::json!(1));
 
     let diff = old.diff(&annotated);
     assert_eq!(diff.worst(), Some(ChangeLevel::Warning));
@@ -1473,9 +1475,10 @@ fn document_info_changes_are_classified() {
     new.info.version = "2".into();
     new.info.description = Some("now with words".into());
     new.info.servers = vec!["https://api.example.test/v2".into()];
-    new.info
-        .ext
-        .insert("source.note".into(), serde_json::json!({"kept": false}));
+    new.info.ext.insert(
+        "test.example.source/v1".into(),
+        serde_json::json!({"kept": false}),
+    );
     new.ext.insert(
         "com.example.cursor/v1".into(),
         serde_json::json!({"page": 2}),
@@ -1519,18 +1522,18 @@ fn document_info_changes_are_classified() {
 fn opaque_type_metadata_is_reported_as_a_warning() {
     let old: Document = serde_json::from_value(fixture()).unwrap();
     let mut changed = fixture();
-    changed["types"]["User"]["ext"]["source.type"] = serde_json::json!("dropped");
+    changed["types"]["User"]["ext"]["test.example.source/v1"] = serde_json::json!("dropped");
     assert_eq!(level(&old, changed, "types.User"), ChangeLevel::Warning);
 
     let mut changed = fixture();
-    changed["types"]["User"]["fields"][0]["ext"]["source.field"] = serde_json::json!(2);
+    changed["types"]["User"]["fields"][0]["ext"]["test.example.source/v1"] = serde_json::json!(2);
     assert_eq!(
         level(&old, changed, "types.User.fields.id"),
         ChangeLevel::Warning
     );
 
     let mut changed = fixture();
-    changed["types"]["LoginError"]["variants"][1]["ext"]["source.variant"] =
+    changed["types"]["LoginError"]["variants"][1]["ext"]["test.example.source/v1"] =
         serde_json::json!(true);
     assert_eq!(
         level(&old, changed, "types.LoginError.variants.locked"),
@@ -1587,32 +1590,23 @@ fn both_direction_presence_changes_remain_breaking() {
 }
 
 #[test]
-fn operation_safety_and_pagination_are_classified() {
+fn operation_safety_is_classified() {
     let old: Document = serde_json::from_value(fixture()).unwrap();
     let mut safe = old.clone();
     safe.operations[0].semantics.safe = true;
     let change = change_at(&old, &safe, "operations.auth.login.semantics");
     assert_eq!(change.level, ChangeLevel::Breaking);
     assert_eq!(change.detail, "operation safety changed");
-
-    let mut paginated = old.clone();
-    paginated.operations[0].semantics.pagination = Some(serde_json::json!({"cursor": true}));
-    let change = change_at(
-        &old,
-        &paginated,
-        "operations.auth.login.semantics.pagination",
-    );
-    assert_eq!(change.level, ChangeLevel::Warning);
-    assert_eq!(change.detail, "operation pagination changed");
 }
 
 #[test]
 fn operation_metadata_changes_are_reported_as_a_warning() {
     let old: Document = serde_json::from_value(fixture()).unwrap();
     let mut new = old.clone();
-    new.operations[0]
-        .ext
-        .insert("source.operation".into(), serde_json::json!("dropped"));
+    new.operations[0].ext.insert(
+        "test.example.source/v1".into(),
+        serde_json::json!("dropped"),
+    );
     let change = change_at(&old, &new, "operations.auth.login.ext");
     assert_eq!(change.level, ChangeLevel::Warning);
     assert_eq!(change.detail, "operation metadata changed");
@@ -1669,7 +1663,7 @@ fn auth_scheme_documentation_changes_are_not_breaking() {
     let AuthScheme::Custom { ext, .. } = extended.auth_schemes.get_mut("custom").unwrap() else {
         unreachable!()
     };
-    *ext = BTreeMap::from([("source.scheme".into(), serde_json::json!(1))]);
+    *ext = BTreeMap::from([("test.example.source/v1".into(), serde_json::json!(1))]);
     let change = change_at(&described, &extended, "auth_schemes.custom");
     assert_eq!(change.level, ChangeLevel::Warning);
     assert_eq!(change.detail, "custom scheme metadata changed");
@@ -1784,7 +1778,7 @@ fn oauth_flow_changes_are_classified() {
     };
     flows[0]
         .ext
-        .insert("source.flow".into(), serde_json::json!(true));
+        .insert("test.example.source/v1".into(), serde_json::json!(true));
     let change = change_at(&old, &extended, PATH);
     assert_eq!(change.level, ChangeLevel::Warning);
     assert_eq!(change.detail, "OAuth2 flow metadata changed");
@@ -1818,9 +1812,10 @@ fn oauth_flow_changes_are_classified() {
 fn response_metadata_changes_follow_metadata_levels() {
     let old: Document = serde_json::from_value(fixture()).unwrap();
     let mut extended = old.clone();
-    extended.operations[0].responses[0]
-        .ext
-        .insert("source.response".into(), serde_json::json!("dropped"));
+    extended.operations[0].responses[0].ext.insert(
+        "test.example.source/v1".into(),
+        serde_json::json!("dropped"),
+    );
     let change = change_at(&old, &extended, "operations.auth.login.responses.200");
     assert_eq!(change.level, ChangeLevel::Warning);
     assert_eq!(change.detail, "response metadata changed");
@@ -1858,7 +1853,7 @@ fn error_documentation_and_metadata_follow_metadata_levels() {
     let mut extended = old.clone();
     extended.operations[0].errors[0]
         .ext
-        .insert("source.error".into(), serde_json::json!(1));
+        .insert("test.example.source/v1".into(), serde_json::json!(1));
     let change = change_at(&old, &extended, PATH);
     assert_eq!(change.level, ChangeLevel::Warning);
     assert_eq!(change.detail, "error metadata changed");
@@ -1880,7 +1875,7 @@ fn request_header_metadata_changes_are_reported() {
     let mut extended = old.clone();
     extended.operations[1].headers[0]
         .ext
-        .insert("source.header".into(), serde_json::json!(1));
+        .insert("test.example.source/v1".into(), serde_json::json!(1));
     let change = change_at(
         &old,
         &extended,
@@ -1901,7 +1896,7 @@ fn request_header_metadata_changes_are_reported() {
     });
     retyped.operations[1].headers[0]
         .ext
-        .insert("source.header".into(), serde_json::json!(1));
+        .insert("test.example.source/v1".into(), serde_json::json!(1));
     let path = "operations.events.watch.headers.X-Request-ID";
     let diff = old.diff(&retyped);
     assert!(diff.has_breaking_changes());

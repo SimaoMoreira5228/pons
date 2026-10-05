@@ -215,7 +215,7 @@ fn diff_passes_a_warning_only_change() {
     let new = directory.path().join("new.json");
     fs::write(&old, FIXTURE).unwrap();
     let mut input: Value = serde_json::from_str(FIXTURE).unwrap();
-    input["operations"][0]["body"]["ext"] = serde_json::json!({"source.body": 1});
+    input["operations"][0]["body"]["ext"] = serde_json::json!({"test.example.source/v1": 1});
     fs::write(&new, serde_json::to_vec(&input).unwrap()).unwrap();
 
     let output = pons().arg("diff").arg(&old).arg(&new).output().unwrap();
@@ -906,7 +906,7 @@ fi
     let output_dir = directory.path().join("generated");
     let request_path = directory.path().join("request.json");
     let mut contract: Value = serde_json::from_str(FIXTURE).unwrap();
-    contract["ext"]["large"] = Value::String("x".repeat(100_000));
+    contract["ext"]["test.example.large/v1"] = Value::String("x".repeat(100_000));
     contract["operations"][1]["auth"]["alternatives"] =
         serde_json::json!([["tenant"], ["session"]]);
     contract["operations"].as_array_mut().unwrap().reverse();

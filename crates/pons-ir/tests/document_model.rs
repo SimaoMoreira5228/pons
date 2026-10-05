@@ -12,8 +12,11 @@ fn rich_document_round_trips_and_validates() {
         serde_json::from_str(include_str!("../../../fixtures/login.json")).unwrap();
     document.validate().unwrap();
     let encoded = serde_json::to_value(&document).unwrap();
-    assert_eq!(encoded["ext"]["source.note"]["kept"], true);
-    assert_eq!(encoded["types"]["User"]["ext"]["source.type"], "kept");
+    assert_eq!(encoded["ext"]["test.example.source/v1"]["kept"], true);
+    assert_eq!(
+        encoded["types"]["User"]["ext"]["test.example.source/v1"],
+        "kept"
+    );
     assert_eq!(encoded["auth_schemes"]["tenant"]["in"], "header");
     let decoded: Document = serde_json::from_value(encoded).unwrap();
     assert_eq!(document, decoded);
@@ -34,6 +37,7 @@ fn opaque_values_require_a_codec_and_can_be_scanned() {
     fields[0].ty = TypeRef::Inline(InlineType::Opaque {
         codec: String::new(),
         wire: OpaqueWire::Unknown,
+        ext: Default::default(),
     });
     let errors = document.validate().unwrap_err();
     assert!(
@@ -49,6 +53,7 @@ fn opaque_values_require_a_codec_and_can_be_scanned() {
     fields[0].ty = TypeRef::Inline(InlineType::Opaque {
         codec: "example".into(),
         wire: OpaqueWire::Json,
+        ext: Default::default(),
     });
     document.validate().unwrap();
 }
@@ -62,6 +67,7 @@ fn common_errors_only_root_opaque_when_an_operation_inherits_them() {
     common.body = Some(TypeRef::Inline(InlineType::Opaque {
         codec: "example".into(),
         wire: OpaqueWire::Json,
+        ext: Default::default(),
     }));
     document.common_errors.push(common);
     document.operations[0].errors.clear();
@@ -530,6 +536,7 @@ fn byte_bodies_must_resolve_to_a_byte_value() {
         TypeRef::Inline(InlineType::Opaque {
             codec: "Raw".into(),
             wire,
+            ext: Default::default(),
         })
     }
     fn string() -> TypeRef {
@@ -797,6 +804,7 @@ fn a_form_body_is_a_record_of_flat_values_and_nothing_else() {
     opaque.operations[0].body.as_mut().unwrap().ty = TypeRef::Inline(InlineType::Opaque {
         codec: "axum.form".into(),
         wire: OpaqueWire::Unknown,
+        ext: Default::default(),
     });
     refuses_form(
         &opaque,

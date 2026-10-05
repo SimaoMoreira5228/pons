@@ -864,6 +864,7 @@ fn router_describes_multipart_request_as_opaque() {
         TypeRef::Inline(InlineType::Opaque {
             codec: "axum.multipart".into(),
             wire: OpaqueWire::Unknown,
+            ext: Default::default(),
         })
     );
     assert!(operation.diagnostics.iter().any(|diagnostic| {
@@ -1504,14 +1505,84 @@ fn operation_meta_overrides_identity_and_adds_contract_metadata() {
 }
 
 #[test]
+fn operation_meta_overrides_the_semantics_the_method_derives() {
+    let document = Router::<()>::new(info())
+        .route(
+            "/retry",
+            post_with(
+                create_user,
+                OperationMeta::new("users.retry")
+                    .safe(true)
+                    .idempotent(true),
+            ),
+        )
+        .route(
+            "/dedup",
+            get_with(
+                first_user,
+                OperationMeta::new("users.dedup")
+                    .safe(false)
+                    .idempotent(false),
+            ),
+        )
+        .into_document()
+        .unwrap();
+
+    let post = operation(&document, "retry");
+    assert!(
+        post.semantics.safe && post.semantics.idempotent,
+        "a POST the handler serves twice alike is safe to retry: {:?}",
+        post.semantics
+    );
+    let get = operation(&document, "dedup");
+    assert!(
+        !get.semantics.safe && !get.semantics.idempotent,
+        "a GET the handler serves at most once is safe to refuse a repeat: {:?}",
+        get.semantics
+    );
+}
+
+#[test]
+fn an_operation_no_meta_overrides_keeps_the_semantics_its_method_derives() {
+    let document = Router::<()>::new(info())
+        .route("/users", post(create_user))
+        .route("/users", get(first_user))
+        .route("/users", delete(delete_user))
+        .into_document()
+        .unwrap();
+
+    for (method, safe, idempotent) in [
+        (pons_ir::Method::Post, false, false),
+        (pons_ir::Method::Get, true, true),
+        (pons_ir::Method::Delete, false, true),
+    ] {
+        let operation = document
+            .operations
+            .iter()
+            .find(|operation| operation.method == method)
+            .unwrap();
+        assert_eq!(
+            (operation.semantics.safe, operation.semantics.idempotent),
+            (safe, idempotent),
+            "a {method:?} operation that overrides nothing keeps the semantics the method gives it"
+        );
+    }
+}
+
+#[test]
 fn document_lowering_adds_metadata_and_revalidates() {
     let document = Router::<()>::new(info())
         .try_lower_document(|mut document| {
-            document.ext.insert("policy".into(), "enabled".into());
+            document
+                .ext
+                .insert("com.example.policy/v1".into(), "enabled".into());
             Ok(document)
         })
         .unwrap();
-    assert_eq!(document.ext["policy"].as_str(), Some("enabled"));
+    assert_eq!(
+        document.ext["com.example.policy/v1"].as_str(),
+        Some("enabled")
+    );
 
     let errors = Router::<()>::new(info())
         .try_lower_document(|mut document| {

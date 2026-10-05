@@ -301,6 +301,8 @@ pub enum InlineType {
     Opaque {
         codec: String,
         wire: OpaqueWire,
+        #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+        ext: BTreeMap<String, Value>,
     },
     Nullable {
         inner: Box<TypeRef>,

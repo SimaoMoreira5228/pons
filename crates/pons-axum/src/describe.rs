@@ -153,6 +153,7 @@ pub(crate) fn header_schema<T: Schema>(
             TypeRef::Inline(InlineType::Opaque {
                 codec: "axum.header".into(),
                 wire: OpaqueWire::Text,
+                ext: Default::default(),
             })
         }
         ty => ty,
@@ -604,6 +605,7 @@ fn opaque(codec: &str) -> TypeRef {
     TypeRef::Inline(InlineType::Opaque {
         codec: codec.into(),
         wire: OpaqueWire::Unknown,
+        ext: Default::default(),
     })
 }
 
@@ -776,6 +778,7 @@ mod tests {
             TypeRef::Inline(InlineType::Opaque {
                 codec: "axum.header".into(),
                 wire: OpaqueWire::Text,
+                ext: Default::default(),
             })
         );
         assert_eq!(cx.diagnostics().len(), 1);

@@ -6,7 +6,7 @@ use pons_ir::{
 };
 
 use crate::describe::OperationCx;
-use crate::metadata::OperationMeta;
+use crate::metadata::{OperationMeta, Semantics};
 use crate::operation_cx::push_diagnostic;
 
 pub(crate) struct RouteDescription {
@@ -45,9 +45,14 @@ pub(crate) fn build(path: &str, description: RouteDescription) -> BuiltOperation
     let path_types = path_types(&types, &cx.path_types);
     let segments = parse_path(path, &path_types, &mut diagnostics);
     diagnostics.extend(type_diagnostics);
-    let (id, doc, provides) = match meta {
-        Some(meta) => (meta.id, Some(meta.doc), meta.provides.or(cx.provides)),
-        None => (inferred_id, None, cx.provides),
+    let (id, doc, provides, semantics) = match meta {
+        Some(meta) => (
+            meta.id,
+            Some(meta.doc),
+            meta.provides.or(cx.provides),
+            meta.semantics,
+        ),
+        None => (inferred_id, None, cx.provides, Semantics::default()),
     };
     let operation = Operation {
         id,
@@ -63,12 +68,14 @@ pub(crate) fn build(path: &str, description: RouteDescription) -> BuiltOperation
         auth: cx.auth,
         provides,
         semantics: OperationSemantics {
-            safe: matches!(method, Method::Get | Method::Head | Method::Options),
-            idempotent: matches!(
+            safe: semantics.safe.unwrap_or(matches!(
+                method,
+                Method::Get | Method::Head | Method::Options
+            )),
+            idempotent: semantics.idempotent.unwrap_or(matches!(
                 method,
                 Method::Get | Method::Put | Method::Delete | Method::Head | Method::Options
-            ),
-            pagination: None,
+            )),
         },
         doc,
         origin: None,

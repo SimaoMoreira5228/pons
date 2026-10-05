@@ -403,7 +403,7 @@ mod tests {
         assert_eq!(email["x-pons-format"], json!("email"));
         assert!(email.get("format").is_none(), "{email:#}");
         assert!(
-            output["x-pons"]["ext"]["source.note"]["kept"]
+            output["x-pons"]["ext"]["test.example.source/v1"]["kept"]
                 .as_bool()
                 .unwrap()
         );
@@ -447,6 +447,7 @@ mod tests {
         fields[0].ty = TypeRef::Inline(InlineType::Opaque {
             codec: "example.codec".into(),
             wire: OpaqueWire::Json,
+            ext: Default::default(),
         });
         let emitted = super::emit_with_mode(&document, super::EmitMode::Strict).unwrap();
         assert!(emitted.coverage.opaque.contains("types.User"));
@@ -604,6 +605,7 @@ mod tests {
         fields[0].ty = TypeRef::Inline(InlineType::Opaque {
             codec: "example.codec".into(),
             wire: OpaqueWire::Json,
+            ext: Default::default(),
         });
 
         let strict = super::emit_with_mode(&document, super::EmitMode::Strict).unwrap();

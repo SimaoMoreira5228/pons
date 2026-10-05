@@ -563,7 +563,7 @@ fn custom_serde_functions_produce_a_diagnostic_and_opaque_type() {
     let TypeKind::Struct { fields, .. } = &cx.definitions()[&named.id].definition else {
         panic!()
     };
-    let TypeRef::Inline(InlineType::Opaque { codec, wire }) = &fields[0].ty else {
+    let TypeRef::Inline(InlineType::Opaque { codec, wire, .. }) = &fields[0].ty else {
         panic!()
     };
     assert!(codec.contains("custom_wire"));
@@ -825,7 +825,7 @@ fn custom_serde_functions_with_flatten_are_diagnosed_and_opaque() {
         panic!()
     };
     assert!(fields.is_empty());
-    let TypeRef::Inline(InlineType::Opaque { codec, wire }) = &flattened[0] else {
+    let TypeRef::Inline(InlineType::Opaque { codec, wire, .. }) = &flattened[0] else {
         panic!()
     };
     assert!(codec.contains("custom_wire"));
@@ -1266,7 +1266,7 @@ fn one_sided_codecs_only_make_their_own_direction_opaque() {
         input[0].ty,
         TypeRef::Inline(InlineType::Array { .. })
     ));
-    let TypeRef::Inline(InlineType::Opaque { codec, wire }) = &input[1].ty else {
+    let TypeRef::Inline(InlineType::Opaque { codec, wire, .. }) = &input[1].ty else {
         panic!()
     };
     let labels: Vec<&str> = codec.split(',').collect();
@@ -1822,6 +1822,60 @@ fn platform_sized_integers_describe_as_64_bit_numbers() {
     let reference = PlatformSizedIntegers::schema(&mut cx, Direction::Input);
     let (fields, _) = struct_shape(&cx, &reference);
     assert_eq!(fields.len(), 2);
+    assert!(cx.diagnostics().is_empty());
+    let (types, diagnostics) = cx.into_parts();
+    assert!(document(types, diagnostics).validate().is_ok());
+}
+
+#[test]
+fn a_direction_pair_shares_one_origin_and_a_both_type_keeps_its_own() {
+    let mut cx = TypeCx::new();
+    let origin = std::any::type_name::<LoginRequest>().to_owned();
+    let pair = [
+        (Direction::Input, format!("{origin}#input")),
+        (Direction::Output, format!("{origin}#output")),
+    ];
+    for (direction, id) in pair {
+        let TypeRef::Inline(InlineType::Nullable { inner, .. }) =
+            Option::<LoginRequest>::schema(&mut cx, direction)
+        else {
+            panic!("an Option<T> keeps the named type under its nullable wrapper")
+        };
+        let TypeRef::Named(named) = *inner else {
+            panic!()
+        };
+        assert_eq!(named.id, id, "the side suffix stays on the id");
+        assert_eq!(
+            cx.definitions()[&named.id].origin.as_deref(),
+            Some(origin.as_str()),
+            "both halves of the pair name the one origin"
+        );
+    }
+
+    let both = SharedBoth::schema(&mut cx, Direction::Both);
+    let TypeRef::Named(named) = &both else {
+        panic!()
+    };
+    assert_eq!(
+        cx.definitions()[&named.id].origin.as_deref(),
+        Some(named.id.as_str()),
+        "a both-direction type is the whole origin group, so it names itself"
+    );
+
+    let _ = Envelope::<String>::schema(&mut cx, Direction::Input);
+    let _ = Envelope::<u32>::schema(&mut cx, Direction::Input);
+    let instantiations = [
+        std::any::type_name::<Envelope<String>>(),
+        std::any::type_name::<Envelope<u32>>(),
+    ];
+    for base in instantiations {
+        assert_eq!(
+            cx.definitions()[&format!("{base}#input")].origin.as_deref(),
+            Some(base),
+            "one origin per monomorphised instantiation"
+        );
+    }
+
     assert!(cx.diagnostics().is_empty());
     let (types, diagnostics) = cx.into_parts();
     assert!(document(types, diagnostics).validate().is_ok());

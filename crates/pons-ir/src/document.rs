@@ -6,7 +6,8 @@ use serde_json::Value;
 use crate::IR_VERSION;
 use crate::operation::{
     ApiKeyLocation, AuthScheme, ContentKind, CredentialLocator, ErrorContent, ErrorResponse,
-    ErrorStatus, Method, OAuthFlowKind, Operation, PathSegment, ResponseStatus, StreamKind,
+    ErrorStatus, Method, OAuthFlowKind, Operation, PathSegment, ResponseHeader, ResponseStatus,
+    StreamKind,
 };
 use crate::types::{
     Access, Diagnostic, DiagnosticSeverity, Direction, Field, InlineType, IntegerWire,
@@ -183,6 +184,34 @@ fn carrier_key(location: ApiKeyLocation, name: &str) -> String {
     match location {
         ApiKeyLocation::Header => name.to_ascii_lowercase(),
         ApiKeyLocation::Query | ApiKeyLocation::Cookie => name.to_owned(),
+    }
+}
+
+fn check_field_extensions(owner: &str, fields: &[Field], errors: &mut Vec<ValidationError>) {
+    for field in fields {
+        let owner = format!("{owner}.fields.{}", field.wire);
+        crate::ext::check(&owner, &field.ext, errors);
+        check_diagnostic_extensions(&owner, &field.diagnostics, errors);
+    }
+}
+
+fn check_diagnostic_extensions(
+    owner: &str,
+    diagnostics: &[Diagnostic],
+    errors: &mut Vec<ValidationError>,
+) {
+    for (index, diagnostic) in diagnostics.iter().enumerate() {
+        crate::ext::check(&format!("{owner}[{index}]"), &diagnostic.ext, errors);
+    }
+}
+
+fn check_header_extensions(
+    owner: &str,
+    headers: &[ResponseHeader],
+    errors: &mut Vec<ValidationError>,
+) {
+    for (index, header) in headers.iter().enumerate() {
+        crate::ext::check(&format!("{owner}.headers[{index}]"), &header.ext, errors);
     }
 }
 
@@ -915,6 +944,7 @@ impl Document {
         }
         self.validate_directions(&mut errors);
         self.validate_credential_carriers(&mut errors);
+        self.validate_extensions(&mut errors);
 
         if errors.is_empty() {
             Ok(())
@@ -980,6 +1010,94 @@ impl Document {
                         ApiKeyLocation::Cookie => {}
                     }
                 }
+            }
+        }
+    }
+
+    fn validate_extensions(&self, errors: &mut Vec<ValidationError>) {
+        crate::ext::check("document", &self.ext, errors);
+        crate::ext::check("info", &self.info.ext, errors);
+        check_diagnostic_extensions("document diagnostics", &self.diagnostics, errors);
+        for (id, definition) in &self.types {
+            let owner = format!("type {id}");
+            crate::ext::check(&owner, &definition.ext, errors);
+            check_diagnostic_extensions(
+                &format!("{owner} diagnostics"),
+                &definition.diagnostics,
+                errors,
+            );
+            match &definition.definition {
+                TypeKind::Struct { fields, .. } => check_field_extensions(&owner, fields, errors),
+                TypeKind::Enum { variants, .. } => {
+                    for variant in variants {
+                        let owner = format!("{owner}.variants.{}", variant.wire);
+                        crate::ext::check(&owner, &variant.ext, errors);
+                        check_diagnostic_extensions(
+                            &format!("{owner} diagnostics"),
+                            &variant.diagnostics,
+                            errors,
+                        );
+                        if let VariantPayload::Struct { fields } = &variant.payload {
+                            check_field_extensions(&owner, fields, errors);
+                        }
+                    }
+                }
+                TypeKind::Newtype { .. } => {}
+            }
+        }
+        for (id, scheme) in &self.auth_schemes {
+            match scheme {
+                AuthScheme::Custom { ext, .. } => {
+                    crate::ext::check(&format!("auth scheme {id}"), ext, errors)
+                }
+                AuthScheme::OAuth2 { flows } => {
+                    for (index, flow) in flows.iter().enumerate() {
+                        crate::ext::check(
+                            &format!("auth scheme {id}.flows[{index}]"),
+                            &flow.ext,
+                            errors,
+                        );
+                    }
+                }
+                _ => {}
+            }
+        }
+        for (index, error) in self.common_errors.iter().enumerate() {
+            let owner = format!("common_errors[{index}]");
+            crate::ext::check(&owner, &error.ext, errors);
+            check_header_extensions(&owner, &error.headers, errors);
+        }
+        for (index, operation) in self.operations.iter().enumerate() {
+            let owner = format!("operations[{index}]");
+            crate::ext::check(&owner, &operation.ext, errors);
+            check_diagnostic_extensions(
+                &format!("{owner} diagnostics"),
+                &operation.diagnostics,
+                errors,
+            );
+            crate::ext::check(&format!("{owner}.auth"), &operation.auth.ext, errors);
+            if let Some(provides) = &operation.provides {
+                crate::ext::check(&format!("{owner}.provides"), &provides.ext, errors);
+            }
+            if let Some(body) = &operation.body {
+                crate::ext::check(&format!("{owner}.body"), &body.ext, errors);
+            }
+            for (header_index, header) in operation.headers.iter().enumerate() {
+                crate::ext::check(
+                    &format!("{owner}.headers[{header_index}]"),
+                    &header.ext,
+                    errors,
+                );
+            }
+            for (response_index, response) in operation.responses.iter().enumerate() {
+                let owner = format!("{owner}.responses[{response_index}]");
+                crate::ext::check(&owner, &response.ext, errors);
+                check_header_extensions(&owner, &response.headers, errors);
+            }
+            for (error_index, error) in operation.errors.iter().enumerate() {
+                let owner = format!("{owner}.errors[{error_index}]");
+                crate::ext::check(&owner, &error.ext, errors);
+                check_header_extensions(&owner, &error.headers, errors);
             }
         }
     }
@@ -1461,6 +1579,168 @@ pub(crate) fn exact_integer(value: &Value) -> Exact {
         }
     };
     Exact::Integer((negative && magnitude != 0, magnitude))
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DecodeError {
+    Json(String),
+    UnsupportedVersion {
+        found: String,
+        supported: &'static str,
+    },
+    Member {
+        path: String,
+        message: String,
+    },
+}
+
+impl std::fmt::Display for DecodeError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Json(message) => write!(f, "invalid JSON: {message}"),
+            Self::UnsupportedVersion { found, supported } => write!(
+                f,
+                "unsupported IR version {found}, this build reads {supported}"
+            ),
+            Self::Member { path, message } if path.is_empty() => write!(f, "{message}"),
+            Self::Member { path, message } => write!(f, "{path}: {message}"),
+        }
+    }
+}
+
+impl std::error::Error for DecodeError {}
+
+pub fn decode(bytes: &[u8]) -> Result<Document, DecodeError> {
+    let value: Value =
+        serde_json::from_slice(bytes).map_err(|error| DecodeError::Json(error.to_string()))?;
+    let Some(found) = value.get("ir_version").and_then(Value::as_str) else {
+        return Err(DecodeError::Member {
+            path: "ir_version".into(),
+            message: "the document does not carry a string ir_version".into(),
+        });
+    };
+    if found != IR_VERSION {
+        return Err(DecodeError::UnsupportedVersion {
+            found: found.to_owned(),
+            supported: IR_VERSION,
+        });
+    }
+    serde_json::from_slice::<Document>(bytes).map_err(|error| {
+        let text = error.to_string();
+        let message = text.split(" at line ").next().unwrap_or(&text);
+        DecodeError::Member {
+            path: member_path(bytes, error.line(), error.column()),
+            message: message.to_owned(),
+        }
+    })
+}
+
+fn member_path(bytes: &[u8], line: usize, column: usize) -> String {
+    enum Part {
+        Key(String),
+        Index(usize),
+    }
+
+    struct Frame {
+        array: bool,
+        index: usize,
+        key: Option<String>,
+    }
+
+    let mut frames: Vec<Frame> = Vec::new();
+    let mut at = 0;
+    let target = byte_offset(bytes, line, column);
+    while at < target {
+        match bytes[at] {
+            b'{' | b'[' => frames.push(Frame {
+                array: bytes[at] == b'[',
+                index: 0,
+                key: None,
+            }),
+            b'}' | b']' => {
+                frames.pop();
+            }
+            b',' => {
+                if let Some(frame) = frames.last_mut() {
+                    frame.index += 1;
+                    frame.key = None;
+                }
+            }
+            b':' | b' ' | b'\t' | b'\n' | b'\r' => {}
+            b'"' => {
+                let (text, end) = string_at(bytes, at);
+                let is_key = bytes[end..]
+                    .iter()
+                    .find(|byte| !byte.is_ascii_whitespace())
+                    .is_some_and(|byte| *byte == b':');
+                if is_key && let Some(frame) = frames.last_mut() {
+                    frame.key = Some(text);
+                }
+                at = end;
+                continue;
+            }
+            _ => {}
+        }
+        at += 1;
+    }
+
+    let mut parts: Vec<Part> = Vec::new();
+    for frame in frames {
+        if frame.array {
+            parts.push(Part::Index(frame.index));
+        } else if let Some(key) = frame.key {
+            parts.push(Part::Key(key));
+        }
+    }
+
+    if parts.len() > 2 && matches!(&parts[0], Part::Key(key) if key == "types") {
+        parts.truncate(2);
+    }
+
+    let mut path = String::new();
+    for part in parts {
+        match part {
+            Part::Index(index) => path.push_str(&format!("[{index}]")),
+            Part::Key(key) => {
+                if !path.is_empty() {
+                    path.push('.');
+                }
+                path.push_str(&key);
+            }
+        }
+    }
+    path
+}
+
+fn byte_offset(bytes: &[u8], line: usize, column: usize) -> usize {
+    let mut offset = 0;
+    for _ in 1..line.max(1) {
+        match bytes[offset..].iter().position(|byte| *byte == b'\n') {
+            Some(at) => offset += at + 1,
+            None => return bytes.len(),
+        }
+    }
+    offset + column.saturating_sub(1).min(bytes.len() - offset)
+}
+
+fn string_at(bytes: &[u8], start: usize) -> (String, usize) {
+    let mut at = start + 1;
+    while let Some(byte) = bytes.get(at) {
+        match byte {
+            b'\\' => at += 2,
+            b'"' => {
+                let raw = String::from_utf8_lossy(&bytes[start..=at]).into_owned();
+                let text = if raw.contains('\\') {
+                    serde_json::from_str(&raw).unwrap_or_default()
+                } else {
+                    raw[1..raw.len() - 1].to_owned()
+                };
+                return (text, at + 1);
+            }
+            _ => at += 1,
+        }
+    }
+    (String::new(), at)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

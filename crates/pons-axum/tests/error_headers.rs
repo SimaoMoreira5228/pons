@@ -172,6 +172,29 @@ async fn dynamic_traced(
 }
 
 #[derive(Debug, Serialize, Schema, pons_core::ApiError)]
+enum DeclaredError {
+    #[pons(status = 429, header = RetryAfter, media_type = "application/problem+json")]
+    Limited,
+    #[allow(dead_code)]
+    #[pons(
+        status = 503,
+        content = "problem_json",
+        optional_header = TraceId
+    )]
+    Degraded { detail: String },
+}
+
+impl IntoResponse for DeclaredError {
+    fn into_response(self) -> axum::response::Response {
+        StatusCode::TOO_MANY_REQUESTS.into_response()
+    }
+}
+
+async fn declared() -> Result<axum::Json<User>, DeclaredError> {
+    Err(DeclaredError::Limited)
+}
+
+#[derive(Debug, Serialize, Schema, pons_core::ApiError)]
 enum Broken {
     #[allow(dead_code)]
     #[pons(status = 500)]
@@ -428,6 +451,54 @@ fn the_default_error_status_declares_every_status() {
     assert_eq!(response.status(), StatusCode::FOUND);
     assert_eq!(response.headers()["location"], "/elsewhere");
     assert_eq!(response.headers()["Retry-After"], "1");
+}
+
+#[test]
+fn a_derived_error_publishes_the_header_and_media_type_its_variant_declares() {
+    let document = Router::<()>::new(info())
+        .route("/declared", get(declared))
+        .into_document()
+        .unwrap();
+    let operation = &document.operations[0];
+
+    let limited = operation
+        .errors
+        .iter()
+        .find(|error| error.status == ErrorStatus::Exact(429))
+        .expect("the variant declares 429");
+    assert_eq!(limited.headers[0].wire, "Retry-After");
+    assert_eq!(limited.headers[0].presence, Presence::Required);
+    assert!(
+        matches!(
+            limited.headers[0].ty,
+            pons_ir::TypeRef::Inline(pons_ir::InlineType::Int {
+                wire: pons_ir::IntegerWire::String,
+                ..
+            })
+        ),
+        "a header value is a text token, so an integer header is described as one: {:?}",
+        limited.headers[0].ty
+    );
+    assert_eq!(
+        limited.media_type.as_deref(),
+        Some("application/problem+json")
+    );
+
+    let degraded = operation
+        .errors
+        .iter()
+        .find(|error| error.status == ErrorStatus::Exact(503))
+        .expect("the variant declares 503");
+    assert_eq!(degraded.headers[0].wire, "X-Trace-ID");
+    assert_eq!(degraded.headers[0].presence, Presence::Optional);
+    assert!(matches!(
+        degraded.headers[0].ty,
+        pons_ir::TypeRef::Inline(pons_ir::InlineType::String { .. })
+    ));
+    assert_eq!(
+        degraded.media_type, None,
+        "a variant that declares no media type leaves the content to speak for it"
+    );
 }
 
 #[test]

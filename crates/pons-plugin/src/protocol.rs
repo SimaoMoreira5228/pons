@@ -2,7 +2,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Component, Path};
 
 use pons_ir::{
-    AuthScheme, Coverage, Document, EnumRepr, ObjectOpenness, StreamKind, TypeKind,
+    AuthScheme, Coverage, Direction, Document, EnumRepr, ObjectOpenness, StreamKind, TypeKind,
     coverage_for_document, operation_subject, strict_violation_message,
 };
 use serde::{Deserialize, Serialize};
@@ -214,19 +214,19 @@ impl EmitterManifest {
                 )));
             }
         }
-        let mut directions = BTreeMap::<&str, (bool, bool)>::new();
-        for definition in document.types.values() {
-            if let Some(origin) = definition.origin.as_deref() {
-                let entry = directions.entry(origin).or_default();
+        if !self.capabilities.direction_split {
+            let mut sides = BTreeMap::<&str, (bool, bool)>::new();
+            for definition in document.types.values() {
+                let Some(origin) = definition.origin.as_deref() else {
+                    continue;
+                };
                 match definition.direction {
-                    pons_ir::Direction::Input => entry.0 = true,
-                    pons_ir::Direction::Output => entry.1 = true,
-                    pons_ir::Direction::Both => *entry = (true, true),
+                    Direction::Input => sides.entry(origin).or_default().0 = true,
+                    Direction::Output => sides.entry(origin).or_default().1 = true,
+                    Direction::Both => {}
                 }
             }
-        }
-        if !self.capabilities.direction_split {
-            for (origin, (input, output)) in directions {
+            for (origin, (input, output)) in sides {
                 if input && output {
                     warnings.push(CapabilityWarning(format!(
                         "{} does not declare direction-split type support for {origin}",
@@ -747,25 +747,16 @@ mod tests {
             serde_json::from_str(include_str!("../../../fixtures/login.json")).unwrap();
         paginated["operations"][1]["semantics"]["pagination"] =
             serde_json::json!({ "kind": "opaque" });
-        let paginated: Document = serde_json::from_value(paginated).unwrap();
-        assert!(!paginated.has_opaque());
+        let refused = pons_ir::decode(paginated.to_string().as_bytes()).unwrap_err();
         assert!(
-            manifest
-                .unsupported_features(&paginated)
-                .iter()
-                .any(|warning| warning.0.contains("opaque value support"))
+            refused.to_string().contains("semantics.pagination"),
+            "{refused}"
         );
         let mut supported = manifest;
         supported.capabilities.opaque = true;
         assert!(
             !supported
                 .unsupported_features(&document)
-                .iter()
-                .any(|warning| warning.0.contains("opaque value support"))
-        );
-        assert!(
-            !supported
-                .unsupported_features(&paginated)
                 .iter()
                 .any(|warning| warning.0.contains("opaque value support"))
         );
@@ -930,13 +921,12 @@ mod tests {
     }
 
     #[test]
-    fn a_both_direction_type_needs_a_direction_split_target() {
+    fn a_direction_pair_needs_a_direction_split_target() {
         let mut value: serde_json::Value =
             serde_json::from_str(include_str!("../../../fixtures/login.json")).unwrap();
         for id in ["User", "LoginRequest"] {
             value["types"][id]["origin"] = serde_json::json!("account");
         }
-        value["types"]["User"]["direction"] = serde_json::json!("both");
         let document: Document = serde_json::from_value(value).unwrap();
         document.validate().unwrap();
 
@@ -949,7 +939,7 @@ mod tests {
                 .filter(|message| message.contains("direction-split"))
                 .collect::<Vec<_>>(),
             vec!["fixture does not declare direction-split type support for account"],
-            "a both-direction type uses both sides of its origin group"
+            "one origin group holds an input type and an output type"
         );
         manifest.capabilities.direction_split = true;
         assert!(
@@ -957,6 +947,26 @@ mod tests {
                 .unsupported_features(&document)
                 .iter()
                 .any(|warning| warning.0.contains("direction-split"))
+        );
+    }
+
+    #[test]
+    fn a_both_direction_type_asks_for_no_direction_split() {
+        let mut value: serde_json::Value =
+            serde_json::from_str(include_str!("../../../fixtures/login.json")).unwrap();
+        for id in ["User", "LoginRequest"] {
+            value["types"][id]["origin"] = serde_json::json!("account");
+        }
+        value["types"]["User"]["direction"] = serde_json::json!("both");
+        let document: Document = serde_json::from_value(value).unwrap();
+        document.validate().unwrap();
+
+        assert!(
+            !manifest()
+                .unsupported_features(&document)
+                .iter()
+                .any(|warning| warning.0.contains("direction-split")),
+            "a both-direction type is the whole origin group and serves both sides itself"
         );
     }
 
@@ -1248,6 +1258,7 @@ mod tests {
         fields[0].ty = TypeRef::Inline(InlineType::Opaque {
             codec: "example".into(),
             wire: pons_ir::OpaqueWire::Json,
+            ext: Default::default(),
         });
         let coverage = coverage_for_document(&opaque, false).unwrap();
         assert!(coverage.opaque.contains("types.User"));
@@ -1288,22 +1299,12 @@ mod tests {
         assert!(coverage.exact.contains("types.User"));
         assert!(!coverage.opaque.contains("types.User"));
 
-        let mut paginated = exactly_representable_fixture();
-        paginated["operations"][1]["semantics"]["pagination"] =
-            serde_json::json!({ "kind": "opaque" });
-        let paginated: Document = serde_json::from_value(paginated).unwrap();
-        let coverage = coverage_for_document(&paginated, false).unwrap();
-        assert!(coverage.opaque.contains("operations.events.watch"));
-        assert!(!coverage.exact.contains("operations.events.watch"));
-
         let mut document: Document =
             serde_json::from_value(exactly_representable_fixture()).unwrap();
-        document
-            .types
-            .get_mut("User")
-            .unwrap()
-            .ext
-            .insert("marker".into(), serde_json::json!({ "kind": "opaque" }));
+        document.types.get_mut("User").unwrap().ext.insert(
+            "com.example.marker/v1".into(),
+            serde_json::json!({ "kind": "opaque" }),
+        );
         let coverage = coverage_for_document(&document, false).unwrap();
         assert!(coverage.exact.contains("types.User"));
         assert!(!coverage.opaque.contains("types.User"));
@@ -1322,6 +1323,7 @@ mod tests {
         fields[0].ty = TypeRef::Inline(InlineType::Opaque {
             codec: "example".into(),
             wire: pons_ir::OpaqueWire::Json,
+            ext: Default::default(),
         });
         let coverage = coverage_for_document(&document, false).unwrap();
         assert!(coverage.opaque.contains("types.LoginError"));

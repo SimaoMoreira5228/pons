@@ -148,7 +148,7 @@ where
 {
     fn errors(cx: &mut TypeCx) -> Vec<ErrorResponse> {
         let mut errors = E::errors(cx);
-        let header = response_header::<S>(cx, Presence::Required);
+        let header = error_header::<S>(cx, Presence::Required);
         errors
             .iter_mut()
             .for_each(|error| error.headers.push(header.clone()));
@@ -182,7 +182,7 @@ where
 {
     fn errors(cx: &mut TypeCx) -> Vec<ErrorResponse> {
         let mut errors = E::errors(cx);
-        let header = response_header::<S>(cx, Presence::Optional);
+        let header = error_header::<S>(cx, Presence::Optional);
         errors
             .iter_mut()
             .for_each(|error| error.headers.push(header.clone()));
@@ -239,7 +239,7 @@ fn declares(status: &ErrorStatus, produced: axum::http::StatusCode) -> bool {
     }
 }
 
-fn response_header<S>(cx: &mut TypeCx, presence: Presence) -> ResponseHeader
+pub fn error_header<S>(cx: &mut TypeCx, presence: Presence) -> ResponseHeader
 where
     S: HeaderSpec,
 {

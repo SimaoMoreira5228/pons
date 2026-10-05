@@ -329,7 +329,7 @@ impl<'a> Builder<'a> {
             },
             InlineType::Null => json!({"type":"null"}),
             InlineType::Any => json!({}),
-            InlineType::Opaque { codec, wire } => {
+            InlineType::Opaque { codec, wire, .. } => {
                 let mut schema = json!({});
                 schema["x-pons-opaque"] = json!({"codec":codec,"wire":wire});
                 schema

@@ -616,6 +616,7 @@ fn field_type_expression(field: &ast::Field<'_>) -> TokenStream {
                 ::pons_core::ir::TypeRef::Inline(::pons_core::ir::InlineType::Opaque {
                     codec,
                     wire: ::pons_core::ir::OpaqueWire::Unknown,
+                    ext: Default::default(),
                 })
             }
             ::std::option::Option::None => <#ty as ::pons_core::Schema>::schema(cx, direction),
