@@ -17,3 +17,4 @@ pons-emit-ts = { path = "../pons-emit-ts" }
 pons-emit-openapi = { path = "../pons-emit-openapi" }
 serde_json.workspace = true
 tempfile = "3.27.0"
+toml = { version = "1.1", default-features = false, features = ["parse", "serde", "std"] }

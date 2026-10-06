@@ -6,6 +6,7 @@ const CANONICAL_INTEGER = /^(0|[1-9][0-9]*)$/;
 const CANONICAL_SIGNED_INTEGER = /^-?(0|[1-9][0-9]*)$/;
 const BASE64 = /^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/;
 const BASE64URL = /^(?:[A-Za-z0-9_-]{4})*(?:[A-Za-z0-9_-]{2}(?:==)?|[A-Za-z0-9_-]{3}=?)?$/;
+const DATE_TIME = /^\d{4}-\d{2}-\d{2}[Tt]\d{2}:\d{2}:\d{2}(?:\.\d{1,3})?(?:[Zz]|[+-]\d{2}:\d{2})$/;
 
 export function validateWire(value: any, schema: any, mode: "encode" | "decode", allowUnsafeWideIntegers = false): any {
   if (schema == null) return;
@@ -69,9 +70,9 @@ export function validateWire(value: any, schema: any, mode: "encode" | "decode",
     return;
   }
   if (schema.kind === "string") {
-    if (typeof value !== "string") throw new WirePolicyError("expected string");
+    const text = wireText(value, schema, mode);
     if (schema.min_length !== undefined || schema.max_length !== undefined) {
-      const length = [...value].length;
+      const length = [...text].length;
       if (schema.min_length !== undefined && length < schema.min_length) {
         throw new WirePolicyError("string is shorter than the contract");
       }
@@ -79,7 +80,7 @@ export function validateWire(value: any, schema: any, mode: "encode" | "decode",
         throw new WirePolicyError("string is longer than the contract");
       }
     }
-    if (schema.pattern !== undefined && !matchesPattern(schema.pattern, value)) {
+    if (schema.pattern !== undefined && !matchesPattern(schema.pattern, text)) {
       throw new WirePolicyError("string does not match the contract");
     }
     return;
@@ -150,9 +151,26 @@ function matchesPattern(pattern: string, value: string): boolean {
   }
 }
 
+function wireText(value: any, schema: any, mode: "encode" | "decode"): string {
+  if (schema.carrier !== "date") {
+    if (typeof value !== "string") throw new WirePolicyError("expected string");
+    return value;
+  }
+  if (mode === "encode") {
+    if (!(value instanceof Date) || !Number.isFinite(value.getTime())) {
+      throw new WirePolicyError("expected a Date");
+    }
+    return value.toISOString();
+  }
+  if (typeof value !== "string" || !DATE_TIME.test(value) || Number.isNaN(Date.parse(value))) {
+    throw new WirePolicyError("date-time is not an instant a Date can hold");
+  }
+  return value;
+}
+
 function validateInteger(value: any, schema: any, mode: "encode" | "decode", allowUnsafeWideIntegers: boolean): void {
   let integer: bigint;
-  if (schema.wire === "string") {
+  if (schema.wire === "string" || (mode === "encode" && schema.carrier === "string")) {
     const canonical = schema.signed ? CANONICAL_SIGNED_INTEGER : CANONICAL_INTEGER;
     if (typeof value !== "string" || !canonical.test(value)) {
       throw new WirePolicyError("expected integer string");
@@ -199,19 +217,30 @@ function integerConstraint(value: any): bigint {
   throw new WirePolicyError("invalid integer constraint");
 }
 
+export function fieldKey(field: any, mode: "encode" | "decode"): string {
+  const camel = typeof field.key === "string" ? field.key : field.wire;
+  return mode === "decode" ? field.wire : camel;
+}
+
+export function fieldOutKey(field: any, mode: "encode" | "decode"): string {
+  const camel = typeof field.key === "string" ? field.key : field.wire;
+  return mode === "decode" ? camel : field.wire;
+}
+
 function validateStruct(value: any, definition: any, mode: "encode" | "decode", allowUnsafeWideIntegers: boolean): void {
   if (!isRecord(value)) throw new WirePolicyError("expected object");
   const declared = collectFields(definition);
   if (mode === "encode") {
     for (const field of declared) {
-      if (field.access === "read_only" && Object.hasOwn(value, field.wire) && value[field.wire] !== undefined) {
-        throw new WirePolicyError(`field ${field.wire} is read_only and cannot cross the encode direction`);
+      const key = fieldKey(field, mode);
+      if (field.access === "read_only" && Object.hasOwn(value, key) && value[key] !== undefined) {
+        throw new WirePolicyError(`field ${key} is read_only and cannot cross the encode direction`);
       }
     }
   }
   const openness = definition.openness ?? "preserve_opaque";
   if (openness !== "preserve_opaque") {
-    const known = new Set(declared.map((field: any) => field.wire));
+    const known = new Set(declared.map((field: any) => fieldKey(field, mode)));
     const key = opennessKey(openness.preserve_typed?.value);
     const extra = opennessValue(openness.preserve_typed?.value);
     for (const [name, item] of Object.entries(value)) {
@@ -224,14 +253,15 @@ function validateStruct(value: any, definition: any, mode: "encode" | "decode", 
   const flattenedOpaque = (definition.flattened ?? []).some((item: any) => isFlattenedOpaque(item));
   for (const field of collectFields(definition, mode)) {
     if (flattenedOpaque && !hasOpaque(field.ty)) continue;
-    const present = Object.hasOwn(value, field.wire) && value[field.wire] !== undefined;
+    const key = fieldKey(field, mode);
+    const present = Object.hasOwn(value, key) && value[key] !== undefined;
     if (!present) {
       if (field.presence === "required") {
-        throw new WirePolicyError(`missing required field ${field.wire}`);
+        throw new WirePolicyError(`missing required field ${key}`);
       }
       continue;
     }
-    validateWire(value[field.wire], field.ty, mode, allowUnsafeWideIntegers);
+    validateWire(value[key], field.ty, mode, allowUnsafeWideIntegers);
   }
 }
 

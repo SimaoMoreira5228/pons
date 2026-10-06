@@ -1,4 +1,6 @@
+mod config;
 mod emit;
+mod options;
 
 use std::env;
 use std::ffi::OsString;
@@ -9,8 +11,11 @@ use std::process::ExitCode;
 
 use pons_emit_ts::ErrorStrategy;
 use pons_ir::{ChangeLevel, Document, ValidationError};
+use pons_plugin::EmitMode;
 
-const HELP: &str = "Usage: pons <command> <ir.json> [arguments]\n\nCommands:\n  check <ir.json>                              Validate an IR document\n  fmt <ir.json>                                Rewrite an IR document in canonical form\n  diff <old.json> <new.json>                   Classify changes between two IR documents\n  emit --target <name> <ir.json> <output-dir> [--strict|--lossy] [--errors <neverthrow|throw>] [--coverage <relative-file>]\n                                                Generate files (built-in: ts, openapi)\n      --strict                                 Reject unsupported/lossy coverage; opaque is allowed on ts/openapi, and on a plugin that declares it (default)\n      --lossy                                  Emit non-exact coverage with warnings\n      --errors <neverthrow|throw>              TypeScript target only: neverthrow (default), throw\n      --coverage <relative-file>               Write emitter coverage as JSON\n\nExit codes:\n  0  success, and a diff that found nothing to report\n  1  diff only: the contract changed, but nothing in it is breaking\n  2  diff only: the new contract has a breaking change\n  3  diff only: the new contract is invalid\n  4  the arguments are wrong\n  5  the tool could not do its job: an unreadable or malformed document, a\n     check/fmt validation failure, or an emit failure\n";
+use options::EmitArgs;
+
+const HELP: &str = "Usage: pons <command> <ir.json> [arguments]\n\nCommands:\n  check <ir.json>                              Validate an IR document\n  fmt <ir.json>                                Rewrite an IR document in canonical form\n  diff <old.json> <new.json>                   Classify changes between two IR documents\n  emit --target <name> [ir.json] [output-dir] [--strict|--lossy] [--errors <neverthrow|throw>] [--coverage <relative-file>] [--dump-request <relative-file>]\n                                                Generate files (built-in: ts, openapi)\n      --strict                                 Reject unsupported/lossy coverage; opaque is allowed on ts/openapi, and on a plugin that declares it (default)\n      --lossy                                  Emit non-exact coverage with warnings\n      --errors <neverthrow|throw>              TypeScript target only: neverthrow (default), throw\n      --coverage <relative-file>               Write emitter coverage as JSON\n      --dump-request <relative-file>           Write the emit request as JSON, and run no emitter\n\n  A document and an output directory may come from pons.toml, so \"emit --target ts\" is enough\n  there. A flag beats the file, and the file beats the default.\n\nExit codes:\n  0  success, and a diff that found nothing to report\n  1  diff only: the contract changed, but nothing in it is breaking\n  2  diff only: the new contract has a breaking change\n  3  diff only: the new contract is invalid\n  4  the arguments are wrong, and so is a pons.toml that does not parse or that names a key its\n     table does not hold and a value its option does not take\n  5  the tool could not do its job: an unreadable or malformed document, a\n     check/fmt validation failure, or an emit failure\n";
 
 fn main() -> ExitCode {
     match run(env::args_os().skip(1).collect()) {
@@ -81,9 +86,9 @@ fn run(args: Vec<OsString>) -> Result<(), CliError> {
         };
     }
     if command == "emit" {
-        if args.len() < 5 {
+        if args.len() < 3 {
             return Err(CliError::Usage(
-                "emit expects --target <name> <ir.json> <output-dir> [options]".into(),
+                "emit expects --target <name> [ir.json] [output-dir] [options]".into(),
             ));
         }
         if args[1] != "--target" {
@@ -95,31 +100,35 @@ fn run(args: Vec<OsString>) -> Result<(), CliError> {
         let target = args[2]
             .to_str()
             .ok_or_else(|| CliError::Usage("--target expects a target name".into()))?;
-        let mut mode: Option<bool> = None;
-        let mut errors_flag = false;
-        let mut error_strategy = ErrorStrategy::Neverthrow;
+        let mut parsed = EmitArgs {
+            target: target.into(),
+            mode: None,
+            errors: None,
+            positionals: Vec::new(),
+        };
         let mut coverage_path: Option<OsString> = None;
-        let mut index = 5;
+        let mut dump_request: Option<OsString> = None;
+        let mut index = 3;
         while index < args.len() {
             let Some(flag) = args[index].to_str() else {
                 return Err(CliError::Usage(format!(
-                    "emit option {index} is not valid UTF-8"
+                    "emit argument {index} is not valid UTF-8"
                 )));
             };
             match flag {
                 "--strict" => {
-                    if mode == Some(false) {
+                    if parsed.mode == Some(EmitMode::Lossy) {
                         return Err(CliError::Usage("--strict conflicts with --lossy".into()));
                     }
-                    mode = Some(true);
+                    parsed.mode = Some(EmitMode::Strict);
                 }
                 "--lossy" => {
-                    if mode == Some(true) {
+                    if parsed.mode == Some(EmitMode::Strict) {
                         return Err(CliError::Usage("--lossy conflicts with --strict".into()));
                     }
-                    mode = Some(false);
+                    parsed.mode = Some(EmitMode::Lossy);
                 }
-                "--errors" if errors_flag => {
+                "--errors" if parsed.errors.is_some() => {
                     return Err(CliError::Usage("--errors given more than once".into()));
                 }
                 "--errors" => {
@@ -128,9 +137,8 @@ fn run(args: Vec<OsString>) -> Result<(), CliError> {
                             "--errors is only supported by the TypeScript target, not {target}"
                         )));
                     }
-                    errors_flag = true;
                     index += 1;
-                    error_strategy = match value_for("--errors", args.get(index))? {
+                    parsed.errors = Some(match value_for("--errors", args.get(index))? {
                         "neverthrow" => ErrorStrategy::Neverthrow,
                         "throw" => ErrorStrategy::Throw,
                         value => {
@@ -138,7 +146,7 @@ fn run(args: Vec<OsString>) -> Result<(), CliError> {
                                 "--errors expects neverthrow or throw, not {value:?}"
                             )));
                         }
-                    };
+                    });
                 }
                 "--coverage" if coverage_path.is_some() => {
                     return Err(CliError::Usage("--coverage given more than once".into()));
@@ -147,20 +155,31 @@ fn run(args: Vec<OsString>) -> Result<(), CliError> {
                     index += 1;
                     coverage_path = Some(value_for("--coverage", args.get(index))?.into());
                 }
-                other => return Err(CliError::Usage(format!("unexpected emit option {other:?}"))),
+                "--dump-request" if dump_request.is_some() => {
+                    return Err(CliError::Usage(
+                        "--dump-request given more than once".into(),
+                    ));
+                }
+                "--dump-request" => {
+                    index += 1;
+                    dump_request = Some(value_for("--dump-request", args.get(index))?.into());
+                }
+                other if other.starts_with('-') => {
+                    return Err(CliError::Usage(format!("unexpected emit option {other:?}")));
+                }
+                _ => parsed.positionals.push(args[index].clone()),
             }
             index += 1;
         }
-        let strict = mode.unwrap_or(true);
-        let document = read_document(Path::new(&args[3]))?;
+        let config = config::discover(parsed.positionals.first().map(Path::new))?;
+        let resolved = options::resolve(&parsed, config.as_ref())?;
+        let document = read_document(&resolved.document)?;
         validate(&document)?;
         return emit::run(
-            target,
+            &resolved,
             &document,
-            Path::new(&args[4]),
             coverage_path.as_deref().map(Path::new),
-            strict,
-            error_strategy,
+            dump_request.as_deref().map(Path::new),
         );
     }
     match command {
@@ -269,4 +288,17 @@ enum CliError {
     Invalid(String),
     Usage(String),
     Failure(String),
+}
+
+impl CliError {
+    #[cfg(test)]
+    pub(crate) fn message(&self) -> String {
+        match self {
+            CliError::Changed => "the contract changed".into(),
+            CliError::Breaking(message)
+            | CliError::Invalid(message)
+            | CliError::Usage(message)
+            | CliError::Failure(message) => message.clone(),
+        }
+    }
 }

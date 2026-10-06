@@ -3,6 +3,7 @@ use std::ffi::{OsStr, OsString};
 use std::io::{Read, Write};
 #[cfg(unix)]
 use std::os::unix::process::CommandExt;
+use std::path::PathBuf;
 use std::process::{Command, Output, Stdio};
 use std::sync::{Arc, Mutex};
 use std::thread;
@@ -47,6 +48,7 @@ pub fn invoke(
     ir: &Document,
     options: BTreeMap<String, Value>,
     strict: bool,
+    search: &[PathBuf],
 ) -> Result<PluginResult, PluginError> {
     let mut canonical = ir.clone();
     canonical.canonicalize();
@@ -61,7 +63,7 @@ pub fn invoke(
     })?;
     let ir = &canonical;
 
-    let resolved = resolve_executable(executable)?;
+    let resolved = resolve_executable(executable, search)?;
     let manifest_output = run_command(&resolved.program, &resolved.command("describe"), None)?;
     ensure_success(
         executable,
@@ -87,6 +89,7 @@ pub fn invoke(
         )));
     }
     manifest.validate(&ir.ir_version).map_err(PluginError)?;
+    manifest.validate_options(&options).map_err(PluginError)?;
     let capability_warnings: Vec<String> = manifest
         .unsupported_features(ir)
         .into_iter()
@@ -419,13 +422,15 @@ const EXECUTABLE_SUFFIXES: &[&str] = if cfg!(windows) {
     &[""]
 };
 
-fn resolve_executable(executable: &OsStr) -> Result<Executable, PluginError> {
+fn resolve_executable(executable: &OsStr, search: &[PathBuf]) -> Result<Executable, PluginError> {
     let name = executable.to_string_lossy();
     let found = if name.contains(std::path::MAIN_SEPARATOR) {
         None
     } else {
-        std::env::var_os("PATH")
-            .and_then(|search| find_in_path(&name, EXECUTABLE_SUFFIXES, &search).ok())
+        find_in_directories(&name, search).ok().or_else(|| {
+            std::env::var_os("PATH")
+                .and_then(|path| find_in_path(&name, EXECUTABLE_SUFFIXES, &path).ok())
+        })
     };
     match found {
         Some((path, suffix)) => start_resolved(path, suffix),
@@ -434,6 +439,14 @@ fn resolve_executable(executable: &OsStr) -> Result<Executable, PluginError> {
             prefix: Vec::new(),
         }),
     }
+}
+
+fn find_in_directories(
+    name: &str,
+    directories: &[PathBuf],
+) -> std::io::Result<(PathBuf, &'static str)> {
+    let search = std::env::join_paths(directories).map_err(std::io::Error::other)?;
+    find_in_path(name, EXECUTABLE_SUFFIXES, &search)
 }
 
 fn start_resolved(
@@ -636,11 +649,45 @@ mod tests {
     }
 
     #[test]
+    fn a_configured_search_directory_is_consulted_before_the_search_path() {
+        let directory = tempfile::tempdir().unwrap();
+        let configured = directory.path().join("tools");
+        let empty = directory.path().join("empty");
+        std::fs::create_dir_all(&configured).unwrap();
+        std::fs::create_dir_all(&empty).unwrap();
+        std::fs::write(configured.join("pons-emit-absent"), b"#!/bin/sh\n").unwrap();
+
+        let name = OsStr::new("pons-emit-absent");
+        assert!(
+            find_in_directories("pons-emit-absent", std::slice::from_ref(&empty)).is_err(),
+            "a directory with no emitter in it does not answer"
+        );
+        assert_eq!(
+            find_in_directories("pons-emit-absent", &[empty.clone(), configured.clone()])
+                .unwrap()
+                .0,
+            configured.join("pons-emit-absent")
+        );
+        assert_eq!(
+            resolve_executable(name, std::slice::from_ref(&configured))
+                .unwrap()
+                .program,
+            configured.join("pons-emit-absent").into_os_string(),
+            "the configured directory answers, because no such emitter is on the search path"
+        );
+        assert_eq!(
+            resolve_executable(name, &[]).unwrap().program,
+            name.to_owned(),
+            "with nothing configured the name is passed to the operating system as it is"
+        );
+    }
+
+    #[test]
     fn a_name_given_as_a_path_is_run_where_it_sits() {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("pons-emit-py");
         std::fs::write(&path, b"#!/bin/sh\n").unwrap();
-        let resolved = resolve_executable(OsStr::new(&path)).unwrap();
+        let resolved = resolve_executable(OsStr::new(&path), &[]).unwrap();
         assert_eq!(resolved.program, path);
         assert!(resolved.prefix.is_empty());
         assert_eq!(resolved.command("emit"), vec![OsString::from("emit")]);
@@ -658,6 +705,7 @@ mod tests {
             &ir,
             BTreeMap::new(),
             true,
+            &[],
         )
         .unwrap_err();
 
@@ -973,6 +1021,7 @@ printf '%s' '{"name":"fixture","protokl":{"min":"2.0","max":"2.0"}}'
             &document,
             BTreeMap::new(),
             false,
+            &[],
         )
         .unwrap_err();
         assert!(error.0.contains("invalid manifest"), "{}", error.0);
@@ -998,6 +1047,7 @@ printf '%s' '{"protocol":2,"coverag":{}}'
             &document,
             BTreeMap::new(),
             false,
+            &[],
         )
         .unwrap_err();
         assert!(error.0.contains("invalid response"), "{}", error.0);
@@ -1029,6 +1079,7 @@ printf '%s' '{"name":"fixture","version":"1.0.0","protocol":{"min":"2.0","max":"
             &document,
             BTreeMap::new(),
             true,
+            &[],
         )
         .unwrap_err();
         assert!(error.0.contains("does not declare opaque value support"));
@@ -1057,6 +1108,7 @@ printf '%s' '{"protocol":2,"files":[{"path":"client.ts","content":"generated"}],
             &document,
             BTreeMap::new(),
             true,
+            &[],
         )
         .unwrap_err();
         assert!(error.0.contains("missing subjects"), "{}", error.0);

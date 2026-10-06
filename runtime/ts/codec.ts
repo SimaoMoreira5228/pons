@@ -3,6 +3,8 @@ import {
   WirePolicyError,
   collectFields,
   collectMapValues,
+  fieldKey,
+  fieldOutKey,
   flattenedOpaqueSchema,
   hasOpaque,
   isFlattenedOpaque,
@@ -59,6 +61,8 @@ export function encodeWire(value: any, schema: any, opaque: OpaqueContext): any 
   }
   if (schema.kind === "opaque") return transformOpaque(value, schema, "encode", opaque);
   if (schema.kind === "bytes") return encodeBytes(value, schema.encoding);
+  if (schema.kind === "int" && schema.carrier === "string") return BigInt(value);
+  if (schema.kind === "string" && schema.carrier === "date") return value.toISOString();
   if (schema.kind === "nullable") return encodeWire(value, schema.inner, opaque);
   if (schema.kind === "array") return value.map((item: unknown) => encodeWire(item, schema.item, opaque));
   if (schema.kind === "tuple") return schema.items.map((item: unknown, index: number) => encodeWire(value[index], item, opaque));
@@ -76,6 +80,7 @@ export function decodeWire(value: any, schema: any, preserveWideIntegers = false
   if (schema?.kind === "decimal" && schema.wire === "number" && typeof value === "bigint") return Number(value);
   if (value == null || schema == null) return value;
   if (schema.kind === "int") {
+    if (schema.wire === "number" && schema.bits > 53 && schema.carrier === "string" && (typeof value === "bigint" || typeof value === "number")) return value.toString();
     if (schema.bits <= 53 && typeof value === "bigint") return Number(value);
     if (schema.wire === "number" && schema.bits > 53 && preserveWideIntegers && typeof value === "number") return BigInt(value);
   }
@@ -92,6 +97,7 @@ export function decodeWire(value: any, schema: any, preserveWideIntegers = false
   }
   if (schema.kind === "opaque") return transformOpaque(value, schema, "decode", opaque);
   if (schema.kind === "bytes") return decodeBytes(value, schema.encoding);
+  if (schema.kind === "string" && schema.carrier === "date" && typeof value === "string") return new Date(value);
   if (schema.kind === "nullable") return decodeWire(value, schema.inner, preserveWideIntegers, opaque);
   if (schema.kind === "array") return value.map((item: unknown) => decodeWire(item, schema.item, preserveWideIntegers, opaque));
   if (schema.kind === "tuple") return value.map((item: unknown, index: number) => decodeWire(value[index], item, preserveWideIntegers, opaque));
@@ -120,7 +126,8 @@ function transformStruct(value: any, definition: any, mode: "encode" | "decode",
   const declaredFields = collectFields(definition);
   const flattenedOpaque = (definition.flattened ?? []).some((item: any) => isFlattenedOpaque(item));
   const flattenedMaps = collectMapValues(definition.flattened ?? []);
-  const known = new Set(declaredFields.map((field: any) => field.wire));
+  const known = new Set(declaredFields.map((field: any) => fieldKey(field, mode)));
+  const carried = new Set(declaredFields.map((field: any) => fieldOutKey(field, mode)));
   const openness = definition.openness ?? "preserve_opaque";
   const policy = typeof openness === "string" ? openness : Object.keys(openness)[0];
   const output: Record<string, unknown> = Object.create(null);
@@ -128,16 +135,17 @@ function transformStruct(value: any, definition: any, mode: "encode" | "decode",
     if (!known.has(key)) output[key] = current[key];
   }
   for (const field of fields) {
-    if (Object.hasOwn(current, field.wire) && current[field.wire] !== undefined) {
-      output[field.wire] = !flattenedOpaque || hasOpaque(field.ty)
-        ? transform(current[field.wire], field.ty)
-        : current[field.wire];
+    const key = fieldKey(field, mode);
+    if (Object.hasOwn(current, key) && current[key] !== undefined) {
+      output[fieldOutKey(field, mode)] = !flattenedOpaque || hasOpaque(field.ty)
+        ? transform(current[key], field.ty)
+        : current[key];
     }
   }
   const additional = policy === "preserve_typed" ? opennessValue(openness.preserve_typed.value) : flattenedMaps[0];
   if (additional) {
     for (const key of Object.keys(output)) {
-      if (!known.has(key) && output[key] !== undefined) output[key] = transform(output[key], additional);
+      if (!carried.has(key) && output[key] !== undefined) output[key] = transform(output[key], additional);
     }
   }
   return output;

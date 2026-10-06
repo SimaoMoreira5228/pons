@@ -5,10 +5,10 @@ mod types;
 use std::collections::{BTreeMap, BTreeSet};
 
 use pons_ir::{
-    ApiKeyLocation, AuthScheme, Coverage, DecimalWire, Direction, Doc, Document, InlineType,
-    IntegerWire, ObjectOpenness, PathSegment, StreamKind, TypeDef, TypeKind, TypeRef,
-    VariantPayload, coverage_for_document, operation_subject, strict_violation_message,
-    type_subject,
+    ApiKeyLocation, AuthScheme, Coverage, DecimalWire, Direction, Doc, Document, Field,
+    FieldFormat, InlineType, IntegerWire, ObjectOpenness, PathSegment, StreamKind, TypeDef,
+    TypeKind, TypeRef, VariantPayload, coverage_for_document, operation_subject,
+    strict_violation_message, type_subject,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -28,16 +28,81 @@ impl std::fmt::Display for EmitError {
 
 impl std::error::Error for EmitError {}
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum EmitMode {
+    #[default]
     Strict,
     Lossy,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum ErrorStrategy {
+    #[default]
     Neverthrow,
     Throw,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum Namespaces {
+    #[default]
+    Nested,
+    Flat,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum FieldCase {
+    #[default]
+    Wire,
+    Camel,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum Newtypes {
+    #[default]
+    Alias,
+    Branded,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum Int64 {
+    #[default]
+    Bigint,
+    String,
+    Number,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum DateMode {
+    #[default]
+    String,
+    Date,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum Runtime {
+    #[default]
+    Vendor,
+    Package,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum Validation {
+    #[default]
+    None,
+    Zod,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct TsOptions {
+    pub mode: EmitMode,
+    pub errors: ErrorStrategy,
+    pub namespaces: Namespaces,
+    pub field_case: FieldCase,
+    pub newtypes: Newtypes,
+    pub int64: Int64,
+    pub date_mode: DateMode,
+    pub runtime: Runtime,
+    pub validation: Validation,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -48,11 +113,17 @@ pub struct EmitOutput {
 }
 
 pub fn emit(document: &Document) -> Result<Vec<GeneratedFile>, EmitError> {
-    emit_with_mode(document, EmitMode::Strict).map(|output| output.files)
+    emit_with_options(document, TsOptions::default()).map(|output| output.files)
 }
 
 pub fn emit_with_mode(document: &Document, mode: EmitMode) -> Result<EmitOutput, EmitError> {
-    emit_with_strategy(document, mode, ErrorStrategy::Neverthrow)
+    emit_with_options(
+        document,
+        TsOptions {
+            mode,
+            ..TsOptions::default()
+        },
+    )
 }
 
 pub fn emit_with_strategy(
@@ -60,6 +131,19 @@ pub fn emit_with_strategy(
     mode: EmitMode,
     error_strategy: ErrorStrategy,
 ) -> Result<EmitOutput, EmitError> {
+    emit_with_options(
+        document,
+        TsOptions {
+            mode,
+            errors: error_strategy,
+            ..TsOptions::default()
+        },
+    )
+}
+
+pub fn emit_with_options(document: &Document, options: TsOptions) -> Result<EmitOutput, EmitError> {
+    unbuilt_options(options)?;
+    let mode = options.mode;
     let mut document = document.clone();
     document.canonicalize();
     document.validate().map_err(|errors| {
@@ -130,8 +214,11 @@ pub fn emit_with_strategy(
             }
         }
     }
-    let mut coverage =
-        coverage_for_document(&document, mode == EmitMode::Lossy).map_err(EmitError)?;
+    let mut coverage = coverage_for_document(
+        &document,
+        mode == EmitMode::Lossy || options.int64 == Int64::Number,
+    )
+    .map_err(EmitError)?;
     let type_scan = scan_type_references(&document);
     if let Some(path) = type_scan.fractional_constraint_paths.first() {
         return Err(EmitError(format!(
@@ -152,25 +239,28 @@ pub fn emit_with_strategy(
     let decimal_paths = type_scan.decimal_paths;
     let opaque_paths = type_scan.opaque_paths;
     let wide_integers = type_scan.wide_paths;
-    let names = type_names(&document);
+    let date_only = options.date_mode == DateMode::Date && !type_scan.date_paths.is_empty();
+    if options.field_case == FieldCase::Camel {
+        camel_field_keys(&document)?;
+    }
+    let names = type_names(&document, &options);
     let preserve_wide_integers = mode == EmitMode::Strict && !wide_integers.is_empty();
     let mut files = vec![
         GeneratedFile {
             path: "types.ts".into(),
-            content: types::emit(&document, &names, mode)?,
+            content: types::emit(&document, &names, &options, date_only)?,
         },
         GeneratedFile {
             path: "errors.ts".into(),
-            content: client::error_types(error_strategy),
+            content: client::error_types(options.errors),
         },
     ];
     files.extend(runtime::files());
     files.extend(client::emit(
         &document,
         &names,
-        mode,
+        &options,
         preserve_wide_integers,
-        error_strategy,
     )?);
     files.push(client::index());
     let files = files;
@@ -203,6 +293,24 @@ pub fn emit_with_strategy(
     })
 }
 
+fn unbuilt_options(options: TsOptions) -> Result<(), EmitError> {
+    match (options.runtime, options.validation) {
+        (Runtime::Vendor, Validation::None) => Ok(()),
+        (Runtime::Package, _) => Err(EmitError(
+            "the TypeScript emitter cannot import a published runtime yet, because the emitted \
+             client vendors runtime/*.ts and naming a package is a dependency this target does \
+             not declare yet"
+                .into(),
+        )),
+        (_, Validation::Zod) => Err(EmitError(
+            "the TypeScript emitter cannot emit a schema validator yet, because the vendored \
+             runtime validates every value against the contract itself and no emitted file \
+             depends on a validator yet"
+                .into(),
+        )),
+    }
+}
+
 fn strict_coverage_error(mode: EmitMode, coverage: &Coverage) -> Result<(), EmitError> {
     match mode {
         EmitMode::Strict => strict_violation_message(coverage)
@@ -218,6 +326,7 @@ struct TypeScan {
     opaque_paths: Vec<String>,
     decimal_paths: Vec<String>,
     fractional_constraint_paths: Vec<String>,
+    date_paths: Vec<String>,
     decimal_owners: BTreeSet<String>,
     references: BTreeMap<String, Vec<String>>,
 }
@@ -483,6 +592,11 @@ fn scan_type_ref(reference: &TypeRef, path: &str, owner: &str, scan: &mut TypeSc
             scan.decimal_owners.insert(owner.to_owned());
         }
         InlineType::Opaque { .. } => scan.opaque_paths.push(path.to_owned()),
+        InlineType::String { format, .. } => {
+            if format == &Some(FieldFormat::Date) {
+                scan.date_paths.push(path.to_owned());
+            }
+        }
         InlineType::Nullable { inner } => {
             scan_type_ref(inner, &format!("{path}.inner"), owner, scan)
         }
@@ -498,6 +612,86 @@ fn scan_type_ref(reference: &TypeRef, path: &str, owner: &str, scan: &mut TypeSc
         }
         _ => {}
     }
+}
+
+fn camel_field_keys(document: &Document) -> Result<(), EmitError> {
+    for (id, definition) in &document.types {
+        collect_camel_field_keys(
+            id,
+            definition,
+            document,
+            &mut BTreeMap::new(),
+            &mut BTreeSet::new(),
+        )?;
+    }
+    Ok(())
+}
+
+fn collect_camel_field_keys(
+    id: &str,
+    definition: &TypeDef,
+    document: &Document,
+    claimed: &mut BTreeMap<String, String>,
+    visited: &mut BTreeSet<String>,
+) -> Result<(), EmitError> {
+    if !visited.insert(id.to_owned()) {
+        return Ok(());
+    }
+    match &definition.definition {
+        TypeKind::Struct {
+            fields, flattened, ..
+        } => {
+            for field in fields {
+                claim_camel_key(id, field, claimed)?;
+            }
+            for reference in flattened {
+                if let TypeRef::Named(named) = reference
+                    && let Some(flattened) = document.types.get(&named.id)
+                {
+                    collect_camel_field_keys(&named.id, flattened, document, claimed, visited)?;
+                }
+            }
+        }
+        TypeKind::Enum { variants, .. } => {
+            for variant in variants {
+                let VariantPayload::Struct { fields } = &variant.payload else {
+                    continue;
+                };
+                let mut payload_keys = BTreeMap::new();
+                for field in fields {
+                    claim_camel_key(id, field, &mut payload_keys)?;
+                }
+            }
+        }
+        TypeKind::Newtype { inner } => {
+            if let TypeRef::Named(named) = inner
+                && let Some(inner) = document.types.get(&named.id)
+            {
+                collect_camel_field_keys(&named.id, inner, document, claimed, visited)?;
+            }
+        }
+    }
+    Ok(())
+}
+
+fn claim_camel_key(
+    id: &str,
+    field: &Field,
+    claimed: &mut BTreeMap<String, String>,
+) -> Result<(), EmitError> {
+    let key = camel(&field.ident);
+    if let Some(other) = claimed.get(&key) {
+        if other != &field.wire {
+            return Err(EmitError(format!(
+                "the TypeScript emitter cannot spell the fields of the type {id} in camelCase, \
+                 because the wire names {other} and {} both spell {key} in the emitted client",
+                field.wire
+            )));
+        }
+    } else {
+        claimed.insert(key, field.wire.clone());
+    }
+    Ok(())
 }
 
 fn is_integer_number(value: &serde_json::Value) -> bool {
@@ -518,12 +712,13 @@ const RESERVED_NAMES: &[&str] = &[
     "Uint8Array",
 ];
 
-fn unique_names(bases: impl IntoIterator<Item = String>) -> Vec<String> {
+fn unique_names(bases: impl IntoIterator<Item = String>, extra: &[&str]) -> Vec<String> {
     let bases = bases.into_iter().collect::<Vec<_>>();
     let reserved = bases.iter().cloned().collect::<BTreeSet<_>>();
     let mut assigned = RESERVED_NAMES
         .iter()
         .map(|name| (*name).to_owned())
+        .chain(extra.iter().map(|name| (*name).to_owned()))
         .collect::<BTreeSet<_>>();
     let mut seen = BTreeSet::new();
     bases
@@ -546,7 +741,7 @@ fn unique_names(bases: impl IntoIterator<Item = String>) -> Vec<String> {
         .collect()
 }
 
-fn type_names(document: &Document) -> BTreeMap<String, String> {
+fn type_names(document: &Document, options: &TsOptions) -> BTreeMap<String, String> {
     let mut entries = document
         .types
         .iter()
@@ -559,7 +754,11 @@ fn type_names(document: &Document) -> BTreeMap<String, String> {
         })
         .collect::<Vec<_>>();
     entries.sort();
-    let names = unique_names(entries.iter().map(|(base, _, _)| base.clone()));
+    let reserved = match options.date_mode {
+        DateMode::String => &[][..],
+        DateMode::Date => &["DateOnly"][..],
+    };
+    let names = unique_names(entries.iter().map(|(base, _, _)| base.clone()), reserved);
     entries
         .into_iter()
         .map(|(_, _, id)| id)
@@ -612,6 +811,16 @@ fn camel(words: &[String]) -> String {
         }
     }
     identifier(&result, "operation")
+}
+
+fn is_plain_identifier(value: &str) -> bool {
+    let mut chars = value.chars();
+    chars
+        .next()
+        .is_some_and(|first| first.is_ascii_alphabetic() || first == '_' || first == '$')
+        && chars.all(|character| {
+            character.is_ascii_alphanumeric() || character == '_' || character == '$'
+        })
 }
 
 fn identifier(value: &str, fallback: &str) -> String {

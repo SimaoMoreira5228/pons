@@ -489,8 +489,6 @@ fn targets_never_claim_more_capability_than_canonical_coverage() {
 
 const BUILT_INS: [&str; 2] = ["ts", "openapi"];
 
-/// The subjects one fixture's classification puts at each level, so a row can
-/// name the whole answer rather than a difference.
 #[derive(Clone, Copy)]
 struct Levels {
     exact: &'static [&'static str],
@@ -549,8 +547,6 @@ const WIDE_INTEGER_LOSSY: Levels = Levels {
     unsupported: &[],
 };
 
-/// What every built-in target must do with a fixture: the coverage map they all
-/// report, or the refusal each one prints for a feature it cannot describe.
 #[derive(Clone, Copy)]
 enum Expected {
     Coverage(Levels),
@@ -631,7 +627,6 @@ fn every_target_classifies_every_fixture_the_same_way() {
 
         for (lossy, expected) in [(false, row.strict), (true, row.lossy)] {
             let mode = if lossy { "--lossy" } else { "--strict" };
-            // One expectation for both targets, so agreement is the assertion.
             for (index, target) in BUILT_INS.iter().enumerate() {
                 let at = format!("{} ({}) {target} {mode}", row.file, row.carries);
                 match (expected, coverage_in(target, &input, lossy)) {
@@ -859,8 +854,16 @@ fn malformed_arguments_exit_with_the_usage_code_and_a_one_line_diagnosis() {
         (vec!["fmt", "a", "b"], "fmt expects one document"),
         (vec!["diff", "a"], "diff expects two documents"),
         (
+            vec!["emit", "--target", "ts"],
+            "emit --target ts needs an IR document",
+        ),
+        (
             vec!["emit", "--target", "ts", "api.json"],
-            "emit expects --target <name> <ir.json> <output-dir>",
+            "emit --target ts needs an output directory",
+        ),
+        (
+            vec!["emit", "--target", "ts", "api.json", "out", "extra"],
+            "emit takes at most two positional arguments",
         ),
         (
             vec!["emit", "api.json", "api.json", "api.json", "out"],
@@ -1475,4 +1478,545 @@ fn emit_writes_an_openapi_31_document() {
         serde_json::from_slice(&fs::read(output_dir.join("openapi.json")).unwrap()).unwrap();
     assert_eq!(document["openapi"], "3.1.1");
     assert!(document["paths"]["/auth/login"]["post"].is_object());
+}
+
+const STUB_RESPONSE: &str = r#"{"protocol":2,"files":[{"path":"acme/__init__.py","content":"generated"}],"coverage":{"exact":["types.EventQuery","types.LoginError"],"opaque":["operations.auth.login","operations.events.watch","types.LoginRequest","types.User"],"lossy":[],"unsupported":[]}}"#;
+
+#[cfg(target_os = "linux")]
+fn stub_manifest(option_schema: &str) -> String {
+    let mut manifest = String::from(
+        r#"{"name":"python","version":"1.0.0","protocol":{"min":"2.0","max":"2.0"},"ir_version":{"min":"0.2","max":"0.2"},"capabilities":{"streaming":["sse"],"enum_reprs":["string","external","internal","adjacent","untagged"],"direction_split":true,"provides":true,"custom_auth":true,"flattened":true,"wide_integers":true,"opaque":true,"object_openness":["reject","preserve_typed","preserve_opaque"]}"#,
+    );
+    if !option_schema.is_empty() {
+        manifest.push_str(",\"option_schema\":");
+        manifest.push_str(option_schema);
+    }
+    manifest.push('}');
+    manifest
+}
+
+#[cfg(target_os = "linux")]
+fn stub(bin: &Path, target: &str, manifest: &str) -> PathBuf {
+    use std::os::unix::fs::PermissionsExt;
+
+    fs::create_dir_all(bin).unwrap();
+    let path = bin.join(format!("pons-emit-{target}"));
+    fs::write(
+        &path,
+        format!(
+            "#!/bin/sh\nif [ \"$1\" = describe ]; then\n  printf '%s' '{manifest}'\nelif [ \"$1\" = emit ]; then\n  cat > \"$PONS_REQUEST\"\n  printf '%s' '{STUB_RESPONSE}'\nfi\n"
+        ),
+    )
+    .unwrap();
+    fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
+    path
+}
+
+#[cfg(target_os = "linux")]
+fn on_path(bin: &Path) -> std::ffi::OsString {
+    std::env::join_paths(
+        std::iter::once(bin.to_path_buf()).chain(std::env::split_paths(
+            &std::env::var_os("PATH").unwrap_or_default(),
+        )),
+    )
+    .unwrap()
+}
+
+#[test]
+fn a_config_file_supplies_the_document_and_the_output_directory() {
+    let directory = tempfile::tempdir().unwrap();
+    fs::write(directory.path().join("api.json"), FIXTURE).unwrap();
+    fs::write(
+        directory.path().join("pons.toml"),
+        "[project]\nir = \"api.json\"\n\n[emit.ts]\nout_dir = \"generated\"\n",
+    )
+    .unwrap();
+
+    let output = pons()
+        .args(["emit", "--target", "ts"])
+        .current_dir(directory.path())
+        .output()
+        .unwrap();
+
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(directory.path().join("generated/types.ts").exists());
+    assert!(
+        String::from_utf8_lossy(&output.stderr).is_empty(),
+        "a config file that supplies everything says nothing"
+    );
+}
+
+#[test]
+fn a_config_file_is_found_from_the_working_directory_and_from_the_document() {
+    let directory = tempfile::tempdir().unwrap();
+    let nested = directory.path().join("contract");
+    fs::create_dir(&nested).unwrap();
+    fs::write(nested.join("api.json"), FIXTURE).unwrap();
+    fs::write(
+        directory.path().join("pons.toml"),
+        "[project]\nir = \"contract/api.json\"\n\n[emit.ts]\nout_dir = \"generated\"\n",
+    )
+    .unwrap();
+
+    let output = pons()
+        .args(["emit", "--target", "ts", "api.json"])
+        .current_dir(&nested)
+        .output()
+        .unwrap();
+
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        directory.path().join("generated/types.ts").exists(),
+        "the paths in the file are relative to the file, so a subdirectory emits the same tree"
+    );
+}
+
+#[test]
+fn the_typescript_options_reach_the_built_in_target() {
+    let directory = tempfile::tempdir().unwrap();
+    let mut contract: Value = serde_json::from_str(FIXTURE).unwrap();
+    contract["types"]["User"]["fields"][0]["wire"] = serde_json::json!("user_id");
+    contract["types"]["User"]["fields"][0]["ident"] = serde_json::json!(["user", "id"]);
+    fs::write(directory.path().join("api.json"), contract.to_string()).unwrap();
+    fs::write(
+        directory.path().join("pons.toml"),
+        "[emit.ts]\nout_dir = \"generated\"\nfield_case = \"camel\"\nnamespaces = \"flat\"\n",
+    )
+    .unwrap();
+
+    let output = pons()
+        .args(["emit", "--target", "ts", "api.json"])
+        .current_dir(directory.path())
+        .output()
+        .unwrap();
+
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let types = fs::read_to_string(directory.path().join("generated/types.ts")).unwrap();
+    assert!(
+        types.contains("\"userId\": string"),
+        "the camel spelling is the caller's key and the wire name is untouched: {types}"
+    );
+    assert!(
+        directory
+            .path()
+            .join("generated/operations/auth.login.ts")
+            .exists(),
+        "a flat member is the whole id joined by dots"
+    );
+    assert!(!directory.path().join("generated/operations/auth").exists());
+}
+
+#[test]
+fn a_typescript_option_the_emitter_has_not_built_is_refused_by_name() {
+    for (option, value, refusal) in [
+        (
+            "runtime",
+            "package",
+            "cannot import a published runtime yet",
+        ),
+        ("validation", "zod", "cannot emit a schema validator yet"),
+    ] {
+        let directory = tempfile::tempdir().unwrap();
+        fs::write(directory.path().join("api.json"), FIXTURE).unwrap();
+        fs::write(
+            directory.path().join("pons.toml"),
+            format!("[emit.ts]\nout_dir = \"generated\"\n{option} = \"{value}\"\n"),
+        )
+        .unwrap();
+
+        let output = pons()
+            .args(["emit", "--target", "ts", "api.json"])
+            .current_dir(directory.path())
+            .output()
+            .unwrap();
+
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(!output.status.success(), "{option} = {value:?}: {stderr}");
+        assert!(stderr.contains(refusal), "{option} = {value:?}: {stderr}");
+        assert!(
+            !directory.path().join("generated").exists(),
+            "{option} = {value:?} wrote output"
+        );
+    }
+}
+
+#[test]
+fn a_misspelled_option_names_the_file_the_table_and_the_key() {
+    for (source, expected) in [
+        (
+            "[project]\nir = \"api.json\"\n\n[emit.ts]\nout_dir = \"generated\"\nfieldcase = \"camel\"\n",
+            ": [emit.ts] has no key \"fieldcase\"; it is mode, errors, namespaces, field_case, newtypes, int64, date_mode, runtime, validation, out_dir",
+        ),
+        (
+            "[emit.ts]\nout_dir = \"generated\"\nfield_case = \"Camel\"\n",
+            ": [emit.ts] field_case is \"Camel\"; it is wire or camel",
+        ),
+        (
+            "[emit.openapi]\nfield_case = \"camel\"\n",
+            ": [emit.openapi] has no key \"field_case\"; it is mode, out_dir",
+        ),
+        (
+            "[project]\nout_dir = \"generated\"\n",
+            ": [project] has no key \"out_dir\"; it is ir",
+        ),
+        (
+            "[emmit.ts]\nout_dir = \"generated\"\n",
+            ": has no key \"emmit\"; it is emit, plugins, project",
+        ),
+    ] {
+        let directory = tempfile::tempdir().unwrap();
+        fs::write(directory.path().join("api.json"), FIXTURE).unwrap();
+        fs::write(directory.path().join("pons.toml"), source).unwrap();
+
+        let output = pons()
+            .args(["emit", "--target", "ts", "api.json"])
+            .current_dir(directory.path())
+            .output()
+            .unwrap();
+
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert_eq!(output.status.code(), Some(4), "{source}: {stderr}");
+        assert!(
+            stderr.contains("pons.toml") && stderr.contains(expected),
+            "{source}: {stderr}"
+        );
+        assert!(!directory.path().join("generated").exists(), "{source}");
+    }
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn an_external_target_takes_its_options_from_the_file_and_puts_them_on_the_wire() {
+    let directory = tempfile::tempdir().unwrap();
+    let bin = directory.path().join("bin");
+    stub(&bin, "python", &stub_manifest(""));
+    stub(
+        &directory.path().join("tools"),
+        "python",
+        &stub_manifest(r#"{"options":{"package":{"type":"string"},"timeout":{"type":"integer"}}}"#),
+    );
+    fs::create_dir_all(directory.path().join("contract")).unwrap();
+    fs::write(directory.path().join("contract/api.json"), FIXTURE).unwrap();
+    fs::write(
+        directory.path().join("pons.toml"),
+        "[project]\nir = \"contract/api.json\"\n\n[emit.python]\nout_dir = \"generated\"\npackage = \"acme-sdk\"\ntimeout = 30\n\n[plugins]\nsearch = [\"tools\"]\n",
+    )
+    .unwrap();
+    let ran = directory.path().join("ran.json");
+
+    let output = pons()
+        .args(["emit", "--target", "python"])
+        .current_dir(directory.path())
+        .env("PATH", on_path(&bin))
+        .env("PONS_REQUEST", &ran)
+        .output()
+        .unwrap();
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(output.status.success(), "{stderr}");
+    assert!(
+        ran.exists(),
+        "the emitter in the search path answered, not the one on PATH"
+    );
+    let sent: Value = serde_json::from_slice(&fs::read(&ran).unwrap()).unwrap();
+    assert_eq!(
+        sent["options"],
+        serde_json::json!({ "package": "acme-sdk", "timeout": 30 }),
+        "the table reaches the emitter, and the cli's own keys do not"
+    );
+    assert_eq!(sent["target"], "python");
+    assert_eq!(sent["mode"], "strict");
+    assert_eq!(sent["protocol"], 2);
+    assert!(directory.path().join("generated/acme/__init__.py").exists());
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn an_option_the_emitter_does_not_declare_fails_the_command_before_it_runs() {
+    let directory = tempfile::tempdir().unwrap();
+    let bin = directory.path().join("bin");
+    stub(
+        &bin,
+        "python",
+        &stub_manifest(
+            r#"{"options":{"package":{"type":"string","required":true},"timeout":{"type":"integer"},"retries":{"type":"array"},"strict_package":{"type":"boolean"}}}"#,
+        ),
+    );
+    fs::write(directory.path().join("api.json"), FIXTURE).unwrap();
+    let request = directory.path().join("request.json");
+
+    for (table, expected) in [
+        (
+            "out_dir = \"generated\"\npackage = \"acme\"\nverboze = true\n",
+            "option \"verboze\" is not one of the options python declares: package, retries, strict_package, timeout",
+        ),
+        (
+            "out_dir = \"generated\"\n",
+            "option \"package\" is required by python",
+        ),
+        (
+            "out_dir = \"generated\"\npackage = \"acme\"\ntimeout = \"30\"\n",
+            "option \"timeout\" is a string, but python declares it as an integer",
+        ),
+        (
+            "out_dir = \"generated\"\npackage = \"acme\"\nretries = \"three\"\n",
+            "option \"retries\" is a string, but python declares it as an array",
+        ),
+    ] {
+        let _ = fs::remove_file(&request);
+        fs::write(
+            directory.path().join("pons.toml"),
+            format!("[emit.python]\n{table}"),
+        )
+        .unwrap();
+
+        let output = pons()
+            .args(["emit", "--target", "python", "api.json", "generated"])
+            .current_dir(directory.path())
+            .env("PATH", on_path(&bin))
+            .env("PONS_REQUEST", &request)
+            .output()
+            .unwrap();
+
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(!output.status.success(), "{table}: {stderr}");
+        assert_eq!(stderr.trim(), format!("pons: {expected}"), "{table}");
+        assert!(!request.exists(), "{table}: emit ran anyway");
+        assert!(!directory.path().join("generated").exists(), "{table}");
+    }
+
+    let _ = fs::remove_file(directory.path().join("pons.toml"));
+    fs::write(
+        directory.path().join("pons.toml"),
+        "[emit.python]\nout_dir = \"generated\"\npackage = \"acme\"\nstrict_package = true\nretries = [1, 2]\n",
+    )
+    .unwrap();
+    let output = pons()
+        .args(["emit", "--target", "python", "api.json"])
+        .current_dir(directory.path())
+        .env("PATH", on_path(&bin))
+        .env("PONS_REQUEST", &request)
+        .output()
+        .unwrap();
+
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let sent: Value = serde_json::from_slice(&fs::read(&request).unwrap()).unwrap();
+    assert_eq!(
+        sent["options"],
+        serde_json::json!({ "package": "acme", "retries": [1, 2], "strict_package": true })
+    );
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn an_emitter_with_no_option_schema_takes_an_empty_options_object() {
+    let directory = tempfile::tempdir().unwrap();
+    let bin = directory.path().join("bin");
+    stub(&bin, "python", &stub_manifest(""));
+    fs::write(directory.path().join("api.json"), FIXTURE).unwrap();
+    fs::write(
+        directory.path().join("pons.toml"),
+        "[emit.python]\nout_dir = \"generated\"\npackage = \"acme-sdk\"\n",
+    )
+    .unwrap();
+    let request = directory.path().join("request.json");
+
+    let output = pons()
+        .args(["emit", "--target", "python", "api.json"])
+        .current_dir(directory.path())
+        .env("PATH", on_path(&bin))
+        .env("PONS_REQUEST", &request)
+        .output()
+        .unwrap();
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(
+        stderr.trim(),
+        "pons: python declares no options, so it takes an empty options object; \"package\" was given"
+    );
+    assert!(!request.exists(), "emit ran anyway");
+
+    fs::write(
+        directory.path().join("pons.toml"),
+        "[emit.python]\nout_dir = \"generated\"\n",
+    )
+    .unwrap();
+    let output = pons()
+        .args(["emit", "--target", "python", "api.json"])
+        .current_dir(directory.path())
+        .env("PATH", on_path(&bin))
+        .env("PONS_REQUEST", &request)
+        .output()
+        .unwrap();
+
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let sent: Value = serde_json::from_slice(&fs::read(&request).unwrap()).unwrap();
+    assert_eq!(sent["options"], serde_json::json!({}));
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn dump_request_writes_the_request_and_runs_no_emitter() {
+    let directory = tempfile::tempdir().unwrap();
+    let bin = directory.path().join("bin");
+    stub(
+        &bin,
+        "python",
+        &stub_manifest(r#"{"options":{"package":{"type":"string"}}}"#),
+    );
+    fs::write(directory.path().join("api.json"), FIXTURE).unwrap();
+    fs::write(
+        directory.path().join("pons.toml"),
+        "[emit.python]\nout_dir = \"generated\"\npackage = \"acme-sdk\"\n",
+    )
+    .unwrap();
+    let request = directory.path().join("build/request.json");
+    let ran = directory.path().join("ran.json");
+
+    let output = pons()
+        .args([
+            "emit",
+            "--target",
+            "python",
+            "api.json",
+            "--dump-request",
+            "build/request.json",
+        ])
+        .current_dir(directory.path())
+        .env("PATH", on_path(&bin))
+        .env("PONS_REQUEST", &ran)
+        .output()
+        .unwrap();
+
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(!ran.exists(), "no emitter ran");
+    assert!(!directory.path().join("generated").exists(), "no emit ran");
+    let dumped = fs::read_to_string(&request).unwrap();
+    assert!(
+        dumped.ends_with('\n'),
+        "a file a human reads ends in a newline"
+    );
+    let sent: Value = serde_json::from_str(&dumped).unwrap();
+    assert_eq!(sent["target"], "python");
+    assert_eq!(
+        sent["options"],
+        serde_json::json!({ "package": "acme-sdk" })
+    );
+    assert_eq!(sent["protocol"], 2);
+    assert_eq!(sent["mode"], "strict");
+
+    let mut expected: pons_ir::Document = serde_json::from_str(FIXTURE).unwrap();
+    expected.canonicalize();
+    let document: pons_ir::Document = serde_json::from_value(sent["ir"].clone()).unwrap();
+    assert_eq!(document, expected, "the dumped ir is the canonical one");
+}
+
+#[test]
+fn dump_request_reports_the_options_a_built_in_target_will_run_with() {
+    let directory = tempfile::tempdir().unwrap();
+    fs::write(directory.path().join("api.json"), FIXTURE).unwrap();
+    fs::write(
+        directory.path().join("pons.toml"),
+        "[emit.ts]\nout_dir = \"generated\"\nfield_case = \"camel\"\nint64 = \"string\"\n",
+    )
+    .unwrap();
+
+    let output = pons()
+        .args([
+            "emit",
+            "--target",
+            "ts",
+            "api.json",
+            "--dump-request",
+            "request.json",
+            "--lossy",
+        ])
+        .current_dir(directory.path())
+        .output()
+        .unwrap();
+
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let sent: Value =
+        serde_json::from_str(&fs::read_to_string(directory.path().join("request.json")).unwrap())
+            .unwrap();
+    assert_eq!(sent["mode"], "lossy");
+    assert_eq!(sent["options"]["field_case"], "camel");
+    assert_eq!(sent["options"]["int64"], "string");
+    assert_eq!(
+        sent["options"]["mode"], "lossy",
+        "a flag is in the dump too"
+    );
+    assert!(!directory.path().join("generated").exists(), "no emit ran");
+}
+
+#[test]
+fn dump_request_refuses_a_path_the_emitter_output_rules_refuse() {
+    let directory = tempfile::tempdir().unwrap();
+    fs::write(directory.path().join("api.json"), FIXTURE).unwrap();
+    fs::write(
+        directory.path().join("pons.toml"),
+        "[emit.ts]\nout_dir = \"generated\"\n",
+    )
+    .unwrap();
+
+    for path in [
+        "../escape.json",
+        "sub/../out.json",
+        "sub/CON.json",
+        "nul.json",
+        "a:b.json",
+        "com1.json",
+        "/tmp/pons-dump.json",
+        "",
+    ] {
+        let output = pons()
+            .args(["emit", "--target", "ts", "api.json", "--dump-request", path])
+            .current_dir(directory.path())
+            .output()
+            .unwrap();
+
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(!output.status.success(), "{path:?}: {stderr}");
+        assert!(
+            stderr.contains("dump-request path is not a safe relative path"),
+            "{path:?}: {stderr}"
+        );
+        assert!(!directory.path().join("generated").exists(), "{path:?}");
+    }
+    assert!(
+        !directory
+            .path()
+            .parent()
+            .unwrap()
+            .join("escape.json")
+            .exists()
+    );
 }

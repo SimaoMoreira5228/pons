@@ -1,14 +1,13 @@
-use std::collections::BTreeMap;
 use std::ffi::OsString;
 use std::fs;
 use std::io::Write;
 use std::path::{Component, Path};
 
-use pons_emit_ts::ErrorStrategy;
 use pons_ir::Document;
-use pons_plugin::{DiagnosticSeverity, PluginDiagnostic};
+use pons_plugin::{DiagnosticSeverity, EmitRequest, PROTOCOL_VERSION, PluginDiagnostic, log_tail};
 
 use crate::CliError;
+use crate::options::{Built, Resolved};
 
 struct OutputFile {
     path: String,
@@ -16,13 +15,12 @@ struct OutputFile {
 }
 
 pub(super) fn run(
-    target: &str,
+    resolved: &Resolved,
     document: &Document,
-    output: &Path,
     coverage_path: Option<&Path>,
-    strict: bool,
-    error_strategy: ErrorStrategy,
+    dump_request: Option<&Path>,
 ) -> Result<(), CliError> {
+    let target = resolved.target.as_str();
     if target.is_empty()
         || !target
             .bytes()
@@ -32,82 +30,88 @@ pub(super) fn run(
             "invalid emitter target {target:?}"
         )));
     }
+    if let Some(path) = dump_request {
+        return dump(path, resolved, document);
+    }
 
-    let (mut files, coverage, diagnostics, warnings, logs) = if target == "ts" {
-        let output = pons_emit_ts::emit_with_strategy(
-            document,
-            if strict {
-                pons_emit_ts::EmitMode::Strict
-            } else {
-                pons_emit_ts::EmitMode::Lossy
-            },
-            error_strategy,
-        )
-        .map_err(|error| CliError::Failure(error.to_string()))?;
-        let files = output
-            .files
-            .into_iter()
-            .map(|file| OutputFile {
-                path: file.path,
-                content: file.content,
-            })
-            .collect();
-        (
-            files,
-            Some(output.coverage),
-            Vec::new(),
-            output.warnings,
-            Vec::new(),
-        )
-    } else if target == "openapi" {
-        let output = pons_emit_openapi::emit_with_mode(
-            document,
-            if strict {
-                pons_emit_openapi::EmitMode::Strict
-            } else {
-                pons_emit_openapi::EmitMode::Lossy
-            },
-        )
-        .map_err(|error| CliError::Failure(error.to_string()))?;
-        (
-            vec![OutputFile {
-                path: "openapi.json".into(),
-                content: output.content,
-            }],
-            Some(output.coverage),
-            Vec::new(),
-            output.warnings,
-            Vec::new(),
-        )
-    } else {
-        let mut executable = OsString::from("pons-emit-");
-        executable.push(target);
-        let result = pons_plugin::invoke(&executable, target, document, BTreeMap::new(), strict)
-            .map_err(|error| CliError::Failure(error.to_string()))?;
-        let coverage = result.response.coverage.clone();
-        let files = result
-            .response
-            .files
-            .into_iter()
-            .map(|file| OutputFile {
-                path: file.path,
-                content: file.content,
-            })
-            .collect();
-        let mut warnings = result.capability_warnings;
-        if !strict {
-            warnings.extend(coverage_warnings(target, coverage.as_ref()));
+    let (mut files, coverage, diagnostics, warnings, logs) = match &resolved.built {
+        Built::Ts(options) => {
+            let output = pons_emit_ts::emit_with_options(document, *options)
+                .map_err(|error| CliError::Failure(error.to_string()))?;
+            let files = output
+                .files
+                .into_iter()
+                .map(|file| OutputFile {
+                    path: file.path,
+                    content: file.content,
+                })
+                .collect();
+            (
+                files,
+                Some(output.coverage),
+                Vec::new(),
+                output.warnings,
+                Vec::new(),
+            )
         }
-        (
-            files,
-            coverage,
-            result.response.diagnostics,
-            warnings,
-            result.logs,
-        )
+        Built::OpenApi => {
+            let output = pons_emit_openapi::emit_with_mode(
+                document,
+                if resolved.strict() {
+                    pons_emit_openapi::EmitMode::Strict
+                } else {
+                    pons_emit_openapi::EmitMode::Lossy
+                },
+            )
+            .map_err(|error| CliError::Failure(error.to_string()))?;
+            (
+                vec![OutputFile {
+                    path: "openapi.json".into(),
+                    content: output.content,
+                }],
+                Some(output.coverage),
+                Vec::new(),
+                output.warnings,
+                Vec::new(),
+            )
+        }
+        Built::External(options) => {
+            let mut executable = OsString::from("pons-emit-");
+            executable.push(target);
+            let result = pons_plugin::invoke(
+                &executable,
+                target,
+                document,
+                options.clone(),
+                resolved.strict(),
+                &resolved.search,
+            )
+            .map_err(|error| CliError::Failure(error.to_string()))?;
+            let coverage = result.response.coverage.clone();
+            let files = result
+                .response
+                .files
+                .into_iter()
+                .map(|file| OutputFile {
+                    path: file.path,
+                    content: file.content,
+                })
+                .collect();
+            let mut warnings = result.capability_warnings;
+            if !resolved.strict() {
+                warnings.extend(coverage_warnings(target, coverage.as_ref()));
+            }
+            (
+                files,
+                coverage,
+                result.response.diagnostics,
+                warnings,
+                result.logs,
+            )
+        }
     };
 
-    eprint!("{}", pons_plugin::log_tail(&String::from_utf8_lossy(&logs)));
+    eprint!("{}", log_tail(&String::from_utf8_lossy(&logs)));
     for warning in warnings {
         eprintln!("warning: {warning}");
     }
@@ -145,7 +149,49 @@ pub(super) fn run(
             content,
         });
     }
-    write_files(output, files)
+    write_files(&resolved.out_dir, files)
+}
+
+fn dump(path: &Path, resolved: &Resolved, document: &Document) -> Result<(), CliError> {
+    let relative = path
+        .to_str()
+        .ok_or_else(|| CliError::Failure("dump-request path is not valid UTF-8".into()))?;
+    if !safe_relative_path(relative) {
+        return Err(CliError::Failure(format!(
+            "dump-request path is not a safe relative path: {relative}"
+        )));
+    }
+    let mut canonical = document.clone();
+    canonical.canonicalize();
+    canonical.validate().map_err(|errors| {
+        CliError::Failure(
+            errors
+                .iter()
+                .map(ToString::to_string)
+                .collect::<Vec<_>>()
+                .join("\n"),
+        )
+    })?;
+    let request = EmitRequest {
+        protocol: PROTOCOL_VERSION,
+        mode: resolved.mode,
+        ir: &canonical,
+        options: resolved.wire_options(),
+        target: &resolved.target,
+    };
+    let mut content = serde_json::to_string_pretty(&request).map_err(|error| {
+        CliError::Failure(format!("cannot serialize the emit request: {error}"))
+    })?;
+    content.push('\n');
+    let parent = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or(Path::new("."));
+    fs::create_dir_all(parent).map_err(|error| {
+        CliError::Failure(format!("cannot create {}: {error}", parent.display()))
+    })?;
+    fs::write(path, content)
+        .map_err(|error| CliError::Failure(format!("cannot write {}: {error}", path.display())))
 }
 
 fn coverage_warnings(target: &str, coverage: Option<&pons_plugin::Coverage>) -> Vec<String> {

@@ -30,6 +30,35 @@ pub struct EmitterManifest {
     pub ir_version: VersionRange,
     #[serde(default)]
     pub capabilities: EmitterCapabilities,
+    #[serde(default)]
+    pub option_schema: Option<OptionSchema>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct OptionSchema {
+    #[serde(default)]
+    pub options: BTreeMap<String, OptionSpec>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct OptionSpec {
+    #[serde(rename = "type")]
+    pub kind: OptionKind,
+    #[serde(default)]
+    pub required: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum OptionKind {
+    String,
+    Boolean,
+    Integer,
+    Number,
+    Array,
+    Object,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -152,6 +181,47 @@ impl EmitterManifest {
             ),
         ] {
             validate_capability_list(list, values, allowed)?;
+        }
+        Ok(())
+    }
+
+    pub fn validate_options(&self, options: &BTreeMap<String, Value>) -> Result<(), String> {
+        let Some(schema) = &self.option_schema else {
+            if let Some(key) = options.keys().next() {
+                return Err(format!(
+                    "{} declares no options, so it takes an empty options object; {key:?} was \
+                     given",
+                    self.name
+                ));
+            }
+            return Ok(());
+        };
+        for (key, spec) in &schema.options {
+            if spec.required && !options.contains_key(key) {
+                return Err(format!("option {key:?} is required by {}", self.name));
+            }
+        }
+        for (key, value) in options {
+            let Some(spec) = schema.options.get(key) else {
+                return Err(format!(
+                    "option {key:?} is not one of the options {} declares: {}",
+                    self.name,
+                    schema
+                        .options
+                        .keys()
+                        .cloned()
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                ));
+            };
+            if !spec.accepts(value) {
+                return Err(format!(
+                    "option {key:?} is {}, but {} declares it as {}",
+                    json_kind(value),
+                    self.name,
+                    spec.kind.as_str()
+                ));
+            }
         }
         Ok(())
     }
@@ -279,6 +349,43 @@ impl EmitterManifest {
             }
         }
         warnings
+    }
+}
+
+impl OptionKind {
+    fn as_str(self) -> &'static str {
+        match self {
+            OptionKind::String => "a string",
+            OptionKind::Boolean => "a boolean",
+            OptionKind::Integer => "an integer",
+            OptionKind::Number => "a number",
+            OptionKind::Array => "an array",
+            OptionKind::Object => "an object",
+        }
+    }
+}
+
+impl OptionSpec {
+    fn accepts(&self, value: &Value) -> bool {
+        match self.kind {
+            OptionKind::String => value.is_string(),
+            OptionKind::Boolean => value.is_boolean(),
+            OptionKind::Integer => value.is_i64() || value.is_u64(),
+            OptionKind::Number => value.is_number(),
+            OptionKind::Array => value.is_array(),
+            OptionKind::Object => value.is_object(),
+        }
+    }
+}
+
+fn json_kind(value: &Value) -> &'static str {
+    match value {
+        Value::Null => "null",
+        Value::Bool(_) => "a boolean",
+        Value::Number(_) => "a number",
+        Value::String(_) => "a string",
+        Value::Array(_) => "an array",
+        Value::Object(_) => "an object",
     }
 }
 
@@ -492,6 +599,7 @@ mod tests {
                 max: "0.2".into(),
             },
             capabilities: EmitterCapabilities::default(),
+            option_schema: None,
         }
     }
 
@@ -775,6 +883,178 @@ mod tests {
         };
         let value = serde_json::to_value(request).unwrap();
         assert_eq!(value["mode"], "lossy");
+    }
+
+    fn options(source: &str) -> BTreeMap<String, Value> {
+        match serde_json::from_str(source) {
+            Ok(options) => options,
+            Err(error) => panic!("{source}: {error}"),
+        }
+    }
+
+    fn schema(source: &str) -> EmitterManifest {
+        let mut manifest = manifest();
+        manifest.option_schema = match serde_json::from_str(source) {
+            Ok(schema) => Some(schema),
+            Err(error) => panic!("{source}: {error}"),
+        };
+        manifest
+    }
+
+    #[test]
+    fn an_option_the_manifest_does_not_declare_is_refused() {
+        let declared = schema(
+            r#"{"options":{"package":{"type":"string","required":true},"retries":{"type":"array"}}}"#,
+        );
+        assert!(
+            declared
+                .validate_options(&options(r#"{"package": "acme"}"#))
+                .is_ok()
+        );
+        assert_eq!(
+            declared
+                .validate_options(&options(r#"{"package": "acme", "verboze": true}"#))
+                .unwrap_err(),
+            "option \"verboze\" is not one of the options fixture declares: package, retries"
+        );
+        assert_eq!(
+            declared
+                .validate_options(&options(r#"{"retries": []}"#))
+                .unwrap_err(),
+            "option \"package\" is required by fixture",
+            "a required option is missing"
+        );
+        assert_eq!(
+            declared
+                .validate_options(&options(r#"{"package": 3}"#))
+                .unwrap_err(),
+            "option \"package\" is a number, but fixture declares it as a string"
+        );
+    }
+
+    #[test]
+    fn every_declared_json_type_is_held_to_its_own() {
+        let declared = schema(
+            r#"{"options":{"package":{"type":"string"},"retries":{"type":"array"},"attempts":{"type":"integer"},"ratio":{"type":"number"},"on":{"type":"boolean"},"settings":{"type":"object"}}}"#,
+        );
+        for (key, kind) in [
+            ("package", "string"),
+            ("retries", "array"),
+            ("attempts", "integer"),
+            ("ratio", "number"),
+            ("on", "boolean"),
+            ("settings", "object"),
+        ] {
+            assert!(
+                declared
+                    .validate_options(&options(&format!(r#"{{"{key}": null}}"#)))
+                    .is_err(),
+                "null is not a {kind}"
+            );
+        }
+        assert!(
+            declared
+                .validate_options(&options(r#"{"attempts": 3}"#))
+                .is_ok()
+        );
+        assert!(
+            declared
+                .validate_options(&options(r#"{"ratio": 3}"#))
+                .is_ok()
+        );
+        assert!(
+            declared
+                .validate_options(&options(r#"{"ratio": 1.5}"#))
+                .is_ok(),
+            "an integer is a number"
+        );
+        assert!(
+            declared
+                .validate_options(&options(r#"{"attempts": 1.5}"#))
+                .is_err()
+        );
+        assert!(
+            declared
+                .validate_options(&options(r#"{"attempts": "3"}"#))
+                .is_err()
+        );
+        assert_eq!(
+            declared
+                .validate_options(&options(r#"{"retries": "three"}"#))
+                .unwrap_err(),
+            "option \"retries\" is a string, but fixture declares it as an array"
+        );
+    }
+
+    #[test]
+    fn a_manifest_with_no_option_schema_takes_an_empty_options_object() {
+        let plain = manifest();
+        assert!(plain.validate_options(&BTreeMap::new()).is_ok());
+        assert_eq!(
+            plain
+                .validate_options(&options(r#"{"package": "acme"}"#))
+                .unwrap_err(),
+            "fixture declares no options, so it takes an empty options object; \"package\" was \
+             given"
+        );
+    }
+
+    #[test]
+    fn an_option_schema_is_read_the_way_the_manifest_is() {
+        let declared: EmitterManifest = serde_json::from_value(serde_json::json!({
+            "name": "python",
+            "version": "1.0.0",
+            "protocol": { "min": "2.0", "max": "2.0" },
+            "ir_version": { "min": "0.2", "max": "0.2" },
+            "option_schema": { "options": { "package": { "type": "string" } } }
+        }))
+        .unwrap();
+        assert!(
+            declared
+                .validate_options(&options(r#"{"package": "acme"}"#))
+                .is_ok()
+        );
+        assert!(
+            declared
+                .validate_options(&options(r#"{"package": 3}"#))
+                .is_err()
+        );
+
+        for (source, expected) in [
+            (
+                serde_json::json!({ "option_schema": { "option": {} } }),
+                "unknown field `option`",
+            ),
+            (
+                serde_json::json!({
+                    "option_schema": { "options": { "package": { "type": "string", "reqired": true } } }
+                }),
+                "unknown field `reqired`",
+            ),
+            (
+                serde_json::json!({
+                    "option_schema": { "options": { "package": { "kind": "string" } } }
+                }),
+                "unknown field `kind`",
+            ),
+            (
+                serde_json::json!({
+                    "option_schema": { "options": { "package": { "type": "text" } } }
+                }),
+                "unknown variant `text`",
+            ),
+        ] {
+            let mut value = serde_json::to_value(manifest()).unwrap();
+            value["protocol"] = serde_json::json!({ "min": "2.0", "max": "2.0" });
+            for (key, replacement) in source.as_object().unwrap() {
+                value[key] = replacement.clone();
+            }
+            let error = match serde_json::from_value::<EmitterManifest>(value) {
+                Ok(manifest) => panic!("{source} must be refused, got {manifest:?}"),
+                Err(error) => error.to_string(),
+            };
+            assert!(error.contains(expected), "{error}");
+        }
     }
 
     #[test]

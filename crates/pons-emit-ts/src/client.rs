@@ -7,8 +7,8 @@ use pons_ir::{
 };
 
 use crate::{
-    EmitError, EmitMode, ErrorStrategy, GeneratedFile, camel, jsdoc, pascal, string, types,
-    union_type, unique_names,
+    DateMode, EmitError, EmitMode, ErrorStrategy, GeneratedFile, Int64, Namespaces, TsOptions,
+    camel, identifier, is_plain_identifier, jsdoc, pascal, string, types, union_type, unique_names,
 };
 
 #[derive(Default)]
@@ -75,7 +75,7 @@ fn operation_type_names(document: &Document) -> Vec<Vec<String>> {
             candidates.push(format!("{name}StreamError"));
         }
     }
-    let mut names = unique_names(candidates).into_iter();
+    let mut names = unique_names(candidates, &[]).into_iter();
     stream_operations
         .into_iter()
         .map(|stream| {
@@ -113,11 +113,10 @@ pub(super) fn index() -> GeneratedFile {
 pub(super) fn emit(
     document: &Document,
     names: &BTreeMap<String, String>,
-    mode: EmitMode,
+    options: &TsOptions,
     preserve_wide_integers: bool,
-    error_strategy: ErrorStrategy,
 ) -> Result<Vec<GeneratedFile>, EmitError> {
-    let opaque_required = mode == EmitMode::Strict && document.has_reachable_opaque();
+    let opaque_required = options.mode == EmitMode::Strict && document.has_reachable_opaque();
     let mut namespaces: BTreeMap<String, Namespace> = BTreeMap::new();
     let operation_names = operation_type_names(document);
     for (operation, declaration_names) in document.operations.iter().zip(operation_names) {
@@ -126,23 +125,36 @@ pub(super) fn emit(
             &declaration_names,
             document,
             names,
-            mode,
+            options,
             preserve_wide_integers,
-            error_strategy,
         )?;
         let (parents, leaf) = operation
             .id
             .split_last()
             .map(|(leaf, parents)| (parents, camel(leaf)))
             .ok_or_else(|| EmitError("operation id cannot be empty".into()))?;
-        let (member, rest) = match parents.split_first() {
-            Some((parent, rest)) => (camel(parent), rest),
-            None => (leaf.clone(), &[][..]),
+        let (member, rest) = match options.namespaces {
+            Namespaces::Nested => match parents.split_first() {
+                Some((parent, rest)) => (camel(parent), rest),
+                None => (leaf.clone(), &[][..]),
+            },
+            Namespaces::Flat => (
+                operation
+                    .id
+                    .iter()
+                    .map(|segment| camel(segment))
+                    .collect::<Vec<_>>()
+                    .join("."),
+                &[][..],
+            ),
         };
         let namespace = namespaces.entry(member.clone()).or_default();
+        if options.namespaces == Namespaces::Flat && !namespace.declarations.is_empty() {
+            return Err(EmitError(format!("client member collision at {member}")));
+        }
         namespace.declarations.push(declarations);
         namespace.aliases.extend(declaration_names.iter().cloned());
-        namespace.is_operation |= parents.is_empty();
+        namespace.is_operation |= parents.is_empty() || options.namespaces == Namespaces::Flat;
         namespace.encodes_path |= !operation.path.is_empty();
         namespace.carries_path_values |= operation
             .path
@@ -184,7 +196,7 @@ pub(super) fn emit(
     for (member, namespace) in &namespaces {
         files.push(GeneratedFile {
             path: format!("operations/{member}.ts"),
-            content: namespace_file(namespace, document, error_strategy),
+            content: namespace_file(namespace, document, options.errors),
         });
     }
     files.push(GeneratedFile {
@@ -194,6 +206,7 @@ pub(super) fn emit(
             &namespaces,
             opaque_required,
             !preserve_wide_integers,
+            options,
         ),
     });
     Ok(files)
@@ -278,11 +291,13 @@ fn client_file(
     namespaces: &BTreeMap<String, Namespace>,
     opaque_required: bool,
     allow_unsafe_wide_integers: bool,
+    options: &TsOptions,
 ) -> String {
     let mut output = String::new();
     for member in namespaces.keys() {
         output.push_str(&format!(
-            "import {{ operations as {member}Operations }} from \"./operations/{member}.js\";\n"
+            "import {{ operations as {} }} from \"./operations/{member}.js\";\n",
+            binding(member)
         ));
     }
     output.push_str("import type { ConfiguredClient, CredentialValue, OpaqueCodecRegistry } from \"./runtime.js\";\n");
@@ -300,22 +315,31 @@ fn client_file(
     output.push_str(&auth_types(document));
     output.push_str(&format!("export function createClient(client: ClientOptions) {{\n  const auth: Record<string, CredentialSource> = Object.assign(Object.create(null), client.auth ?? {{}});\n  const authAdapters: Record<string, AuthAdapter> = Object.assign(Object.create(null), client.authAdapters ?? {{}});\n  const authRecords: Record<string, CredentialValue[]> = Object.create(null);\n  const authInvalidated: Record<string, boolean> = Object.create(null);\n  const configured: ConfiguredClient = {{ ...client, auth, authAdapters, authRecords, authInvalidated, authSchemes, opaque: {{ codecs: client.opaqueCodecs, required: {opaque_required}, allowUnsafeWideIntegers: {allow_unsafe_wide_integers} }} }};\n  return {{\n"));
     for (index, member) in namespaces.keys().enumerate() {
-        let key = if member == "__proto__" {
-            format!("[{}]", string(member))
-        } else {
-            member.clone()
-        };
+        let key = member_key(member, options.namespaces);
         let tail = if index + 1 == namespaces.len() {
             ""
         } else {
             ","
         };
         output.push_str(&format!(
-            "    {key}: {member}Operations(configured){tail}\n"
+            "    {key}: {}(configured){tail}\n",
+            binding(member)
         ));
     }
     output.push_str("  };\n}\n");
     output
+}
+
+fn binding(member: &str) -> String {
+    identifier(&format!("{member}Operations"), "operations")
+}
+
+fn member_key(member: &str, namespaces: Namespaces) -> String {
+    if member == "__proto__" || (namespaces == Namespaces::Flat && !is_plain_identifier(member)) {
+        format!("[{}]", string(member))
+    } else {
+        member.to_owned()
+    }
 }
 
 fn option_types(opaque_required: bool) -> String {
@@ -365,16 +389,15 @@ fn operation_function(
     declaration_names: &[String],
     document: &Document,
     names: &BTreeMap<String, String>,
-    mode: EmitMode,
+    options: &TsOptions,
     preserve_wide_integers: bool,
-    error_strategy: ErrorStrategy,
 ) -> Result<(String, String), EmitError> {
     let args_name = &declaration_names[0];
     let success_name = &declaration_names[1];
     let error_name = &declaration_names[2];
-    let args = operation_args(operation, document, names, mode)?;
+    let args = operation_args(operation, document, names, options)?;
     let (success, stream_types) =
-        response_type(operation, declaration_names, document, names, mode)?;
+        response_type(operation, declaration_names, document, names, options)?;
     let errors = if operation.errors_inherit {
         operation
             .errors
@@ -384,9 +407,9 @@ fn operation_function(
     } else {
         operation.errors.iter().collect()
     };
-    let failure = error_type(&errors, document, names, mode)?;
+    let failure = error_type(&errors, document, names, options)?;
     let method = operation.method.as_str();
-    let (args_type, options) = if args.is_empty() {
+    let (args_type, call_options) = if args.is_empty() {
         ("(_options?: CallOptions) =>".to_owned(), "_options")
     } else {
         (
@@ -420,18 +443,24 @@ fn operation_function(
         if let Some(media_type) = &body.media_type {
             spec.push(format!("bodyMediaType: {}", string(media_type)));
         }
-        spec.push(format!("bodySchema: {}", type_ref_json(&body.ty)?));
+        spec.push(format!("bodySchema: {}", type_ref_json(&body.ty, options)?));
     }
     if !operation.auth.alternatives.is_empty() {
         spec.push(format!("auth: {}", auth_requirement(&operation.auth)));
     }
-    spec.push(format!("inputs: {}", request_input_descriptor(operation)?));
-    spec.push(format!("responses: [{}]", response_descriptors(operation)?));
+    spec.push(format!(
+        "inputs: {}",
+        request_input_descriptor(operation, options)?
+    ));
+    spec.push(format!(
+        "responses: [{}]",
+        response_descriptors(operation, options)?
+    ));
     spec.push(format!(
         "errors: [{}]",
         errors
             .iter()
-            .map(|error| error_descriptor(error))
+            .map(|error| error_descriptor(error, options))
             .collect::<Result<Vec<_>, _>>()?
             .join(", ")
     ));
@@ -441,7 +470,7 @@ fn operation_function(
     if let Some(provides) = &operation.provides {
         spec.push(format!("provides: {}", credential_provision(provides)));
     }
-    spec.push(format!("options: {options}"));
+    spec.push(format!("options: {call_options}"));
     if operation.semantics.idempotent {
         spec.push(String::from("idempotent: true"));
     }
@@ -452,7 +481,7 @@ fn operation_function(
         "request<{success_name}, {error_name}>(configured, {{ {} }})",
         spec.join(", ")
     );
-    let function = if error_strategy == ErrorStrategy::Throw {
+    let function = if options.errors == ErrorStrategy::Throw {
         format!("{args_type} requestOrThrow({request})")
     } else {
         format!("{args_type} {request}")
@@ -535,7 +564,7 @@ fn operation_args(
     operation: &Operation,
     document: &Document,
     names: &BTreeMap<String, String>,
-    mode: EmitMode,
+    options: &TsOptions,
 ) -> Result<String, EmitError> {
     let mut fields = Vec::new();
     let mut path_params = Vec::new();
@@ -544,7 +573,7 @@ fn operation_args(
             path_params.push(format!(
                 "{}: {}",
                 string(param),
-                types::type_ref(ty, document, names, mode)?
+                types::type_ref(ty, document, names, options)?
             ));
         }
     }
@@ -554,7 +583,7 @@ fn operation_args(
     if let Some(query) = &operation.query {
         fields.push(format!(
             "query: {}",
-            types::type_ref(query, document, names, mode)?
+            types::type_ref(query, document, names, options)?
         ));
     }
     if !operation.headers.is_empty() {
@@ -571,7 +600,7 @@ fn operation_args(
                     "{}{}: {}",
                     string(&header.wire),
                     optional,
-                    types::type_ref(&header.ty, document, names, mode)?
+                    types::type_ref(&header.ty, document, names, options)?
                 ))
             })
             .collect::<Result<Vec<_>, EmitError>>()?;
@@ -590,7 +619,7 @@ fn operation_args(
         let optional = if body.required { "" } else { "?" };
         fields.push(format!(
             "body{optional}: {}",
-            types::type_ref(&body.ty, document, names, mode)?
+            types::type_ref(&body.ty, document, names, options)?
         ));
     }
     Ok(fields.join("; "))
@@ -601,7 +630,7 @@ fn response_type(
     declaration_names: &[String],
     document: &Document,
     names: &BTreeMap<String, String>,
-    mode: EmitMode,
+    options: &TsOptions,
 ) -> Result<(String, String), EmitError> {
     if let Some(StreamKind::Sse { events }) = operation.stream.as_ref().map(|stream| &stream.kind) {
         let event_name = &declaration_names[3];
@@ -613,7 +642,7 @@ fn response_type(
                 Ok(format!(
                     "{{ event: {}; data: {} }}",
                     string(&event.event),
-                    types::type_ref(&event.data, document, names, mode)?
+                    types::type_ref(&event.data, document, names, options)?
                 ))
             })
             .collect::<Result<Vec<_>, EmitError>>()?;
@@ -625,11 +654,12 @@ fn response_type(
         for event in events.iter().filter(|event| event.event == "error") {
             stream_failures.push(format!(
                 "{{ kind: \"server_error\"; body: {} }}",
-                types::type_ref(&event.data, document, names, mode)?
+                types::type_ref(&event.data, document, names, options)?
             ));
         }
         let stream_type = format!("AsyncIterable<Result<{event_name}, {failure_name}>>");
-        let response_type = stream_response_type(operation, &stream_type, document, names, mode)?;
+        let response_type =
+            stream_response_type(operation, &stream_type, document, names, options)?;
         return Ok((
             response_type,
             format!(
@@ -649,10 +679,10 @@ fn response_type(
         let failure_name = &declaration_names[4];
         let stream_type = format!("AsyncIterable<Result<{item_name}, {failure_name}>>");
         return Ok((
-            stream_response_type(operation, &stream_type, document, names, mode)?,
+            stream_response_type(operation, &stream_type, document, names, options)?,
             format!(
                 "export type {item_name} = {};\nexport type {failure_name} = {{ kind: \"stream_error\"; cause: unknown }} | {{ kind: \"invalid_item\"; cause: unknown }};\n",
-                types::type_ref(item, document, names, mode)?
+                types::type_ref(item, document, names, options)?
             ),
         ));
     }
@@ -661,10 +691,10 @@ fn response_type(
         .iter()
         .map(|response| {
             let body = match &response.body {
-                Some(body) => types::type_ref(body, document, names, mode),
+                Some(body) => types::type_ref(body, document, names, options),
                 None => Ok("void".into()),
             }?;
-            response_value_type(body, response, document, names, mode)
+            response_value_type(body, response, document, names, options)
         })
         .collect::<Result<Vec<_>, _>>()?;
     Ok((
@@ -682,7 +712,7 @@ fn stream_response_type(
     stream_type: &str,
     document: &Document,
     names: &BTreeMap<String, String>,
-    mode: EmitMode,
+    options: &TsOptions,
 ) -> Result<String, EmitError> {
     let mut responses = Vec::new();
     for response in &operation.responses {
@@ -690,11 +720,13 @@ fn stream_response_type(
             stream_type.to_owned()
         } else {
             match &response.body {
-                Some(body) => types::type_ref(body, document, names, mode)?,
+                Some(body) => types::type_ref(body, document, names, options)?,
                 None => "void".into(),
             }
         };
-        responses.push(response_value_type(body, response, document, names, mode)?);
+        responses.push(response_value_type(
+            body, response, document, names, options,
+        )?);
     }
     if responses.is_empty() {
         Ok(stream_type.into())
@@ -708,12 +740,12 @@ fn response_value_type(
     response: &Response,
     document: &Document,
     names: &BTreeMap<String, String>,
-    mode: EmitMode,
+    options: &TsOptions,
 ) -> Result<String, EmitError> {
     let body = if response.headers.is_empty() {
         body
     } else {
-        let headers = response_headers_type(&response.headers, document, names, mode)?;
+        let headers = response_headers_type(&response.headers, document, names, options)?;
         format!("ResponseWithHeaders<{body}, {headers}>")
     };
     if matches!(
@@ -730,7 +762,7 @@ fn response_headers_type(
     headers: &[ResponseHeader],
     document: &Document,
     names: &BTreeMap<String, String>,
-    mode: EmitMode,
+    options: &TsOptions,
 ) -> Result<String, EmitError> {
     let fields = headers
         .iter()
@@ -744,7 +776,7 @@ fn response_headers_type(
                 "{}{}: {}",
                 string(&header.wire),
                 optional,
-                types::type_ref(&header.ty, document, names, mode)?
+                types::type_ref(&header.ty, document, names, options)?
             ))
         })
         .collect::<Result<Vec<_>, EmitError>>()?;
@@ -755,7 +787,7 @@ fn error_type(
     errors: &[&ErrorResponse],
     document: &Document,
     names: &BTreeMap<String, String>,
-    mode: EmitMode,
+    options: &TsOptions,
 ) -> Result<String, EmitError> {
     let mut failures = vec![(None, "ClientFailure".to_owned())];
     for error in errors {
@@ -767,12 +799,12 @@ fn error_type(
         let body = error
             .body
             .as_ref()
-            .map(|body| types::type_ref(body, document, names, mode))
+            .map(|body| types::type_ref(body, document, names, options))
             .transpose()?;
         let headers = if error.headers.is_empty() {
             "Headers".to_owned()
         } else {
-            response_headers_type(&error.headers, document, names, mode)?
+            response_headers_type(&error.headers, document, names, options)?
         };
         let body = body.unwrap_or_else(|| "unknown".into());
         failures.push((
@@ -783,7 +815,10 @@ fn error_type(
     Ok(union_type(&failures))
 }
 
-fn request_input_descriptor(operation: &Operation) -> Result<String, EmitError> {
+fn request_input_descriptor(
+    operation: &Operation,
+    options: &TsOptions,
+) -> Result<String, EmitError> {
     let path = operation
         .path
         .iter()
@@ -795,7 +830,7 @@ fn request_input_descriptor(operation: &Operation) -> Result<String, EmitError> 
             Ok(format!(
                 "{{ name: {}, required: true, schema: {} }}",
                 string(param),
-                type_ref_json(ty)?
+                type_ref_json(ty, options)?
             ))
         })
         .collect::<Result<Vec<_>, EmitError>>()?
@@ -803,7 +838,7 @@ fn request_input_descriptor(operation: &Operation) -> Result<String, EmitError> 
     let query = operation
         .query
         .as_ref()
-        .map(type_ref_json)
+        .map(|ty| type_ref_json(ty, options))
         .transpose()?
         .unwrap_or_else(|| "undefined".into());
     let headers = operation
@@ -814,7 +849,7 @@ fn request_input_descriptor(operation: &Operation) -> Result<String, EmitError> 
                 "{{ name: {}, required: {}, schema: {} }}",
                 string(&header.wire),
                 header.presence == Presence::Required,
-                type_ref_json(&header.ty)?
+                type_ref_json(&header.ty, options)?
             ))
         })
         .collect::<Result<Vec<_>, EmitError>>()?
@@ -867,7 +902,7 @@ fn content_name(content: ContentKind) -> &'static str {
     }
 }
 
-fn response_descriptors(operation: &Operation) -> Result<String, EmitError> {
+fn response_descriptors(operation: &Operation, options: &TsOptions) -> Result<String, EmitError> {
     let stream_descriptor = match operation.stream.as_ref().map(|stream| &stream.kind) {
         Some(StreamKind::Sse { events }) => Some(format!(
             "stream: \"sse\", events: [{}]",
@@ -877,7 +912,7 @@ fn response_descriptors(operation: &Operation) -> Result<String, EmitError> {
                     Ok(format!(
                         "{{ event: {}, schema: {} }}",
                         string(&event.event),
-                        type_ref_json(&event.data)?
+                        type_ref_json(&event.data, options)?
                     ))
                 })
                 .collect::<Result<Vec<_>, EmitError>>()?
@@ -885,7 +920,7 @@ fn response_descriptors(operation: &Operation) -> Result<String, EmitError> {
         )),
         Some(StreamKind::Ndjson { item }) => Some(format!(
             "stream: \"ndjson\", item: {}",
-            type_ref_json(item)?
+            type_ref_json(item, options)?
         )),
         _ => None,
     };
@@ -896,7 +931,7 @@ fn response_descriptors(operation: &Operation) -> Result<String, EmitError> {
             let schema = response
                 .body
                 .as_ref()
-                .map(type_ref_json)
+                .map(|ty| type_ref_json(ty, options))
                 .transpose()?
                 .unwrap_or_else(|| "undefined".into());
             let stream = if response.content == ContentKind::Stream {
@@ -919,7 +954,7 @@ fn response_descriptors(operation: &Operation) -> Result<String, EmitError> {
                         "{{ name: {}, required: {}, schema: {} }}",
                         string(&header.wire),
                         header.presence == Presence::Required,
-                        type_ref_json(&header.ty)?
+                        type_ref_json(&header.ty, options)?
                     ))
                 })
                 .collect::<Result<Vec<_>, EmitError>>()?
@@ -940,7 +975,7 @@ fn response_descriptors(operation: &Operation) -> Result<String, EmitError> {
         .map(|descriptors| descriptors.join(", "))
 }
 
-fn error_descriptor(error: &ErrorResponse) -> Result<String, EmitError> {
+fn error_descriptor(error: &ErrorResponse, options: &TsOptions) -> Result<String, EmitError> {
     let status = serde_json::to_string(&error.status)
         .map_err(|error| EmitError(format!("cannot encode error status: {error}")))?;
     let content = match error.content {
@@ -952,7 +987,7 @@ fn error_descriptor(error: &ErrorResponse) -> Result<String, EmitError> {
     let schema = error
         .body
         .as_ref()
-        .map(type_ref_json)
+        .map(|ty| type_ref_json(ty, options))
         .transpose()?
         .unwrap_or_else(|| "undefined".into());
     let headers = error
@@ -963,7 +998,7 @@ fn error_descriptor(error: &ErrorResponse) -> Result<String, EmitError> {
                 "{{ name: {}, required: {}, schema: {} }}",
                 string(&header.wire),
                 header.presence == Presence::Required,
-                type_ref_json(&header.ty)?
+                type_ref_json(&header.ty, options)?
             ))
         })
         .collect::<Result<Vec<_>, EmitError>>()?
@@ -988,12 +1023,45 @@ fn error_descriptor(error: &ErrorResponse) -> Result<String, EmitError> {
     ))
 }
 
-fn type_ref_json(reference: &TypeRef) -> Result<String, EmitError> {
+fn type_ref_json(reference: &TypeRef, options: &TsOptions) -> Result<String, EmitError> {
     let mut value = serde_json::to_value(reference)
         .map_err(|error| EmitError(format!("cannot encode type reference: {error}")))?;
     normalize_integer_constraints(&mut value);
+    tag_carriers(&mut value, options);
     serde_json::to_string(&value)
         .map_err(|error| EmitError(format!("cannot encode type reference: {error}")))
+}
+
+pub(crate) fn tag_carriers(value: &mut serde_json::Value, options: &TsOptions) {
+    match value {
+        serde_json::Value::Object(fields) => {
+            if options.int64 == Int64::String
+                && fields.get("kind").and_then(serde_json::Value::as_str) == Some("int")
+                && fields.get("wire").and_then(serde_json::Value::as_str) == Some("number")
+                && fields
+                    .get("bits")
+                    .and_then(serde_json::Value::as_u64)
+                    .is_some_and(|bits| bits > 53)
+            {
+                fields.insert("carrier".into(), serde_json::Value::from("string"));
+            }
+            if options.date_mode == DateMode::Date
+                && fields.get("kind").and_then(serde_json::Value::as_str) == Some("string")
+                && fields.get("format").and_then(serde_json::Value::as_str) == Some("date-time")
+            {
+                fields.insert("carrier".into(), serde_json::Value::from("date"));
+            }
+            for child in fields.values_mut() {
+                tag_carriers(child, options);
+            }
+        }
+        serde_json::Value::Array(values) => {
+            for child in values {
+                tag_carriers(child, options);
+            }
+        }
+        _ => {}
+    }
 }
 
 pub(crate) fn normalize_integer_constraints(value: &mut serde_json::Value) {

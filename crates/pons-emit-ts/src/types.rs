@@ -5,31 +5,53 @@ use pons_ir::{
     TypeDef, TypeKind, TypeRef, Variant, VariantPayload,
 };
 
-use crate::{EmitError, EmitMode, jsdoc, object_type, string, union_type};
+use crate::{
+    DateMode, EmitError, EmitMode, FieldCase, Int64, Newtypes, TsOptions, camel, jsdoc,
+    object_type, string, union_type,
+};
 
 pub(super) fn emit(
     document: &Document,
     names: &BTreeMap<String, String>,
-    mode: EmitMode,
+    options: &TsOptions,
+    date_only: bool,
 ) -> Result<String, EmitError> {
     let mut output = String::new();
+    if date_only {
+        output.push_str(
+            "declare const brandDateOnly: unique symbol;\n/** A calendar day with no timezone, spelled the way the wire spells it. A `date-time` is an instant and is carried as a `Date`; a `date` is a day, which no `Date` can hold. */\nexport type DateOnly = string & { readonly [brandDateOnly]: never };\n\n",
+        );
+    }
     for (id, definition) in &document.types {
         let name = &names[id];
         let comment = jsdoc(definition.doc.as_ref());
+        if let Some(brand) = newtype_brand(definition, name, options) {
+            output.push_str(&brand);
+        }
         if !comment.is_empty() {
             output.push_str(&comment);
             output.push('\n');
         }
         output.push_str(&format!(
             "export type {name} = {};\n\n",
-            definition_type(definition, document, names, mode)?
+            definition_type(id, definition, document, names, options)?
         ));
     }
-    output.push_str(&type_definitions(document)?);
+    output.push_str(&type_definitions(document, options)?);
     Ok(output)
 }
 
-fn type_definitions(document: &Document) -> Result<String, EmitError> {
+fn newtype_brand(definition: &TypeDef, name: &str, options: &TsOptions) -> Option<String> {
+    if options.newtypes != Newtypes::Branded
+        || !matches!(definition.definition, TypeKind::Newtype { .. })
+    {
+        return None;
+    }
+    let brand = format!("brand{name}");
+    Some(format!("declare const {brand}: unique symbol;\n"))
+}
+
+fn type_definitions(document: &Document, options: &TsOptions) -> Result<String, EmitError> {
     let definitions = document
         .types
         .iter()
@@ -39,6 +61,8 @@ fn type_definitions(document: &Document) -> Result<String, EmitError> {
             value["direction"] = serde_json::to_value(definition.direction)
                 .map_err(|error| EmitError(format!("cannot encode type direction: {error}")))?;
             crate::client::normalize_integer_constraints(&mut value);
+            crate::client::tag_carriers(&mut value, options);
+            tag_field_keys(&mut value, options);
             Ok((id.clone(), value))
         })
         .collect::<Result<BTreeMap<_, _>, _>>()?;
@@ -51,11 +75,45 @@ fn type_definitions(document: &Document) -> Result<String, EmitError> {
     ))
 }
 
+fn tag_field_keys(value: &mut serde_json::Value, options: &TsOptions) {
+    if options.field_case != FieldCase::Camel {
+        return;
+    }
+    match value {
+        serde_json::Value::Object(fields) => {
+            if fields.contains_key("presence") {
+                let ident = fields
+                    .get("ident")
+                    .and_then(serde_json::Value::as_array)
+                    .map(|ident| {
+                        ident
+                            .iter()
+                            .filter_map(serde_json::Value::as_str)
+                            .map(str::to_owned)
+                            .collect::<Vec<_>>()
+                    })
+                    .unwrap_or_default();
+                fields.insert("key".into(), serde_json::Value::from(camel(&ident)));
+            }
+            for child in fields.values_mut() {
+                tag_field_keys(child, options);
+            }
+        }
+        serde_json::Value::Array(items) => {
+            for item in items {
+                tag_field_keys(item, options);
+            }
+        }
+        _ => {}
+    }
+}
+
 fn definition_type(
+    id: &str,
     definition: &TypeDef,
     document: &Document,
     names: &BTreeMap<String, String>,
-    mode: EmitMode,
+    options: &TsOptions,
 ) -> Result<String, EmitError> {
     match &definition.definition {
         TypeKind::Struct {
@@ -63,18 +121,18 @@ fn definition_type(
             flattened,
             openness,
         } => {
-            let flattened_types = flattened_field_types(flattened, document, names, mode)?;
+            let flattened_types = flattened_field_types(flattened, document, names, options)?;
             let fields = fields
                 .iter()
                 .filter(|field| field_is_visible(field, definition.direction))
                 .collect::<Vec<_>>();
             let mut known_types = fields
                 .iter()
-                .map(|field| local_type_ref(&field.ty, document, names, mode))
+                .map(|field| local_type_ref(&field.ty, document, names, options))
                 .collect::<Result<Vec<_>, _>>()?;
             known_types.extend(flattened_types);
             if let Some(carrier) = flattened_opaque(flattened, document) {
-                return local_type_ref(carrier, document, names, mode);
+                return local_type_ref(carrier, document, names, options);
             }
             let mut members = fields
                 .iter()
@@ -84,7 +142,7 @@ fn definition_type(
                         definition.direction,
                         document,
                         names,
-                        mode,
+                        options,
                         false,
                         &mut BTreeSet::new(),
                     )
@@ -95,7 +153,7 @@ fn definition_type(
                 ObjectOpenness::Reject => {}
                 ObjectOpenness::PreserveTyped { value } => {
                     let extra =
-                        local_type_ref(openness_value(value, document), document, names, mode)?;
+                        local_type_ref(openness_value(value, document), document, names, options)?;
                     if known_types.iter().any(|ty| *ty != extra) {
                         return Err(EmitError(
                             "TypeScript cannot represent typed object openness when direct or flattened fields have different types"
@@ -121,14 +179,28 @@ fn definition_type(
             }
             let mut ty = object_type(&members);
             for flat in flattened {
-                ty = format!("{ty} & {}", local_type_ref(flat, document, names, mode)?);
+                ty = format!("{ty} & {}", local_type_ref(flat, document, names, options)?);
             }
             Ok(ty)
         }
-        TypeKind::Enum { repr, variants } => {
-            enum_type(definition.direction, repr, variants, document, names, mode)
+        TypeKind::Enum { repr, variants } => enum_type(
+            definition.direction,
+            repr,
+            variants,
+            document,
+            names,
+            options,
+        ),
+        TypeKind::Newtype { inner } => {
+            let inner = local_type_ref(inner, document, names, options)?;
+            if options.newtypes != Newtypes::Branded {
+                return Ok(inner);
+            }
+            Ok(format!(
+                "{inner} & {{ readonly [brand{}]: never }}",
+                names[id]
+            ))
         }
-        TypeKind::Newtype { inner } => local_type_ref(inner, document, names, mode),
     }
 }
 
@@ -164,7 +236,7 @@ fn flattened_field_types(
     references: &[TypeRef],
     document: &Document,
     names: &BTreeMap<String, String>,
-    mode: EmitMode,
+    options: &TsOptions,
 ) -> Result<Vec<String>, EmitError> {
     let mut result = Vec::new();
     let mut visited = BTreeSet::new();
@@ -174,7 +246,7 @@ fn flattened_field_types(
             reference,
             document,
             names,
-            mode,
+            options,
             &mut visited,
             &mut visiting,
             &mut result,
@@ -187,7 +259,7 @@ fn collect_flattened_field_types(
     reference: &TypeRef,
     document: &Document,
     names: &BTreeMap<String, String>,
-    mode: EmitMode,
+    options: &TsOptions,
     visited: &mut BTreeSet<String>,
     visiting: &mut Vec<String>,
     result: &mut Vec<String>,
@@ -222,25 +294,25 @@ fn collect_flattened_field_types(
                 .iter()
                 .filter(|field| field_is_visible(field, definition.direction))
             {
-                result.push(local_type_ref(&field.ty, document, names, mode)?);
+                result.push(local_type_ref(&field.ty, document, names, options)?);
             }
             if let ObjectOpenness::PreserveTyped { value } = openness {
                 result.push(local_type_ref(
                     openness_value(value, document),
                     document,
                     names,
-                    mode,
+                    options,
                 )?);
             }
             for flattened in flattened {
                 collect_flattened_field_types(
-                    flattened, document, names, mode, visited, visiting, result,
+                    flattened, document, names, options, visited, visiting, result,
                 )?;
             }
         }
-        TypeKind::Newtype { inner } => {
-            collect_flattened_field_types(inner, document, names, mode, visited, visiting, result)?
-        }
+        TypeKind::Newtype { inner } => collect_flattened_field_types(
+            inner, document, names, options, visited, visiting, result,
+        )?,
         TypeKind::Enum { .. } => return Err(not_a_struct_member(reference)),
     }
     visiting.pop();
@@ -300,11 +372,11 @@ fn field_type(
     direction: Direction,
     document: &Document,
     names: &BTreeMap<String, String>,
-    mode: EmitMode,
+    options: &TsOptions,
     qualify: bool,
     narrowed: &mut BTreeSet<String>,
 ) -> Result<String, EmitError> {
-    let key = string(&field.wire);
+    let key = string(&member_name(field, options));
     let access_specific = matches!(
         (direction, field.access),
         (Direction::Both, Some(Access::ReadOnly | Access::WriteOnly))
@@ -316,8 +388,15 @@ fn field_type(
     };
     Ok(format!(
         "{key}{presence}: {}",
-        type_ref_with_namespace(&field.ty, document, names, mode, qualify, narrowed)?
+        type_ref_with_namespace(&field.ty, document, names, options, qualify, narrowed)?
     ))
+}
+
+fn member_name(field: &Field, options: &TsOptions) -> String {
+    match options.field_case {
+        FieldCase::Wire => field.wire.clone(),
+        FieldCase::Camel => camel(&field.ident),
+    }
 }
 
 fn is_object_type<'a>(mut ty: &'a TypeRef, document: &'a Document) -> bool {
@@ -346,7 +425,7 @@ fn enum_type(
     variants: &[Variant],
     document: &Document,
     names: &BTreeMap<String, String>,
-    mode: EmitMode,
+    options: &TsOptions,
 ) -> Result<String, EmitError> {
     let mut types: Vec<(Option<&Doc>, String)> = Vec::with_capacity(variants.len());
     for variant in variants {
@@ -356,7 +435,7 @@ fn enum_type(
             direction,
             document,
             names,
-            mode,
+            options,
             false,
             &mut narrowed,
         )?;
@@ -407,20 +486,22 @@ fn payload_type(
     direction: Direction,
     document: &Document,
     names: &BTreeMap<String, String>,
-    mode: EmitMode,
+    options: &TsOptions,
     qualify: bool,
     narrowed: &mut BTreeSet<String>,
 ) -> Result<String, EmitError> {
     match payload {
         VariantPayload::Unit => Ok("null".into()),
         VariantPayload::Newtype { ty } => {
-            type_ref_with_namespace(ty, document, names, mode, qualify, narrowed)
+            type_ref_with_namespace(ty, document, names, options, qualify, narrowed)
         }
         VariantPayload::Tuple { items } => Ok(format!(
             "[{}]",
             items
                 .iter()
-                .map(|item| type_ref_with_namespace(item, document, names, mode, qualify, narrowed))
+                .map(|item| type_ref_with_namespace(
+                    item, document, names, options, qualify, narrowed
+                ))
                 .collect::<Result<Vec<_>, _>>()?
                 .join(", ")
         )),
@@ -429,8 +510,10 @@ fn payload_type(
                 .iter()
                 .filter(|field| field_is_visible(field, direction))
                 .map(|field| {
-                    field_type(field, direction, document, names, mode, qualify, narrowed)
-                        .map(|member| (field.doc.as_ref(), member))
+                    field_type(
+                        field, direction, document, names, options, qualify, narrowed,
+                    )
+                    .map(|member| (field.doc.as_ref(), member))
                 })
                 .collect::<Result<Vec<_>, EmitError>>()?;
             members.push((None, String::from("[key: string]: unknown")));
@@ -443,22 +526,29 @@ pub(super) fn type_ref(
     reference: &TypeRef,
     document: &Document,
     names: &BTreeMap<String, String>,
-    mode: EmitMode,
+    options: &TsOptions,
 ) -> Result<String, EmitError> {
-    type_ref_with_namespace(reference, document, names, mode, true, &mut BTreeSet::new())
+    type_ref_with_namespace(
+        reference,
+        document,
+        names,
+        options,
+        true,
+        &mut BTreeSet::new(),
+    )
 }
 
 fn local_type_ref(
     reference: &TypeRef,
     document: &Document,
     names: &BTreeMap<String, String>,
-    mode: EmitMode,
+    options: &TsOptions,
 ) -> Result<String, EmitError> {
     type_ref_with_namespace(
         reference,
         document,
         names,
-        mode,
+        options,
         false,
         &mut BTreeSet::new(),
     )
@@ -468,7 +558,7 @@ fn type_ref_with_namespace(
     reference: &TypeRef,
     document: &Document,
     names: &BTreeMap<String, String>,
-    mode: EmitMode,
+    options: &TsOptions,
     qualify: bool,
     narrowed: &mut BTreeSet<String>,
 ) -> Result<String, EmitError> {
@@ -504,7 +594,7 @@ fn type_ref_with_namespace(
                     direction,
                     document,
                     names,
-                    mode,
+                    options,
                     qualify,
                     narrowed,
                 );
@@ -542,9 +632,12 @@ fn type_ref_with_namespace(
             InlineType::Bool => Ok("boolean".into()),
             InlineType::Int { bits, wire, .. } => match wire {
                 IntegerWire::String => Ok("string".into()),
-                IntegerWire::Number if *bits > 53 && mode == EmitMode::Strict => {
-                    Ok("bigint".into())
+                IntegerWire::Number if *bits > 53 => Ok(match options.int64 {
+                    Int64::String => "string",
+                    Int64::Bigint if options.mode == EmitMode::Strict => "bigint",
+                    _ => "number",
                 }
+                .into()),
                 IntegerWire::Number => Ok("number".into()),
             },
             InlineType::Float { .. } => Ok("number".into()),
@@ -553,29 +646,38 @@ fn type_ref_with_namespace(
                 pons_ir::DecimalWire::String => "string",
             }
             .into()),
-            InlineType::String { .. } => Ok("string".into()),
+            InlineType::String { format, .. } => Ok(match format {
+                Some(pons_ir::FieldFormat::DateTime) if options.date_mode == DateMode::Date => {
+                    "Date"
+                }
+                Some(pons_ir::FieldFormat::Date) if options.date_mode == DateMode::Date => {
+                    "DateOnly"
+                }
+                _ => "string",
+            }
+            .into()),
             InlineType::Bytes { .. } => Ok("Uint8Array".into()),
             InlineType::Null => Ok("null".into()),
             InlineType::Any => Ok("unknown".into()),
             InlineType::Opaque { .. } => Ok("unknown".into()),
             InlineType::Nullable { inner } => Ok(format!(
                 "{} | null",
-                type_ref_with_namespace(inner, document, names, mode, qualify, narrowed)?
+                type_ref_with_namespace(inner, document, names, options, qualify, narrowed)?
             )),
             InlineType::Array { item, .. } => Ok(format!(
                 "Array<{}>",
-                type_ref_with_namespace(item, document, names, mode, qualify, narrowed)?
+                type_ref_with_namespace(item, document, names, options, qualify, narrowed)?
             )),
             InlineType::Map { value, .. } => Ok(format!(
                 "Record<string, {}>",
-                type_ref_with_namespace(value, document, names, mode, qualify, narrowed)?
+                type_ref_with_namespace(value, document, names, options, qualify, narrowed)?
             )),
             InlineType::Tuple { items } => Ok(format!(
                 "[{}]",
                 items
                     .iter()
                     .map(|item| {
-                        type_ref_with_namespace(item, document, names, mode, qualify, narrowed)
+                        type_ref_with_namespace(item, document, names, options, qualify, narrowed)
                     })
                     .collect::<Result<Vec<_>, _>>()?
                     .join(", ")
