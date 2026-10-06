@@ -5,7 +5,8 @@ mod security;
 use std::collections::{BTreeMap, BTreeSet};
 
 use pons_ir::{
-    Coverage, Document, coverage_for_document, operation_subject, strict_violation_message,
+    Coverage, Direction, Document, TypeDef, coverage_for_document, operation_subject,
+    strict_violation_message,
 };
 use serde_json::{Map, Value, json};
 
@@ -62,13 +63,7 @@ pub fn emit_with_mode(document: &Document, mode: EmitMode) -> Result<EmitOutput,
             document
                 .types
                 .iter()
-                .map(|(id, ty)| {
-                    (
-                        schema_name_base(id, &ty.name),
-                        role(id).is_some(),
-                        id.clone(),
-                    )
-                })
+                .map(|(id, ty)| (pair_name(&document, ty), is_split_half(ty), id.clone()))
                 .collect(),
         ),
         security_names: unique_names(
@@ -204,18 +199,22 @@ fn merge_coverage(coverage: &mut Coverage, subject: String, required: CoverageSe
     }
 }
 
-fn schema_name_base(id: &str, name: &[String]) -> String {
-    let base = readable_name(name);
-    match role(id) {
-        Some(role) => format!("{base}{}", capitalize(role)),
-        None => base,
+fn pair_name(document: &Document, definition: &TypeDef) -> String {
+    let own = readable_name(&definition.name);
+    if !is_split_half(definition) {
+        return own;
     }
+    let base = definition
+        .origin
+        .as_deref()
+        .and_then(|origin| document.types.get(origin))
+        .filter(|partner| partner.direction == Direction::Output)
+        .map_or(own, |partner| readable_name(&partner.name));
+    format!("{base}Input")
 }
 
-fn role(id: &str) -> Option<&str> {
-    let role = id.rsplit_once('#')?.1;
-    (!role.is_empty() && role.chars().all(|c| c.is_ascii_alphanumeric() || c == '_'))
-        .then_some(role)
+fn is_split_half(definition: &TypeDef) -> bool {
+    definition.origin.is_some() && definition.direction == Direction::Input
 }
 
 fn unique_names(mut items: Vec<(String, bool, String)>) -> BTreeMap<String, String> {
@@ -682,6 +681,77 @@ mod tests {
                 exact.iter().map(|s| (*s).to_owned()).collect()
             );
         }
+    }
+
+    #[test]
+    fn an_untagged_enum_is_lossy_and_strict_mode_refuses_it() {
+        let document = untagged_document();
+        let canonical = pons_ir::canonical_coverage(&document, false).unwrap();
+        assert_eq!(
+            canonical["types.Choice"],
+            pons_ir::CoverageLevel::Lossy,
+            "{canonical:?}"
+        );
+        assert_eq!(
+            canonical["operations.post.send"],
+            pons_ir::CoverageLevel::Lossy
+        );
+
+        let refused = super::emit_with_mode(&document, super::EmitMode::Strict).unwrap_err();
+        assert_eq!(
+            refused.to_string(),
+            "OpenAPI emitter reported lossy coverage in strict mode: \
+             operations.post.send, types.Choice"
+        );
+        let emitted = super::emit_with_mode(&document, super::EmitMode::Lossy).unwrap();
+        assert_eq!(
+            emitted.coverage.lossy,
+            ["operations.post.send", "types.Choice"]
+                .into_iter()
+                .map(str::to_owned)
+                .collect()
+        );
+        assert!(emitted.coverage.exact.is_empty());
+        assert_eq!(emitted.warnings.len(), 1);
+        assert_eq!(
+            emitted.warnings[0],
+            "OpenAPI emits lossy coverage at operations.post.send, types.Choice"
+        );
+        let output: Value = serde_json::from_str(&emitted.content).unwrap();
+        assert!(output["components"]["schemas"]["Choice"]["anyOf"].is_array());
+        assert!(output["components"]["schemas"]["Choice"]["oneOf"].is_null());
+    }
+
+    fn untagged_document() -> pons_ir::Document {
+        let document: pons_ir::Document = serde_json::from_value(json!({
+            "ir_version": "0.2",
+            "info": {"title": "Example", "version": "1"},
+            "types": {
+                "Choice": {
+                    "kind": "enum", "name": ["choice"], "direction": "both",
+                    "repr": {"kind": "untagged"},
+                    "variants": [
+                        {"wire": "text", "ident": ["text"],
+                         "payload": {"kind": "newtype", "ty": {"kind": "string"}}},
+                        {"wire": "count", "ident": ["count"],
+                         "payload": {"kind": "newtype", "ty": {"kind": "int", "bits": 8,
+                             "signed": false, "wire": "number"}}}
+                    ]
+                }
+            },
+            "operations": [{
+                "id": [["post"], ["send"]],
+                "method": "POST",
+                "path": [{"lit": "send"}],
+                "body": {"ty": {"ref": "Choice"}, "content": "json", "required": true},
+                "responses": [{"status": 200, "content": "json", "body": {"kind": "string"}}],
+                "auth": {"alternatives": [], "optional": false},
+                "semantics": {"safe": false, "idempotent": false}
+            }]
+        }))
+        .unwrap();
+        document.validate().unwrap();
+        document
     }
 
     #[test]
@@ -1190,6 +1260,18 @@ mod tests {
         assert!(security.get("Tenant3").is_some(), "{security:#}");
     }
 
+    fn carriers(definitions: &[(&str, &[&str], Direction, Option<&str>)]) -> pons_ir::Document {
+        let mut document = fixture();
+        for (id, name, direction, origin) in definitions {
+            let mut definition = named_type("");
+            definition.name = name.iter().map(|word| (*word).to_owned()).collect();
+            definition.direction = *direction;
+            definition.origin = origin.map(str::to_owned);
+            document.types.insert((*id).into(), definition);
+        }
+        document
+    }
+
     fn component_names(document: &pons_ir::Document) -> BTreeMap<String, String> {
         let output: Value = serde_json::from_str(&super::emit(document).unwrap()).unwrap();
         output["components"]["schemas"]
@@ -1206,55 +1288,86 @@ mod tests {
     }
 
     #[test]
-    fn names_each_role_of_one_type_after_the_role_its_id_carries() {
-        fn carriers(ids: &[&str]) -> pons_ir::Document {
-            let mut document = fixture();
-            for id in ids {
-                let mut definition = named_type("q");
-                definition.direction = Direction::Input;
-                document.types.insert((*id).into(), definition);
-            }
-            document
-        }
+    fn names_a_direction_pair_after_the_pair_and_never_after_the_id() {
+        let mut document = carriers(&[
+            (
+                "router::Account",
+                &["account"],
+                Direction::Output,
+                Some("router::Account"),
+            ),
+            (
+                "storefront::AccountRequest",
+                &["account", "request"],
+                Direction::Input,
+                Some("router::Account"),
+            ),
+        ]);
+        let login = &mut document.operations[0];
+        login.body.as_mut().unwrap().ty = TypeRef::Named(NamedRef {
+            id: "storefront::AccountRequest".into(),
+            variant: None,
+        });
+        login.responses[0].body = Some(TypeRef::Named(NamedRef {
+            id: "router::Account".into(),
+            variant: None,
+        }));
 
-        let both = component_names(&carriers(&["router::Q#input", "router::Q#query"]));
-        assert_eq!(both["QInput"], "router::Q#input");
-        assert_eq!(both["QQuery"], "router::Q#query");
+        let output: Value = serde_json::from_str(&super::emit(&document).unwrap()).unwrap();
+        assert_eq!(
+            output["paths"]["/auth/login"]["post"]["requestBody"]["content"]["application/json"]["schema"]
+                ["$ref"],
+            "#/components/schemas/AccountInput"
+        );
+        assert_eq!(
+            output["paths"]["/auth/login"]["post"]["responses"]["200"]["content"]["application/json"]
+                ["schema"]["$ref"],
+            "#/components/schemas/Account"
+        );
+
+        let pair = component_names(&document);
+        assert_eq!(pair["Account"], "router::Account");
+        assert_eq!(
+            pair["AccountInput"], "storefront::AccountRequest",
+            "the request half takes the base display name the pair publishes"
+        );
         assert!(
-            both.keys().all(|name| !name.contains('#')),
-            "{both:?} leaks an id role"
-        );
-        assert_eq!(
-            both["User"], "User",
-            "a name one definition publishes keeps the plain name"
+            pair.keys().all(|name| !name.contains('#')),
+            "{pair:?} leaks an id"
         );
 
-        let reversed = component_names(&carriers(&["a::Q#query", "z::Q#input"]));
-        assert_eq!(reversed["QInput"], "z::Q#input");
-        assert_eq!(reversed["QQuery"], "a::Q#query");
-
-        let lone = component_names(&carriers(&["router::Q#query"]));
+        let lone = component_names(&carriers(&[(
+            "storefront::AccountRequest",
+            &["account"],
+            Direction::Input,
+            Some("router::Account"),
+        )]));
         assert_eq!(
-            lone["QQuery"], "router::Q#query",
-            "pruning a sibling leaves the survivor's name alone"
+            lone["AccountInput"], "storefront::AccountRequest",
+            "pruning the response half leaves the request half the pair's name"
         );
-        assert!(!lone.contains_key("QInput"));
     }
 
     #[test]
-    fn a_role_suffixed_name_never_takes_the_name_another_type_publishes() {
-        let mut document = fixture();
-        for (id, name) in [
-            ("a::Q#input", "q"),
-            ("b::Q#input", "q"),
-            ("c::qInput", "qInput"),
-        ] {
-            let mut definition = named_type(name);
-            definition.direction = Direction::Input;
-            document.types.insert(id.into(), definition);
-        }
+    fn a_pair_that_declares_no_origin_keeps_its_own_display_name() {
+        let names = component_names(&carriers(&[
+            ("a::Account", &["account"], Direction::Output, None),
+            ("b::Account", &["account"], Direction::Input, None),
+        ]));
+        assert_eq!(names["Account"], "a::Account");
+        assert_eq!(names["Account2"], "b::Account");
+        assert!(!names.contains_key("AccountInput"));
+    }
 
-        let names = component_names(&document);
+    #[test]
+    fn a_suffixed_name_never_takes_the_name_another_type_publishes() {
+        let names = component_names(&carriers(&[
+            ("a::Q", &["q"], Direction::Output, Some("a::Q")),
+            ("a::Q#input", &["q"], Direction::Input, Some("a::Q")),
+            ("b::Q#input", &["q"], Direction::Input, Some("b::Q")),
+            ("c::qInput", &["qInput"], Direction::Both, None),
+        ]));
+        assert_eq!(names["Q"], "a::Q");
         assert_eq!(names["QInput"], "c::qInput");
         assert_eq!(names["QInput2"], "a::Q#input");
         assert_eq!(names["QInput3"], "b::Q#input");
@@ -1312,6 +1425,7 @@ mod tests {
             "tenant".into(),
             AuthScheme::Custom {
                 description: "custom auth".into(),
+                adapter: None,
                 ext: Default::default(),
             },
         );

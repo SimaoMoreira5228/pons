@@ -7,9 +7,10 @@ mod wire_validation;
 use std::collections::{BTreeMap, BTreeSet};
 
 use pons_ir::{
-    ApiKeyLocation, AuthScheme, Coverage, Document, InlineType, IntegerWire, ObjectOpenness,
-    PathSegment, StreamKind, TypeDef, TypeKind, TypeRef, VariantPayload, coverage_for_document,
-    strict_violation_message,
+    ApiKeyLocation, AuthScheme, Coverage, DecimalWire, Direction, Document, InlineType,
+    IntegerWire, ObjectOpenness, PathSegment, StreamKind, TypeDef, TypeKind, TypeRef,
+    VariantPayload, coverage_for_document, operation_subject, strict_violation_message,
+    type_subject,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -131,13 +132,26 @@ pub fn emit_with_strategy(
             }
         }
     }
-    let coverage = coverage_for_document(&document, mode == EmitMode::Lossy).map_err(EmitError)?;
+    let mut coverage =
+        coverage_for_document(&document, mode == EmitMode::Lossy).map_err(EmitError)?;
     let type_scan = scan_type_references(&document);
     if let Some(path) = type_scan.fractional_constraint_paths.first() {
         return Err(EmitError(format!(
             "the TypeScript emitter cannot enforce fractional integer constraint {path}"
         )));
     }
+    if mode == EmitMode::Strict && !type_scan.decimal_paths.is_empty() {
+        return Err(EmitError(format!(
+            "the TypeScript emitter cannot read a decimal that crosses the wire as a number at {}, because a JSON number rounds the digits the contract declares",
+            type_scan.decimal_paths.join(", ")
+        )));
+    }
+    for subject in subjects_reaching_a_decimal(&type_scan, &document) {
+        if coverage.exact.remove(&subject) || coverage.opaque.remove(&subject) {
+            coverage.lossy.insert(subject);
+        }
+    }
+    let decimal_paths = type_scan.decimal_paths;
     let opaque_paths = type_scan.opaque_paths;
     let wide_integers = type_scan.wide_paths;
     let names = type_names(&document);
@@ -167,6 +181,12 @@ pub fn emit_with_strategy(
                 wide_integers.join(", ")
             ));
         }
+        if !decimal_paths.is_empty() {
+            warnings.push(format!(
+                "TypeScript emits decimals that cross the wire as numbers at {}",
+                decimal_paths.join(", ")
+            ));
+        }
         if !opaque_paths.is_empty() {
             warnings.push(format!(
                 "TypeScript emits opaque values as unknown at {}",
@@ -194,51 +214,100 @@ fn strict_coverage_error(mode: EmitMode, coverage: &Coverage) -> Result<(), Emit
 struct TypeScan {
     wide_paths: Vec<String>,
     opaque_paths: Vec<String>,
+    decimal_paths: Vec<String>,
     fractional_constraint_paths: Vec<String>,
+    decimal_owners: BTreeSet<String>,
+    references: BTreeMap<String, Vec<String>>,
+}
+
+const COMMON_ERRORS: &str = "common_errors";
+
+fn subjects_reaching_a_decimal(scan: &TypeScan, document: &Document) -> BTreeSet<String> {
+    let mut subjects = scan.decimal_owners.clone();
+    loop {
+        let reached = scan
+            .references
+            .iter()
+            .filter(|(owner, references)| {
+                !subjects.contains(*owner)
+                    && references.iter().any(|target| subjects.contains(target))
+            })
+            .map(|(owner, _)| owner.clone())
+            .collect::<Vec<_>>();
+        if reached.is_empty() {
+            break;
+        }
+        subjects.extend(reached);
+    }
+    if subjects.remove(COMMON_ERRORS) {
+        subjects.extend(
+            document
+                .operations
+                .iter()
+                .filter(|operation| operation.errors_inherit)
+                .map(|operation| format!("operations.{}", operation_subject(operation))),
+        );
+    }
+    subjects
 }
 
 fn scan_type_references(document: &Document) -> TypeScan {
     let mut scan = TypeScan::default();
     for (id, definition) in &document.types {
-        scan_definition(&format!("types.{id}"), definition, &mut scan);
+        let subject = type_subject(id);
+        scan_definition(&subject, &subject, definition, &mut scan);
     }
     for (index, error) in document.common_errors.iter().enumerate() {
         if let Some(body) = &error.body {
-            scan_type_ref(body, &format!("common_errors[{index}].body"), &mut scan);
+            scan_type_ref(
+                body,
+                &format!("common_errors[{index}].body"),
+                COMMON_ERRORS,
+                &mut scan,
+            );
         }
         for (header_index, header) in error.headers.iter().enumerate() {
             scan_type_ref(
                 &header.ty,
                 &format!("common_errors[{index}].headers[{header_index}].ty"),
+                COMMON_ERRORS,
                 &mut scan,
             );
         }
     }
     for (index, operation) in document.operations.iter().enumerate() {
         let prefix = format!("operations[{index}]");
+        let subject = format!("operations.{}", operation_subject(operation));
         for (segment_index, segment) in operation.path.iter().enumerate() {
             if let PathSegment::Param { ty, .. } = segment {
-                scan_type_ref(ty, &format!("{prefix}.path[{segment_index}].ty"), &mut scan);
+                scan_type_ref(
+                    ty,
+                    &format!("{prefix}.path[{segment_index}].ty"),
+                    &subject,
+                    &mut scan,
+                );
             }
         }
         if let Some(query) = &operation.query {
-            scan_type_ref(query, &format!("{prefix}.query"), &mut scan);
+            scan_type_ref(query, &format!("{prefix}.query"), &subject, &mut scan);
         }
         for (header_index, header) in operation.headers.iter().enumerate() {
             scan_type_ref(
                 &header.ty,
                 &format!("{prefix}.headers[{header_index}].ty"),
+                &subject,
                 &mut scan,
             );
         }
         if let Some(body) = &operation.body {
-            scan_type_ref(&body.ty, &format!("{prefix}.body.ty"), &mut scan);
+            scan_type_ref(&body.ty, &format!("{prefix}.body.ty"), &subject, &mut scan);
         }
         for (response_index, response) in operation.responses.iter().enumerate() {
             if let Some(body) = &response.body {
                 scan_type_ref(
                     body,
                     &format!("{prefix}.responses[{response_index}].body"),
+                    &subject,
                     &mut scan,
                 );
             }
@@ -246,6 +315,7 @@ fn scan_type_references(document: &Document) -> TypeScan {
                 scan_type_ref(
                     &header.ty,
                     &format!("{prefix}.responses[{response_index}].headers[{header_index}].ty"),
+                    &subject,
                     &mut scan,
                 );
             }
@@ -255,6 +325,7 @@ fn scan_type_references(document: &Document) -> TypeScan {
                 scan_type_ref(
                     body,
                     &format!("{prefix}.errors[{error_index}].body"),
+                    &subject,
                     &mut scan,
                 );
             }
@@ -262,6 +333,7 @@ fn scan_type_references(document: &Document) -> TypeScan {
                 scan_type_ref(
                     &header.ty,
                     &format!("{prefix}.errors[{error_index}].headers[{header_index}].ty"),
+                    &subject,
                     &mut scan,
                 );
             }
@@ -273,16 +345,27 @@ fn scan_type_references(document: &Document) -> TypeScan {
                         scan_type_ref(
                             &event.data,
                             &format!("{prefix}.stream.events[{event_index}].data"),
+                            &subject,
                             &mut scan,
                         );
                     }
                 }
                 StreamKind::Ndjson { item } => {
-                    scan_type_ref(item, &format!("{prefix}.stream.item"), &mut scan);
+                    scan_type_ref(item, &format!("{prefix}.stream.item"), &subject, &mut scan);
                 }
                 StreamKind::Websocket { client, server } => {
-                    scan_type_ref(client, &format!("{prefix}.stream.client"), &mut scan);
-                    scan_type_ref(server, &format!("{prefix}.stream.server"), &mut scan);
+                    scan_type_ref(
+                        client,
+                        &format!("{prefix}.stream.client"),
+                        &subject,
+                        &mut scan,
+                    );
+                    scan_type_ref(
+                        server,
+                        &format!("{prefix}.stream.server"),
+                        &subject,
+                        &mut scan,
+                    );
                 }
                 StreamKind::Bytes { .. } => {}
             }
@@ -291,7 +374,7 @@ fn scan_type_references(document: &Document) -> TypeScan {
     scan
 }
 
-fn scan_definition(path: &str, definition: &TypeDef, scan: &mut TypeScan) {
+fn scan_definition(path: &str, owner: &str, definition: &TypeDef, scan: &mut TypeScan) {
     match &definition.definition {
         TypeKind::Struct {
             fields,
@@ -299,13 +382,23 @@ fn scan_definition(path: &str, definition: &TypeDef, scan: &mut TypeScan) {
             openness,
         } => {
             for (index, field) in fields.iter().enumerate() {
-                scan_type_ref(&field.ty, &format!("{path}.fields[{index}].ty"), scan);
+                scan_type_ref(
+                    &field.ty,
+                    &format!("{path}.fields[{index}].ty"),
+                    owner,
+                    scan,
+                );
             }
             for (index, reference) in flattened.iter().enumerate() {
-                scan_type_ref(reference, &format!("{path}.flattened[{index}]"), scan);
+                scan_type_ref(
+                    reference,
+                    &format!("{path}.flattened[{index}]"),
+                    owner,
+                    scan,
+                );
             }
             if let ObjectOpenness::PreserveTyped { value } = openness {
-                scan_type_ref(value, &format!("{path}.openness.value"), scan);
+                scan_type_ref(value, &format!("{path}.openness.value"), owner, scan);
             }
         }
         TypeKind::Enum { variants, .. } => {
@@ -313,32 +406,45 @@ fn scan_definition(path: &str, definition: &TypeDef, scan: &mut TypeScan) {
                 scan_payload(
                     &variant.payload,
                     &format!("{path}.variants[{variant_index}].payload"),
+                    owner,
                     scan,
                 );
             }
         }
-        TypeKind::Newtype { inner } => scan_type_ref(inner, &format!("{path}.inner"), scan),
+        TypeKind::Newtype { inner } => scan_type_ref(inner, &format!("{path}.inner"), owner, scan),
     }
 }
 
-fn scan_payload(payload: &VariantPayload, path: &str, scan: &mut TypeScan) {
+fn scan_payload(payload: &VariantPayload, path: &str, owner: &str, scan: &mut TypeScan) {
     match payload {
         VariantPayload::Unit => {}
-        VariantPayload::Newtype { ty } => scan_type_ref(ty, &format!("{path}.ty"), scan),
+        VariantPayload::Newtype { ty } => scan_type_ref(ty, &format!("{path}.ty"), owner, scan),
         VariantPayload::Tuple { items } => {
             for (index, item) in items.iter().enumerate() {
-                scan_type_ref(item, &format!("{path}.items[{index}]"), scan);
+                scan_type_ref(item, &format!("{path}.items[{index}]"), owner, scan);
             }
         }
         VariantPayload::Struct { fields } => {
             for (index, field) in fields.iter().enumerate() {
-                scan_type_ref(&field.ty, &format!("{path}.fields[{index}].ty"), scan);
+                scan_type_ref(
+                    &field.ty,
+                    &format!("{path}.fields[{index}].ty"),
+                    owner,
+                    scan,
+                );
             }
         }
     }
 }
 
-fn scan_type_ref(reference: &TypeRef, path: &str, scan: &mut TypeScan) {
+fn scan_type_ref(reference: &TypeRef, path: &str, owner: &str, scan: &mut TypeScan) {
+    if let TypeRef::Named(named) = reference {
+        scan.references
+            .entry(owner.to_owned())
+            .or_default()
+            .push(type_subject(&named.id));
+        return;
+    }
     let TypeRef::Inline(inline) = reference else {
         return;
     };
@@ -368,16 +474,24 @@ fn scan_type_ref(reference: &TypeRef, path: &str, scan: &mut TypeScan) {
                 }
             }
         }
+        InlineType::Decimal {
+            wire: DecimalWire::Number,
+        } => {
+            scan.decimal_paths.push(path.to_owned());
+            scan.decimal_owners.insert(owner.to_owned());
+        }
         InlineType::Opaque { .. } => scan.opaque_paths.push(path.to_owned()),
-        InlineType::Nullable { inner } => scan_type_ref(inner, &format!("{path}.inner"), scan),
-        InlineType::Array { item, .. } => scan_type_ref(item, &format!("{path}.item"), scan),
+        InlineType::Nullable { inner } => {
+            scan_type_ref(inner, &format!("{path}.inner"), owner, scan)
+        }
+        InlineType::Array { item, .. } => scan_type_ref(item, &format!("{path}.item"), owner, scan),
         InlineType::Map { key, value } => {
-            scan_type_ref(key, &format!("{path}.key"), scan);
-            scan_type_ref(value, &format!("{path}.value"), scan);
+            scan_type_ref(key, &format!("{path}.key"), owner, scan);
+            scan_type_ref(value, &format!("{path}.value"), owner, scan);
         }
         InlineType::Tuple { items } => {
             for (index, item) in items.iter().enumerate() {
-                scan_type_ref(item, &format!("{path}.items[{index}]"), scan);
+                scan_type_ref(item, &format!("{path}.items[{index}]"), owner, scan);
             }
         }
         _ => {}
@@ -436,8 +550,8 @@ fn type_names(document: &Document) -> BTreeMap<String, String> {
         .iter()
         .map(|(id, definition)| {
             (
-                type_name_base(id, &pascal(&definition.name)),
-                role(id).is_some(),
+                pair_name(document, definition),
+                is_split_half(definition),
                 id.clone(),
             )
         })
@@ -451,17 +565,22 @@ fn type_names(document: &Document) -> BTreeMap<String, String> {
         .collect()
 }
 
-fn type_name_base(id: &str, base: &str) -> String {
-    match role(id) {
-        Some(role) => format!("{base}{}", pascal(&[role.to_owned()])),
-        None => base.to_owned(),
+fn pair_name(document: &Document, definition: &TypeDef) -> String {
+    let own = pascal(&definition.name);
+    if !is_split_half(definition) {
+        return own;
     }
+    let base = definition
+        .origin
+        .as_deref()
+        .and_then(|origin| document.types.get(origin))
+        .filter(|partner| partner.direction == Direction::Output)
+        .map_or(own, |partner| pascal(&partner.name));
+    format!("{base}Input")
 }
 
-fn role(id: &str) -> Option<&str> {
-    let role = id.rsplit_once('#')?.1;
-    (!role.is_empty() && role.chars().all(|c| c.is_ascii_alphanumeric() || c == '_'))
-        .then_some(role)
+fn is_split_half(definition: &TypeDef) -> bool {
+    definition.origin.is_some() && definition.direction == Direction::Input
 }
 
 fn pascal(words: &[String]) -> String {
@@ -586,10 +705,10 @@ pub(crate) fn string(value: &str) -> String {
 #[cfg(test)]
 mod tests {
     use pons_ir::{
-        ContentKind, Document, IR_VERSION, InlineType, IntegerWire, ObjectOpenness, PathSegment,
-        ResponseStatus, StreamKind, TypeKind, TypeRef,
+        ContentKind, Document, IR_VERSION, InlineType, IntegerWire, NamedRef, ObjectOpenness,
+        PathSegment, ResponseStatus, StreamKind, TypeKind, TypeRef,
     };
-    use serde_json::json;
+    use serde_json::{Value, json};
     use std::collections::{BTreeMap, BTreeSet};
 
     #[test]
@@ -1434,6 +1553,65 @@ mod tests {
     }
 
     #[test]
+    fn an_untagged_enum_is_lossy_and_strict_mode_refuses_it() {
+        let document = untagged_document();
+        let canonical = pons_ir::canonical_coverage(&document, false).unwrap();
+        assert_eq!(
+            canonical["types.Choice"],
+            pons_ir::CoverageLevel::Lossy,
+            "{canonical:?}"
+        );
+
+        let refused = super::emit_with_mode(&document, super::EmitMode::Strict).unwrap_err();
+        assert_eq!(
+            refused.to_string(),
+            "the TypeScript emitter reported lossy coverage in strict mode: \
+             operations.post.send, types.Choice"
+        );
+        let emitted = super::emit_with_mode(&document, super::EmitMode::Lossy).unwrap();
+        assert_eq!(
+            emitted.coverage.lossy,
+            ["operations.post.send", "types.Choice"]
+                .into_iter()
+                .map(str::to_owned)
+                .collect()
+        );
+        assert!(emitted.coverage.exact.is_empty());
+    }
+
+    fn untagged_document() -> Document {
+        let document: Document = serde_json::from_value(serde_json::json!({
+            "ir_version": "0.2",
+            "info": {"title": "Example", "version": "1"},
+            "types": {
+                "Choice": {
+                    "kind": "enum", "name": ["choice"], "direction": "both",
+                    "repr": {"kind": "untagged"},
+                    "variants": [
+                        {"wire": "text", "ident": ["text"],
+                         "payload": {"kind": "newtype", "ty": {"kind": "string"}}},
+                        {"wire": "count", "ident": ["count"],
+                         "payload": {"kind": "newtype", "ty": {"kind": "int", "bits": 8,
+                             "signed": false, "wire": "number"}}}
+                    ]
+                }
+            },
+            "operations": [{
+                "id": [["post"], ["send"]],
+                "method": "POST",
+                "path": [{"lit": "send"}],
+                "body": {"ty": {"ref": "Choice"}, "content": "json", "required": true},
+                "responses": [{"status": 200, "content": "json", "body": {"kind": "string"}}],
+                "auth": {"alternatives": [], "optional": false},
+                "semantics": {"safe": false, "idempotent": false}
+            }]
+        }))
+        .unwrap();
+        document.validate().unwrap();
+        document
+    }
+
+    #[test]
     fn types_sse_error_events_as_stream_failures() {
         let mut document: Document =
             serde_json::from_str(include_str!("../../../fixtures/login.json")).unwrap();
@@ -1543,37 +1721,38 @@ mod tests {
         }
     }
 
-    fn carriers(definitions: &[(&str, &str, &str)]) -> Document {
-        let mut document: Document =
+    fn carriers(definitions: &[(&str, Value)]) -> Document {
+        let mut raw: Value =
             serde_json::from_str(include_str!("../../../fixtures/login.json")).unwrap();
-        for (id, name, marker) in definitions {
-            document.types.insert(
-                (*id).into(),
-                serde_json::from_value(json!({
-                    "kind": "struct",
-                    "name": [name],
-                    "direction": "input",
-                    "openness": "reject",
-                    "fields": [{
-                        "wire": marker,
-                        "ident": [marker],
-                        "ty": {"kind": "string"},
-                        "presence": "required"
-                    }]
-                }))
-                .unwrap(),
-            );
+        for (id, definition) in definitions {
+            raw["types"][*id] = definition.clone();
         }
-        document
+        serde_json::from_value(raw).unwrap()
+    }
+
+    fn carrier(name: &[&str], direction: &str, origin: Option<&str>, marker: &str) -> Value {
+        json!({
+            "kind": "struct",
+            "name": name,
+            "direction": direction,
+            "origin": origin,
+            "openness": "reject",
+            "fields": [{
+                "wire": marker,
+                "ident": [marker],
+                "ty": {"kind": "string"},
+                "presence": "required"
+            }]
+        })
+    }
+
+    fn file<'a>(files: &'a [crate::GeneratedFile], path: &str) -> &'a str {
+        &files.iter().find(|file| file.path == path).unwrap().content
     }
 
     fn aliases(document: &Document) -> BTreeMap<String, String> {
-        let types = super::emit(document)
-            .unwrap()
-            .into_iter()
-            .find(|file| file.path == "types.ts")
-            .unwrap()
-            .content;
+        let files = super::emit(document).unwrap();
+        let types = file(&files, "types.ts");
         let aliases = types
             .lines()
             .filter_map(|line| line.strip_prefix("export type "))
@@ -1598,43 +1777,88 @@ mod tests {
     }
 
     #[test]
-    fn names_each_role_of_one_type_after_the_role_its_id_carries() {
-        let both = aliases(&carriers(&[
-            ("router::Q#input", "q", "body"),
-            ("router::Q#query", "q", "query"),
-        ]));
-        assert_eq!(both["QInput"], "{ \"body\": string }");
-        assert_eq!(both["QQuery"], "{ \"query\": string }");
+    fn names_a_direction_pair_after_the_pair_and_never_after_the_id() {
+        let mut document = carriers(&[
+            (
+                "router::Account",
+                carrier(&["account"], "output", Some("router::Account"), "id"),
+            ),
+            (
+                "storefront::AccountRequest",
+                carrier(
+                    &["account", "request"],
+                    "input",
+                    Some("router::Account"),
+                    "email",
+                ),
+            ),
+        ]);
+        let login = &mut document.operations[0];
+        login.body.as_mut().unwrap().ty = TypeRef::Named(NamedRef {
+            id: "storefront::AccountRequest".into(),
+            variant: None,
+        });
+        login.responses[0].body = Some(TypeRef::Named(NamedRef {
+            id: "router::Account".into(),
+            variant: None,
+        }));
+
+        let files = super::emit(&document).unwrap();
+        let types = file(&files, "types.ts");
+        let client = file(&files, "client.ts");
         assert!(
-            both.keys().all(|name| !name.contains('#')),
-            "{both:?} leaks an id role"
+            types.contains("export type Account = { \"id\": string };"),
+            "{types}"
         );
         assert!(
-            both["User"].contains("\"id\": string") && !both.contains_key("User2"),
-            "{both:?} renames a type one definition publishes"
+            types.contains("export type AccountInput = { \"email\": string };"),
+            "{types}"
+        );
+        assert!(
+            client.contains("Types.AccountInput") && client.contains("Types.Account"),
+            "{client}"
+        );
+        assert!(
+            types.lines().all(|line| !line.contains('#')),
+            "{types} leaks an id"
         );
 
-        let reversed = aliases(&carriers(&[
-            ("a::Q#query", "q", "query"),
-            ("z::Q#input", "q", "body"),
-        ]));
-        assert_eq!(reversed["QInput"], "{ \"body\": string }");
-        assert_eq!(reversed["QQuery"], "{ \"query\": string }");
-
-        let lone = aliases(&carriers(&[("router::Q#query", "q", "query")]));
-        assert_eq!(
-            lone["QQuery"], "{ \"query\": string }",
-            "pruning a sibling leaves the survivor's alias alone"
+        let lone = carriers(&[(
+            "storefront::AccountRequest",
+            carrier(&["account"], "input", Some("router::Account"), "email"),
+        )]);
+        let files = super::emit(&lone).unwrap();
+        assert!(
+            file(&files, "types.ts").contains("export type AccountInput = { \"email\": string };"),
+            "pruning the response half leaves the request half the pair's name"
         );
-        assert!(!lone.contains_key("QInput"));
+        assert!(!file(&files, "types.ts").contains("export type Account ="));
     }
 
     #[test]
-    fn a_role_suffixed_alias_never_takes_the_alias_another_type_publishes() {
+    fn a_pair_that_declares_no_origin_keeps_its_own_display_name() {
         let names = aliases(&carriers(&[
-            ("a::Q#input", "q", "first"),
-            ("b::Q#input", "q", "second"),
-            ("c::qInput", "qInput", "published"),
+            ("a::Account", carrier(&["account"], "output", None, "id")),
+            ("b::Account", carrier(&["account"], "input", None, "email")),
+        ]));
+        assert_eq!(names["Account"], "{ \"id\": string }");
+        assert_eq!(names["Account2"], "{ \"email\": string }");
+        assert!(!names.contains_key("AccountInput"));
+    }
+
+    #[test]
+    fn a_suffixed_alias_never_takes_the_alias_another_type_publishes() {
+        let names = aliases(&carriers(&[
+            ("a::Q", carrier(&["q"], "output", Some("a::Q"), "answer")),
+            (
+                "a::Q#input",
+                carrier(&["q"], "input", Some("a::Q"), "first"),
+            ),
+            (
+                "b::Q#input",
+                carrier(&["q"], "input", Some("b::Q"), "second"),
+            ),
+            ("c::qInput", carrier(&["qInput"], "both", None, "published")),
         ]));
         assert_eq!(names["QInput"], "{ \"published\": string }");
         assert_eq!(names["QInput2"], "{ \"first\": string }");

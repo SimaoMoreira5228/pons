@@ -1642,6 +1642,7 @@ fn auth_scheme_documentation_changes_are_not_breaking() {
             "custom".into(),
             AuthScheme::Custom {
                 description: "first".into(),
+                adapter: None,
                 ext: BTreeMap::new(),
             },
         );
@@ -1652,6 +1653,7 @@ fn auth_scheme_documentation_changes_are_not_breaking() {
         "custom".into(),
         AuthScheme::Custom {
             description: "second".into(),
+            adapter: None,
             ext: BTreeMap::new(),
         },
     );

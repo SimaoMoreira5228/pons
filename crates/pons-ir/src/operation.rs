@@ -552,6 +552,8 @@ pub enum AuthScheme {
     },
     Custom {
         description: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        adapter: Option<String>,
         #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
         ext: BTreeMap<String, Value>,
     },

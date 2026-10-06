@@ -66,6 +66,14 @@ function isCookieAuth(definition: { kind: string; location?: string } | undefine
   return definition?.kind === "cookie" || (definition?.kind === "api_key" && definition.location === "cookie");
 }
 
+function customAdapter(
+  client: ConfiguredClient,
+  definition: { adapter?: string },
+  scheme: string,
+): AuthAdapter | undefined {
+  return client.authAdapters?.[definition.adapter ?? scheme];
+}
+
 async function request<T, E>(
   client: ConfiguredClient,
   method: string,
@@ -154,7 +162,7 @@ async function request<T, E>(
           break;
         }
         if (definition.kind === "custom") {
-          if (client.authAdapters?.[scheme] === undefined) {
+          if (customAdapter(client, definition, scheme) === undefined) {
             available = false;
             break;
           }
@@ -200,7 +208,7 @@ async function request<T, E>(
       const definition = authSchemes[scheme];
       if (definition === undefined) continue;
       if (definition.kind === "custom") {
-        const adapter = client.authAdapters?.[scheme];
+        const adapter = customAdapter(client, definition, scheme);
         if (adapter === undefined) continue;
         try {
           const scopes = Object.prototype.hasOwnProperty.call(authScopes, scheme) ? [...(authScopes[scheme] ?? [])] : [];
@@ -632,7 +640,7 @@ async function applyCapturedCredential(
     dropCredentialScheme(attachedCustomCredentials, provides.scheme);
     dropCredentialScheme(attachedQueryCredentials, provides.scheme);
     if (!invalidated) {
-      const adapter = client.authAdapters?.[provides.scheme];
+      const adapter = customAdapter(client, definition, provides.scheme);
       if (adapter !== undefined) {
         const scopes = Object.prototype.hasOwnProperty.call(authScopes, provides.scheme) ? [...(authScopes[provides.scheme] ?? [])] : [];
         const attachment = await adapter({ scheme: provides.scheme, scopes, method, url, headers });

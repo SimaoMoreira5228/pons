@@ -82,6 +82,7 @@ impl TypeKind {
                 fields, flattened, ..
             } => {
                 fields.sort_by(|left, right| left.wire.cmp(&right.wire));
+                fields.iter_mut().for_each(Field::canonicalize);
                 flattened.sort_by_cached_key(|ty| serde_json::to_string(ty).unwrap_or_default());
             }
             Self::Enum { variants, .. } => {
@@ -143,6 +144,7 @@ impl VariantPayload {
     pub(crate) fn canonicalize(&mut self) {
         if let Self::Struct { fields } = self {
             fields.sort_by(|left, right| left.wire.cmp(&right.wire));
+            fields.iter_mut().for_each(Field::canonicalize);
         }
     }
 }
@@ -172,6 +174,19 @@ pub enum FieldDefault {
     #[default]
     Unspecified,
     Value(Value),
+}
+
+impl Field {
+    pub(crate) fn canonicalize(&mut self) {
+        let Some(Value::Array(aliases)) = self.ext.get_mut(crate::ext::ALIAS) else {
+            return;
+        };
+        aliases.sort_by(|left, right| {
+            left.as_str()
+                .unwrap_or_default()
+                .cmp(right.as_str().unwrap_or_default())
+        });
+    }
 }
 
 impl FieldDefault {

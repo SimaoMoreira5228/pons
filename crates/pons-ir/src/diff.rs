@@ -375,8 +375,11 @@ fn diff_auth_schemes(diff: &mut Diff, used: &mut BTreeSet<String>, old: &Documen
                 AuthScheme::Custom {
                     description: old,
                     ext: old_ext,
+                    ..
                 },
-                AuthScheme::Custom { description, ext },
+                AuthScheme::Custom {
+                    description, ext, ..
+                },
             ) => {
                 if old != description {
                     add(

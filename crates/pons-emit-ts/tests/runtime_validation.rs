@@ -1609,6 +1609,7 @@ fn reattaches_query_credentials_across_same_origin_redirects() {
         "adapter".into(),
         pons_ir::AuthScheme::Custom {
             description: "query adapter".into(),
+            adapter: None,
             ext: Default::default(),
         },
     );
@@ -3011,6 +3012,7 @@ fn snapshots_cookie_scope_across_concurrent_capture() {
         "adapter".into(),
         pons_ir::AuthScheme::Custom {
             description: "delayed adapter".into(),
+            adapter: None,
             ext: Default::default(),
         },
     );
@@ -3454,6 +3456,7 @@ fn does_not_inherit_custom_auth_scopes() {
         "toString".into(),
         pons_ir::AuthScheme::Custom {
             description: "scope probe".into(),
+            adapter: None,
             ext: Default::default(),
         },
     );
@@ -3487,6 +3490,73 @@ await client.events.watch({ path: { cursor: "cursor" }, query: {}, headers: {} }
 }
 
 #[test]
+fn a_custom_scheme_is_served_by_the_adapter_id_it_declares() {
+    let mut document: pons_ir::Document =
+        serde_json::from_str(include_str!("../../../fixtures/login.json")).unwrap();
+    document.auth_schemes.insert(
+        "tenant".into(),
+        pons_ir::AuthScheme::Custom {
+            description: "tenant adapter".into(),
+            adapter: Some("tenantSignature".into()),
+            ext: Default::default(),
+        },
+    );
+    document.operations[1].auth.alternatives = vec![vec!["tenant".into()]];
+
+    let files = emit_with_strategy(&document, EmitMode::Strict, ErrorStrategy::Throw)
+        .unwrap()
+        .files;
+    let client = files.iter().find(|file| file.path == "client.ts").unwrap();
+    assert!(
+        client.content.contains(
+            "authSchemes[\"tenant\"] = { kind: \"custom\", adapter: \"tenantSignature\" };"
+        ),
+        "{}",
+        client.content
+    );
+    let harness = r#"
+import { createClient } from "./client.ts";
+
+const stream = () => new Response(new ReadableStream({ start(controller) { controller.close(); } }), {
+  status: 200,
+  headers: { "content-type": "text/event-stream", "X-Trace-ID": "trace" },
+});
+
+const byScheme = createClient({
+  baseUrl: "https://example.test",
+  authAdapters: { tenant: () => ({ headers: { "x-tenant": "signed" } }) },
+  fetch: async () => stream(),
+});
+let failure: any;
+try {
+  await byScheme.events.watch({ path: { cursor: "cursor" }, query: {}, headers: {} });
+} catch (cause) {
+  failure = cause;
+}
+if (failure?.kind !== "auth") throw new Error(`the scheme id served the adapter: ${JSON.stringify(failure)}`);
+
+const declared: string[] = [];
+const byAdapter = createClient({
+  baseUrl: "https://example.test",
+  authAdapters: {
+    tenantSignature: ({ scheme }) => {
+      declared.push(scheme);
+      return { headers: { "x-tenant": "signed" } };
+    },
+  },
+  fetch: async (_url, init) => {
+    const headers = new Headers(init?.headers);
+    if (headers.get("x-tenant") !== "signed") throw new Error("the declared adapter did not attach its header");
+    return stream();
+  },
+});
+await byAdapter.events.watch({ path: { cursor: "cursor" }, query: {}, headers: {} });
+if (declared.join(",") !== "tenant") throw new Error(`adapter context named ${declared.join(",")}`);
+"#;
+    run_bun(&files, harness);
+}
+
+#[test]
 fn preserves_proto_auth_scheme_and_custom_adapter_scopes() {
     let mut document: pons_ir::Document =
         serde_json::from_str(include_str!("../../../fixtures/login.json")).unwrap();
@@ -3494,6 +3564,7 @@ fn preserves_proto_auth_scheme_and_custom_adapter_scopes() {
         "__proto__".into(),
         pons_ir::AuthScheme::Custom {
             description: "prototype adapter".into(),
+            adapter: None,
             ext: Default::default(),
         },
     );
@@ -3546,6 +3617,7 @@ fn revalidates_custom_auth_origin_after_request_interceptors() {
         "adapter".into(),
         pons_ir::AuthScheme::Custom {
             description: "origin probe".into(),
+            adapter: None,
             ext: Default::default(),
         },
     );
@@ -4384,7 +4456,7 @@ fn narrowed_untagged_document() -> pons_ir::Document {
 #[test]
 fn a_narrowed_untagged_variant_only_tries_the_variant_it_names() {
     let document = narrowed_untagged_document();
-    let files = emit_with_strategy(&document, EmitMode::Strict, ErrorStrategy::Throw)
+    let files = emit_with_strategy(&document, EmitMode::Lossy, ErrorStrategy::Throw)
         .unwrap()
         .files;
     let client = files.iter().find(|file| file.path == "client.ts").unwrap();
@@ -4431,6 +4503,7 @@ fn drops_refreshed_custom_query_credentials_across_redirects() {
         "adapter".into(),
         pons_ir::AuthScheme::Custom {
             description: "query adapter".into(),
+            adapter: None,
             ext: Default::default(),
         },
     );

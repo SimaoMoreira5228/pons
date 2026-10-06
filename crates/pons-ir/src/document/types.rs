@@ -102,6 +102,20 @@ impl Document {
                         message: "enum needs at least one variant".into(),
                     });
                 }
+                if variants.len() == 1
+                    && !matches!(definition.direction, Direction::Output)
+                    && let Some(variant) = variants.first()
+                    && crate::ext::catch_all(variant)
+                {
+                    errors.push(ValidationError::InvalidValue {
+                        path: owner.clone(),
+                        message: format!(
+                            "the only variant {} is the {} catch-all, and an input-side type the request reads accepts anything, so the contract describes nothing",
+                            variant.wire,
+                            crate::ext::OPEN_VARIANT
+                        ),
+                    });
+                }
                 let mut names = BTreeSet::new();
                 for variant in variants {
                     self.validate_diagnostics(
@@ -113,6 +127,18 @@ impl Document {
                         errors.push(ValidationError::InvalidValue {
                             path: owner.clone(),
                             message: format!("duplicate enum variant {}", variant.wire),
+                        });
+                    }
+                    if crate::ext::catch_all(variant)
+                        && !matches!(variant.payload, VariantPayload::Unit)
+                    {
+                        errors.push(ValidationError::InvalidValue {
+                            path: owner.clone(),
+                            message: format!(
+                                "the {} catch-all on variant {} must have a unit payload, because it is the value no other variant claims",
+                                crate::ext::OPEN_VARIANT,
+                                variant.wire
+                            ),
                         });
                     }
                     if matches!(repr, EnumRepr::String)
@@ -350,7 +376,7 @@ impl Document {
                 &field.diagnostics,
                 errors,
             );
-            if !names.insert(&field.wire) {
+            if !names.insert(field.wire.as_str()) {
                 errors.push(ValidationError::InvalidValue {
                     path: owner.into(),
                     message: format!("duplicate field {}", field.wire),
@@ -398,7 +424,74 @@ impl Document {
                     ),
                 });
             }
+            self.check_aliases(owner, direction, field, &mut names, errors);
         }
+    }
+
+    fn check_aliases<'a>(
+        &self,
+        owner: &str,
+        direction: Direction,
+        field: &'a Field,
+        names: &mut BTreeSet<&'a str>,
+        errors: &mut Vec<ValidationError>,
+    ) {
+        let Some(aliases) = field.ext.get(crate::ext::ALIAS) else {
+            return;
+        };
+        let path = format!("{owner}.fields.{}", field.wire);
+        let mut problems = Vec::new();
+        if super::Boundary::Request.refuses(direction)
+            || !super::field_crosses(field, super::Boundary::Request)
+        {
+            problems.push(format!(
+                "the aliases of field {} name input spellings of a key that never crosses a request boundary",
+                field.wire
+            ));
+        }
+        match aliases {
+            Value::Array(list) => {
+                let mut listed = BTreeSet::new();
+                for alias in list {
+                    let Some(name) = alias.as_str().filter(|name| !name.is_empty()) else {
+                        problems.push(format!(
+                            "every name in extension {} must be a non-empty string, found {alias}",
+                            crate::ext::ALIAS
+                        ));
+                        continue;
+                    };
+                    if name == field.wire {
+                        problems.push(format!(
+                            "the aliases of field {} cannot repeat its own wire name {name}",
+                            field.wire
+                        ));
+                        continue;
+                    }
+                    if !listed.insert(name) {
+                        problems.push(format!("the aliases of field {} repeat {name}", field.wire));
+                        continue;
+                    }
+                    if !names.insert(name) {
+                        problems.push(format!(
+                            "the alias {name} of field {} is already a key {owner} owns",
+                            field.wire
+                        ));
+                    }
+                }
+            }
+            other => problems.push(format!(
+                "extension {} must be an array of accepted input wire names, found {other}",
+                crate::ext::ALIAS
+            )),
+        }
+        errors.extend(
+            problems
+                .into_iter()
+                .map(|message| ValidationError::InvalidValue {
+                    path: path.clone(),
+                    message,
+                }),
+        );
     }
 
     pub(super) fn validate_header_name(

@@ -229,6 +229,7 @@ mod tests {
             "custom".into(),
             AuthScheme::Custom {
                 description: "custom auth".into(),
+                adapter: None,
                 ext: Default::default(),
             },
         );
@@ -263,6 +264,7 @@ mod tests {
             "custom".into(),
             AuthScheme::Custom {
                 description: "custom auth".into(),
+                adapter: None,
                 ext: Default::default(),
             },
         );

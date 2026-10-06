@@ -1142,6 +1142,237 @@ fn recursive_types_terminate() {
 }
 
 #[test]
+fn an_alias_is_another_accepted_spelling_of_a_field_on_the_input_side() {
+    let record = |field: Value| {
+        json!({
+            "Record": {
+                "kind": "struct",
+                "name": ["record"],
+                "direction": "both",
+                "openness": "reject",
+                "fields": [field],
+            }
+        })
+    };
+    let aliased = |wire: &str, aliases: Value, presence: &str, access: Option<&str>| {
+        let mut field = field(wire, &text(None, None, Some("[a-z]+")), presence);
+        field["ext"] = json!({"com.pons.alias/v1": aliases});
+        if let Some(access) = access {
+            field["access"] = json!(access);
+        }
+        record(field)
+    };
+
+    let types = aliased(
+        "user_name",
+        json!(["userName", "username"]),
+        "required",
+        None,
+    );
+    for value in [
+        json!({"user_name": "ada"}),
+        json!({"userName": "ada"}),
+        json!({"username": "ada"}),
+    ] {
+        checked_in(types.clone(), &named("Record"), Direction::Input, value);
+    }
+    assert_eq!(
+        messages(violations(
+            types.clone(),
+            &named("Record"),
+            Direction::Input,
+            json!({}),
+        )),
+        ["/user_name: missing required field user_name"]
+    );
+    assert_eq!(
+        messages(violations(
+            types.clone(),
+            &named("Record"),
+            Direction::Input,
+            json!({"UserName": "ada"}),
+        )),
+        [
+            "/user_name: missing required field user_name",
+            "/UserName: unknown property UserName"
+        ]
+    );
+    assert_eq!(
+        messages(violations(
+            types.clone(),
+            &named("Record"),
+            Direction::Input,
+            json!({"userName": "9"}),
+        )),
+        ["/user_name: string does not match the pattern [a-z]+"]
+    );
+    assert_eq!(
+        messages(violations(
+            types.clone(),
+            &named("Record"),
+            Direction::Input,
+            json!({"user_name": "ada", "userName": "ada"}),
+        )),
+        ["/userName: field user_name is written twice, once as user_name"]
+    );
+    assert_eq!(
+        messages(violations(
+            types.clone(),
+            &named("Record"),
+            Direction::Input,
+            json!({"user_name": "ada", "username": "ada"}),
+        )),
+        ["/username: field user_name is written twice, once as user_name"]
+    );
+
+    assert_eq!(
+        messages(violations(
+            types.clone(),
+            &named("Record"),
+            Direction::Output,
+            json!({"userName": "ada"}),
+        )),
+        [
+            "/user_name: missing required field user_name",
+            "/userName: unknown property userName"
+        ]
+    );
+    assert_eq!(
+        messages(violations(
+            types.clone(),
+            &named("Record"),
+            Direction::Output,
+            json!({"username": "ada"}),
+        )),
+        [
+            "/user_name: missing required field user_name",
+            "/username: unknown property username"
+        ]
+    );
+
+    let optional = aliased("nickname", json!(["nickName"]), "optional", None);
+    checked_in(
+        optional.clone(),
+        &named("Record"),
+        Direction::Input,
+        json!({}),
+    );
+    checked_in(
+        optional,
+        &named("Record"),
+        Direction::Input,
+        json!({"nickName": "ada"}),
+    );
+}
+
+#[test]
+fn an_alias_spells_a_key_in_every_object_the_field_belongs_to() {
+    let types = json!({
+        "Open": {
+            "kind": "struct",
+            "name": ["open"],
+            "direction": "both",
+            "openness": {"preserve_typed": {"value": {
+                "kind": "map", "key": {"kind": "string"}, "value": {"kind": "string"}
+            }}},
+            "fields": [json!({
+                "wire": "user_name",
+                "ident": ["user_name"],
+                "ty": {"kind": "string"},
+                "presence": "required",
+                "ext": {"com.pons.alias/v1": ["userName"]}
+            })],
+        },
+        "Choice": {
+            "kind": "enum",
+            "name": ["choice"],
+            "direction": "both",
+            "repr": {"kind": "untagged"},
+            "variants": [{
+                "wire": "named",
+                "ident": ["named"],
+                "payload": {
+                    "kind": "struct",
+                    "fields": [{
+                        "wire": "user_name",
+                        "ident": ["user_name"],
+                        "ty": {"kind": "string"},
+                        "presence": "required",
+                        "ext": {"com.pons.alias/v1": ["userName"]}
+                    }]
+                }
+            }],
+        }
+    });
+    checked_in(
+        types.clone(),
+        &named("Open"),
+        Direction::Input,
+        json!({"userName": "ada", "note": "hi"}),
+    );
+    assert_eq!(
+        messages(violations(
+            types.clone(),
+            &named("Open"),
+            Direction::Input,
+            json!({"userName": "ada", "note": 7}),
+        )),
+        ["/note: expected a string, found a number"]
+    );
+    assert_eq!(
+        messages(violations(
+            types.clone(),
+            &named("Open"),
+            Direction::Input,
+            json!({"user_name": "ada", "userName": "ada", "note": "hi"}),
+        )),
+        ["/userName: field user_name is written twice, once as user_name"]
+    );
+    checked_in(
+        types.clone(),
+        &named("Choice"),
+        Direction::Input,
+        json!({"userName": "ada"}),
+    );
+    assert_eq!(
+        messages(violations(
+            types,
+            &named("Choice"),
+            Direction::Input,
+            json!({}),
+        )),
+        ["value matches none of the enum variants"]
+    );
+}
+
+#[test]
+fn a_catch_all_variant_still_reads_as_the_unit_payload_it_is() {
+    let types = enum_type(
+        "State",
+        json!({"kind": "string"}),
+        json!([
+            unit("open"),
+            json!({
+                "wire": "other",
+                "ident": ["other"],
+                "payload": {"kind": "unit"},
+                "ext": {"com.pons.open_variant/v1": true}
+            }),
+        ]),
+    );
+    checked(types.clone(), &named("State"), json!("other"));
+    assert_eq!(
+        messages(violations(
+            types,
+            &named("State"),
+            Direction::Both,
+            json!("gone")
+        )),
+        ["unknown enum variant gone"]
+    );
+}
+
+#[test]
 fn direction_controls_read_only_and_write_only_fields() {
     let field = |wire: &str, presence: &str, access: &str| {
         json!({

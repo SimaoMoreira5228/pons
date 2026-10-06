@@ -1937,6 +1937,160 @@ fn a_bound_spelled_with_an_exponent_bounds_the_values_it_denotes() {
 }
 
 #[test]
+fn an_alias_list_is_checked_and_sorted_into_one_canonical_form() {
+    let record = |fields: Value| {
+        contract(json!({
+            "Record": {
+                "kind": "struct", "name": ["record"], "direction": "both", "openness": "reject",
+                "fields": fields
+            }
+        }))
+    };
+    let keyed = |wire: &str, aliases: Value| {
+        json!({
+            "wire": wire, "ident": [wire], "ty": {"kind": "string"}, "presence": "optional",
+            "ext": {"com.pons.alias/v1": aliases}
+        })
+    };
+    let plain = json!({
+        "wire": "nickname", "ident": ["nickname"], "ty": {"kind": "string"}, "presence": "optional"
+    });
+
+    record(json!([
+        keyed("user_name", json!(["userName", "username"])),
+        plain.clone()
+    ]))
+    .validate()
+    .unwrap();
+
+    for (aliases, message) in [
+        (
+            json!("userName"),
+            "must be an array of accepted input wire names",
+        ),
+        (json!([["userName"]]), "must be a non-empty string"),
+        (json!([7]), "must be a non-empty string"),
+        (json!([""]), "must be a non-empty string"),
+        (json!(["userName", "userName"]), "repeat userName"),
+        (
+            json!(["user_name"]),
+            "cannot repeat its own wire name user_name",
+        ),
+        (json!(["nickname"]), "is already a key type Record owns"),
+    ] {
+        refuses(
+            &record(json!([plain.clone(), keyed("user_name", aliases)])),
+            message,
+        );
+    }
+    refuses(
+        &record(json!([keyed("nickname", json!(["nick"])), plain])),
+        "duplicate field nickname",
+    );
+
+    let mut forwards = record(json!([keyed("user_name", json!(["userName", "username"]))]));
+    let mut backwards = record(json!([keyed("user_name", json!(["username", "userName"]))]));
+    forwards.validate().unwrap();
+    backwards.validate().unwrap();
+    forwards.canonicalize();
+    backwards.canonicalize();
+    assert_eq!(
+        forwards.to_canonical_json().unwrap(),
+        backwards.to_canonical_json().unwrap()
+    );
+    assert!(forwards.diff(&backwards).changes.is_empty());
+}
+
+#[test]
+fn an_alias_is_refused_where_the_request_side_never_reads_the_key() {
+    let keyed = |access: Option<&str>, direction: &str| {
+        let mut field = json!({
+            "wire": "server_id", "ident": ["server_id"], "ty": {"kind": "string"},
+            "presence": "optional", "ext": {"com.pons.alias/v1": ["serverId"]}
+        });
+        if let Some(access) = access {
+            field["access"] = json!(access);
+            field["default"] = json!("server");
+        }
+        contract(json!({
+            "Record": {
+                "kind": "struct", "name": ["record"], "direction": direction,
+                "openness": "reject", "fields": [field]
+            }
+        }))
+    };
+    keyed(None, "input").validate().unwrap();
+    keyed(None, "both").validate().unwrap();
+    keyed(Some("write_only"), "both").validate().unwrap();
+    refuses(
+        &keyed(None, "output"),
+        "name input spellings of a key that never crosses a request boundary",
+    );
+    refuses(
+        &keyed(Some("read_only"), "both"),
+        "name input spellings of a key that never crosses a request boundary",
+    );
+    refuses(
+        &keyed(Some("read_only"), "input"),
+        "name input spellings of a key that never crosses a request boundary",
+    );
+}
+
+#[test]
+fn a_catch_all_variant_is_refused_as_the_only_variant_of_an_input_type() {
+    let state = |direction: &str, variants: Value| {
+        contract(json!({
+            "State": {
+                "kind": "enum", "name": ["state"], "direction": direction,
+                "repr": {"kind": "string"},
+                "variants": variants
+            }
+        }))
+    };
+    let catch_all = json!({
+        "wire": "other", "ident": ["other"], "payload": {"kind": "unit"},
+        "ext": {"com.pons.open_variant/v1": true}
+    });
+    let open = json!({"wire": "open", "ident": ["open"], "payload": {"kind": "unit"}});
+
+    state("output", json!([catch_all.clone()]))
+        .validate()
+        .unwrap();
+    for direction in ["input", "both"] {
+        state(direction, json!([catch_all.clone(), open.clone()]))
+            .validate()
+            .unwrap();
+        refuses(
+            &state(direction, json!([catch_all.clone()])),
+            "the only variant other is the com.pons.open_variant/v1 catch-all",
+        );
+    }
+    refuses(
+        &state(
+            "input",
+            json!([
+                json!({
+                    "wire": "other", "ident": ["other"],
+                    "payload": {"kind": "newtype", "ty": {"kind": "string"}},
+                    "ext": {"com.pons.open_variant/v1": true}
+                }),
+                open
+            ]),
+        ),
+        "must have a unit payload",
+    );
+    state(
+        "input",
+        json!([json!({
+            "wire": "other", "ident": ["other"], "payload": {"kind": "unit"},
+            "ext": {"com.pons.open_variant/v1": false}
+        })]),
+    )
+    .validate()
+    .unwrap();
+}
+
+#[test]
 fn extension_keys_carry_a_reverse_dns_namespace_and_a_version() {
     let with_key = |key: &str| {
         let mut document = fixture();
@@ -1951,6 +2105,8 @@ fn extension_keys_carry_a_reverse_dns_namespace_and_a_version() {
         "test.example.source/v1",
         "a.b-c.d-e/v0",
         "x.y1.z1/v12",
+        "com.pons.alias/v1",
+        "com.pons.open_variant/v1",
     ] {
         with_key(key).validate().unwrap_or_else(|errors| {
             panic!("{key} should be accepted: {errors:?}");
@@ -1991,7 +2147,7 @@ fn extension_keys_carry_a_reverse_dns_namespace_and_a_version() {
             "is not shaped reverse-dns.namespace/vN",
         ),
         (
-            "com.example.a_b/v1",
+            "com.example.curs-or/v1/x",
             "is not shaped reverse-dns.namespace/vN",
         ),
         (
@@ -2018,6 +2174,7 @@ fn every_object_carrying_an_extension_names_its_owner() {
         "custom".into(),
         pons_ir::AuthScheme::Custom {
             description: "d".into(),
+            adapter: None,
             ext: bad("note"),
         },
     );

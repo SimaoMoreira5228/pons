@@ -190,6 +190,9 @@ impl<'a> CoverageGraph<'a> {
         if kind == Some("opaque") || preserves_openness(fields.get("openness")) {
             return CoverageLevel::Opaque;
         }
+        if kind == Some("enum") && untagged(fields) {
+            return CoverageLevel::Lossy;
+        }
         if self.lossy_wide_integers
             && kind == Some("int")
             && fields.get("wire").and_then(Value::as_str) == Some("number")
@@ -233,6 +236,29 @@ fn preserves_openness(openness: Option<&Value>) -> bool {
         Some(Value::Object(_)) => true,
         _ => false,
     }
+}
+
+fn untagged(definition: &Map<String, Value>) -> bool {
+    definition
+        .get("repr")
+        .and_then(|repr| repr.get("kind"))
+        .and_then(Value::as_str)
+        == Some("untagged")
+        && definition
+            .get("variants")
+            .and_then(Value::as_array)
+            .is_some_and(|variants| {
+                variants
+                    .iter()
+                    .filter(|variant| {
+                        !matches!(
+                            variant.get("payload").and_then(|payload| payload.get("kind")),
+                            Some(Value::String(kind)) if kind == "unit"
+                        )
+                    })
+                    .count()
+                    > 1
+            })
 }
 
 fn referenced_value<'a>(
@@ -411,6 +437,103 @@ mod tests {
                 ("opaque", vec!["types.B".to_owned()]),
             ]
         );
+    }
+
+    #[test]
+    fn an_untagged_enum_that_several_payloads_compete_for_is_lossy() {
+        let ambiguous = untagged_document(json!([
+            unit("nothing"),
+            payload("text", json!({"kind": "string"})),
+            payload(
+                "count",
+                json!({"kind": "int", "bits": 8, "signed": false, "wire": "number"}),
+            ),
+        ]));
+        for mode in [false, true] {
+            let coverage = levels(&ambiguous, mode);
+            assert_eq!(coverage["types.Choice"], CoverageLevel::Lossy);
+            assert_eq!(coverage["types.Envelope"], CoverageLevel::Lossy);
+            assert_eq!(coverage["operations.post.send"], CoverageLevel::Lossy);
+            assert_eq!(
+                subjects_at(&coverage, CoverageLevel::Exact),
+                Vec::<&str>::new()
+            );
+            assert_eq!(
+                strict_violations(coverage, true),
+                vec![(
+                    "lossy",
+                    vec![
+                        "operations.post.send".to_owned(),
+                        "types.Choice".to_owned(),
+                        "types.Envelope".to_owned(),
+                    ]
+                )]
+            );
+        }
+    }
+
+    #[test]
+    fn an_untagged_enum_one_payload_can_win_stays_exact() {
+        for variants in [
+            json!([unit("nothing"), unit("empty")]),
+            json!([unit("nothing"), payload("text", json!({"kind": "string"}))]),
+            json!([payload("text", json!({"kind": "string"}))]),
+        ] {
+            let coverage = levels(&untagged_document(variants), false);
+            assert_eq!(coverage["types.Choice"], CoverageLevel::Exact);
+            assert_eq!(coverage["types.Envelope"], CoverageLevel::Exact);
+            assert_eq!(coverage["operations.post.send"], CoverageLevel::Exact);
+        }
+    }
+
+    fn untagged_document(variants: Value) -> Document {
+        let raw: Value =
+            serde_json::from_str(include_str!("../../../fixtures/login.json")).unwrap();
+        let raw = serde_json::json!({
+            "ir_version": raw["ir_version"],
+            "info": raw["info"],
+            "types": {
+                "Choice": {
+                    "kind": "enum",
+                    "name": ["choice"],
+                    "direction": "both",
+                    "repr": {"kind": "untagged"},
+                    "variants": variants
+                },
+                "Envelope": {
+                    "kind": "struct",
+                    "name": ["envelope"],
+                    "direction": "both",
+                    "openness": "reject",
+                    "fields": [{
+                        "wire": "choice",
+                        "ident": ["choice"],
+                        "ty": {"ref": "Choice"},
+                        "presence": "required"
+                    }]
+                }
+            },
+            "operations": [{
+                "id": [["post"], ["send"]],
+                "method": "POST",
+                "path": [{"lit": "send"}],
+                "body": {"ty": {"ref": "Envelope"}, "content": "json", "required": true},
+                "responses": [{"status": 200, "content": "json", "body": {"kind": "string"}}],
+                "auth": {"alternatives": [], "optional": false},
+                "semantics": {"safe": false, "idempotent": false}
+            }]
+        });
+        let document: Document = serde_json::from_value(raw).unwrap();
+        document.validate().unwrap();
+        document
+    }
+
+    fn unit(wire: &str) -> Value {
+        serde_json::json!({"wire": wire, "ident": [wire], "payload": {"kind": "unit"}})
+    }
+
+    fn payload(wire: &str, ty: Value) -> Value {
+        serde_json::json!({"wire": wire, "ident": [wire], "payload": {"kind": "newtype", "ty": ty}})
     }
 
     fn named_struct(name: &str, field: Value) -> crate::TypeDef {

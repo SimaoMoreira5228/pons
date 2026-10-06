@@ -31,10 +31,39 @@ pub fn validate_value(
 
 struct Member<'a> {
     wire: &'a str,
+    aliases: Option<&'a Value>,
     ty: &'a TypeRef,
     presence: Presence,
     access: Option<Access>,
     filled: bool,
+}
+
+impl<'a> Member<'a> {
+    fn new(field: &'a Field) -> Self {
+        Self {
+            wire: &field.wire,
+            aliases: field.ext.get(crate::ext::ALIAS),
+            ty: &field.ty,
+            presence: field.presence,
+            access: field.access,
+            filled: matches!(field.default, FieldDefault::Value(_)),
+        }
+    }
+
+    fn names(&self, aliased: bool) -> impl Iterator<Item = &'a str> + use<'a> {
+        let aliases = aliased.then_some(self.aliases).flatten();
+        std::iter::once(self.wire).chain(
+            aliases
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+                .filter_map(Value::as_str),
+        )
+    }
+
+    fn accepts(&self, name: &str, aliased: bool) -> bool {
+        self.names(aliased).any(|accepted| accepted == name)
+    }
 }
 
 struct Validator<'a> {
@@ -436,13 +465,7 @@ impl<'a> Validator<'a> {
         };
         let mut members = Vec::new();
         for field in fields {
-            members.push(Member {
-                wire: &field.wire,
-                ty: &field.ty,
-                presence: field.presence,
-                access: field.access,
-                filled: matches!(field.default, FieldDefault::Value(_)),
-            });
+            members.push(Member::new(field));
         }
         for member in flattened {
             self.flattened(member, &mut Vec::new(), &mut members);
@@ -450,10 +473,11 @@ impl<'a> Validator<'a> {
         for member in &members {
             self.member(member, entries, path);
         }
+        let aliased = self.direction == Direction::Input;
         match openness {
             ObjectOpenness::Reject => {
                 for name in entries.keys() {
-                    if !members.iter().any(|member| member.wire == name) {
+                    if !members.iter().any(|member| member.accepts(name, aliased)) {
                         self.reject(Violation::UnexpectedField {
                             path: child(path, name),
                             field: name.clone(),
@@ -464,7 +488,7 @@ impl<'a> Validator<'a> {
             ObjectOpenness::PreserveTyped { value } => {
                 let extra = self.openness_value(value, &mut Vec::new());
                 for (name, entry) in entries {
-                    if !members.iter().any(|member| member.wire == name) {
+                    if !members.iter().any(|member| member.accepts(name, aliased)) {
                         self.check(extra, &child(path, name), entry);
                     }
                 }
@@ -474,17 +498,17 @@ impl<'a> Validator<'a> {
     }
 
     fn member(&mut self, member: &Member<'a>, entries: &Map<String, Value>, path: &str) {
-        let path = child(path, member.wire);
+        let aliased = self.direction == Direction::Input;
         let crosses = !matches!(
             (self.direction, member.access),
             (Direction::Input, Some(Access::ReadOnly))
                 | (Direction::Output, Some(Access::WriteOnly))
         );
-        let present = entries.contains_key(member.wire);
         if !crosses {
+            let present = member.names(aliased).any(|name| entries.contains_key(name));
             if present || (member.presence == Presence::Required && !member.filled) {
                 return self.reject(Violation::Access {
-                    path,
+                    path: child(path, member.wire),
                     field: member.wire.to_owned(),
                     access: member.access.unwrap_or(Access::ReadWrite),
                     direction: self.direction,
@@ -492,8 +516,23 @@ impl<'a> Validator<'a> {
             }
             return;
         }
-        match entries.get(member.wire) {
-            Some(value) => {
+        let mut first: Option<(&str, &Value)> = None;
+        for name in member.names(aliased) {
+            let Some(value) = entries.get(name) else {
+                continue;
+            };
+            match first {
+                Some((already, _)) => self.reject(Violation::DuplicateField {
+                    path: child(path, name),
+                    field: member.wire.to_owned(),
+                    first: already.to_owned(),
+                }),
+                None => first = Some((name, value)),
+            }
+        }
+        let path = child(path, member.wire);
+        match first {
+            Some((_, value)) => {
                 self.position.clear();
                 self.check(member.ty, &path, value)
             }
@@ -528,13 +567,7 @@ impl<'a> Validator<'a> {
                 self.flattened(inner, newtypes, members);
                 newtypes.pop();
             }
-            TypeKind::Struct { fields, .. } => members.extend(fields.iter().map(|field| Member {
-                wire: &field.wire,
-                ty: &field.ty,
-                presence: field.presence,
-                access: field.access,
-                filled: matches!(field.default, FieldDefault::Value(_)),
-            })),
+            TypeKind::Struct { fields, .. } => members.extend(fields.iter().map(Member::new)),
             TypeKind::Enum { .. } => {}
         }
     }

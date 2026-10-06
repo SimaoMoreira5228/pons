@@ -457,7 +457,9 @@ fn a_narrowed_untagged_variant_carries_only_its_own_payload() {
     raw["operations"][0]["errors"][0]["body"] =
         serde_json::json!({"ref": "Choice", "variant": "label"});
     let document: Document = serde_json::from_value(raw).unwrap();
-    let files = files(&document);
+    let files = emit_with_strategy(&document, EmitMode::Lossy, ErrorStrategy::Throw)
+        .expect("the TypeScript emitter must accept the document")
+        .files;
     assert!(
         client_of(&files)
             .contains("{ kind: \"http\"; status: number; body: string; headers: Headers }"),

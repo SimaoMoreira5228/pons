@@ -5,6 +5,9 @@ use pons_ir::{
 };
 use std::collections::BTreeMap;
 
+const ALIAS_KEY: &str = "com.pons.alias/v1";
+const OPEN_VARIANT_KEY: &str = "com.pons.open_variant/v1";
+
 #[derive(pons_core::Schema)]
 #[serde(deny_unknown_fields)]
 #[allow(dead_code)]
@@ -320,8 +323,40 @@ enum UntaggedOverlap {
 #[derive(pons_core::Schema)]
 #[serde(untagged)]
 #[allow(dead_code)]
+enum UntaggedUnits {
+    Nothing,
+    AlsoNothing,
+}
+
+#[derive(pons_core::Schema)]
+#[serde(untagged)]
+#[allow(dead_code)]
 enum UntaggedSingle {
     Only(u32),
+}
+
+#[derive(pons_core::Schema)]
+#[allow(dead_code)]
+struct AliasedField {
+    #[serde(alias = "zeta", alias = "alpha")]
+    value: String,
+    plain: String,
+}
+
+#[derive(pons_core::Schema)]
+#[allow(dead_code)]
+enum AliasedVariant {
+    #[serde(alias = "zulu", alias = "alpha")]
+    Primary,
+    Secondary,
+}
+
+#[derive(pons_core::Schema)]
+#[allow(dead_code)]
+enum OpenVariant {
+    Known,
+    #[serde(other)]
+    Unknown,
 }
 
 #[derive(pons_core::Schema)]
@@ -549,8 +584,111 @@ fn applies_serde_field_renames_defaults_and_direction_skips() {
             .collect::<Vec<_>>(),
         ["from_server", "count"]
     );
-    assert_eq!(cx.diagnostics().len(), 1);
-    assert!(cx.diagnostics()[0].message.contains("legacy_server"));
+    assert!(cx.diagnostics().is_empty());
+    assert_eq!(
+        input_fields[0].ext[ALIAS_KEY],
+        serde_json::json!(["legacy_server"])
+    );
+    assert!(!output_fields[0].ext.contains_key(ALIAS_KEY));
+}
+
+#[test]
+fn carries_a_serde_alias_on_a_field_and_on_a_variant() {
+    let mut cx = TypeCx::new();
+    let field_type = AliasedField::schema(&mut cx, Direction::Input);
+    let enum_type = AliasedVariant::schema(&mut cx, Direction::Input);
+    let TypeRef::Named(field_type) = field_type else {
+        panic!()
+    };
+    let TypeRef::Named(enum_type) = enum_type else {
+        panic!()
+    };
+    let TypeKind::Struct { fields, .. } = &cx.definitions()[&field_type.id].definition else {
+        panic!()
+    };
+    let TypeKind::Enum { variants, .. } = &cx.definitions()[&enum_type.id].definition else {
+        panic!()
+    };
+
+    assert_eq!(fields.len(), 2);
+    assert_eq!(fields[0].wire, "value");
+    assert_eq!(
+        fields[0].ext[ALIAS_KEY],
+        serde_json::json!(["alpha", "zeta"])
+    );
+    assert!(!fields[1].ext.contains_key(ALIAS_KEY));
+    assert_eq!(variants[0].wire, "Primary");
+    assert_eq!(
+        variants[0].ext[ALIAS_KEY],
+        serde_json::json!(["alpha", "zulu"])
+    );
+    assert!(!variants[1].ext.contains_key(ALIAS_KEY));
+    assert!(cx.diagnostics().is_empty());
+    let (types, diagnostics) = cx.into_parts();
+    assert!(document(types, diagnostics).validate().is_ok());
+}
+
+#[test]
+fn a_serde_alias_is_carried_only_on_the_side_that_accepts_it() {
+    let mut cx = TypeCx::new();
+    let field_type = AliasedField::schema(&mut cx, Direction::Input);
+    let output_type = AliasedField::schema(&mut cx, Direction::Output);
+    let both_type = AliasedField::schema(&mut cx, Direction::Both);
+    let TypeRef::Named(field_type) = field_type else {
+        panic!()
+    };
+    let TypeRef::Named(output_type) = output_type else {
+        panic!()
+    };
+    let TypeRef::Named(both_type) = both_type else {
+        panic!()
+    };
+    let alias_of = |cx: &TypeCx, id: &str| -> Option<serde_json::Value> {
+        let TypeKind::Struct { fields, .. } = &cx.definitions()[id].definition else {
+            panic!()
+        };
+        fields[0].ext.get(ALIAS_KEY).cloned()
+    };
+    assert_eq!(
+        alias_of(&cx, &field_type.id),
+        Some(serde_json::json!(["alpha", "zeta"]))
+    );
+    assert_eq!(alias_of(&cx, &output_type.id), None);
+    assert_eq!(
+        alias_of(&cx, &both_type.id),
+        Some(serde_json::json!(["alpha", "zeta"]))
+    );
+    assert!(cx.diagnostics().is_empty());
+}
+
+#[test]
+fn an_other_variant_is_carried_only_on_the_side_that_accepts_it() {
+    let mut cx = TypeCx::new();
+    let input_type = OpenVariant::schema(&mut cx, Direction::Input);
+    let output_type = OpenVariant::schema(&mut cx, Direction::Output);
+    let both_type = OpenVariant::schema(&mut cx, Direction::Both);
+    let TypeRef::Named(input_type) = input_type else {
+        panic!()
+    };
+    let TypeRef::Named(output_type) = output_type else {
+        panic!()
+    };
+    let TypeRef::Named(both_type) = both_type else {
+        panic!()
+    };
+    let catch_all_of = |cx: &TypeCx, id: &str| -> bool {
+        let TypeKind::Enum { variants, .. } = &cx.definitions()[id].definition else {
+            panic!()
+        };
+        assert_eq!(variants.len(), 2);
+        variants[1].ext.get(OPEN_VARIANT_KEY) == Some(&serde_json::json!(true))
+    };
+    assert!(catch_all_of(&cx, &input_type.id));
+    assert!(!catch_all_of(&cx, &output_type.id));
+    assert!(catch_all_of(&cx, &both_type.id));
+    assert!(cx.diagnostics().is_empty());
+    let (types, diagnostics) = cx.into_parts();
+    assert!(document(types, diagnostics).validate().is_ok());
 }
 
 #[test]
@@ -1382,13 +1520,46 @@ fn an_untagged_variant_under_a_tagged_container_is_refused() {
 }
 
 #[test]
-fn an_untagged_container_with_several_payload_variants_is_refused() {
+fn an_untagged_container_with_several_payload_variants_warns_on_its_type() {
     let mut cx = TypeCx::new();
-    let _ = UntaggedOverlap::schema(&mut cx, Direction::Output);
-    let diagnostic = error_coded(&cx, "PONS-E101", "Number, Text");
+    let reference = UntaggedOverlap::schema(&mut cx, Direction::Output);
+    let TypeRef::Named(named) = reference else {
+        panic!()
+    };
+    let definition = &cx.definitions()[&named.id];
+    let TypeKind::Enum { repr, variants } = &definition.definition else {
+        panic!()
+    };
+    assert_eq!(repr, &EnumRepr::Untagged);
+    assert_eq!(variants.len(), 2);
+    assert_eq!(definition.diagnostics.len(), 1);
+    let diagnostic = &definition.diagnostics[0];
+    assert_eq!(diagnostic.severity, DiagnosticSeverity::Warning);
+    assert_eq!(diagnostic.code, "PONS-W104");
+    assert!(diagnostic.message.contains("Number, Text"));
     assert!(diagnostic.message.contains("no discriminator"));
+    assert!(cx.diagnostics().is_empty());
     let (types, diagnostics) = cx.into_parts();
-    assert!(document(types, diagnostics).validate().is_err());
+    assert!(document(types, diagnostics).validate().is_ok());
+}
+
+#[test]
+fn a_unit_only_untagged_enum_is_describable_without_a_warning() {
+    let mut cx = TypeCx::new();
+    let reference = UntaggedUnits::schema(&mut cx, Direction::Output);
+    let TypeRef::Named(named) = reference else {
+        panic!()
+    };
+    let definition = &cx.definitions()[&named.id];
+    let TypeKind::Enum { repr, variants } = &definition.definition else {
+        panic!()
+    };
+    assert_eq!(repr, &EnumRepr::Untagged);
+    assert_eq!(variants.len(), 2);
+    assert!(definition.diagnostics.is_empty());
+    assert!(cx.diagnostics().is_empty());
+    let (types, diagnostics) = cx.into_parts();
+    assert!(document(types, diagnostics).validate().is_ok());
 }
 
 #[test]

@@ -8,6 +8,7 @@ use pons_ir::{
 
 pub use pons_derive::{ApiError, Schema};
 pub use pons_ir as ir;
+pub use serde_json;
 
 pub trait Schema {
     fn schema(cx: &mut TypeCx, direction: Direction) -> TypeRef;
@@ -22,6 +23,8 @@ pub struct TypeCx {
     definitions: BTreeMap<String, TypeDef>,
     registered: BTreeSet<(String, DirectionKey)>,
     diagnostics: Vec<Diagnostic>,
+    building: Vec<String>,
+    pending: BTreeMap<String, Vec<Diagnostic>>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -113,7 +116,10 @@ impl TypeCx {
     ) -> TypeRef {
         let direction = key.1.into();
         if self.registered.insert(key) {
+            self.building.push(id.clone());
             let definition = build(self);
+            self.building.pop();
+            let diagnostics = self.pending.remove(&id).unwrap_or_default();
             self.definitions.insert(
                 id.clone(),
                 TypeDef {
@@ -122,7 +128,7 @@ impl TypeCx {
                     definition,
                     origin,
                     doc,
-                    diagnostics: Vec::new(),
+                    diagnostics,
                     ext: BTreeMap::new(),
                 },
             );
@@ -181,6 +187,22 @@ impl TypeCx {
 
     pub fn push_diagnostic(&mut self, code: &str, message: impl Into<String>) {
         self.push(DiagnosticSeverity::Warning, code, message);
+    }
+
+    pub fn push_type_diagnostic(&mut self, code: &str, message: impl Into<String>) {
+        let diagnostic = Diagnostic {
+            severity: DiagnosticSeverity::Warning,
+            code: code.to_owned(),
+            message: message.into(),
+            origin: None,
+            ext: BTreeMap::new(),
+        };
+        match self.building.last() {
+            Some(id) => {
+                self.pending.entry(id.clone()).or_default().push(diagnostic);
+            }
+            None => self.diagnostics.push(diagnostic),
+        }
     }
 
     pub fn push_error(&mut self, code: &str, message: impl Into<String>) {

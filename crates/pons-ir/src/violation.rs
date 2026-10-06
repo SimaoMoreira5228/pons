@@ -64,6 +64,11 @@ pub enum Violation {
         path: String,
         field: String,
     },
+    DuplicateField {
+        path: String,
+        field: String,
+        first: String,
+    },
     Access {
         path: String,
         field: String,
@@ -104,6 +109,7 @@ impl Violation {
             | Self::Bytes { path, .. }
             | Self::MissingField { path, .. }
             | Self::UnexpectedField { path, .. }
+            | Self::DuplicateField { path, .. }
             | Self::Access { path, .. }
             | Self::DuplicateItem { path, .. }
             | Self::TupleArity { path, .. }
@@ -176,6 +182,9 @@ impl Violation {
             },
             Self::MissingField { field, .. } => format!("missing required field {field}"),
             Self::UnexpectedField { field, .. } => format!("unknown property {field}"),
+            Self::DuplicateField { field, first, .. } => {
+                format!("field {field} is written twice, once as {first}")
+            }
             Self::Access {
                 field,
                 access,

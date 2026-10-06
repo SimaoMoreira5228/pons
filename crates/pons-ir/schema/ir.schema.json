@@ -199,6 +199,12 @@
         {
           "type": "object",
           "properties": {
+            "adapter": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
             "description": {
               "type": "string"
             },

@@ -180,12 +180,15 @@ fn auth_types(document: &Document) -> String {
             AuthScheme::CookieSession { cookie } => {
                 format!("{{ kind: \"cookie\", name: {} }}", string(cookie))
             }
-            AuthScheme::Custom { .. } => "{ kind: \"custom\" }".into(),
+            AuthScheme::Custom { adapter, .. } => match adapter {
+                Some(adapter) => format!("{{ kind: \"custom\", adapter: {} }}", string(adapter)),
+                None => "{ kind: \"custom\" }".into(),
+            },
         };
         entries.push(format!("  authSchemes[{key}] = {value};"));
     }
     format!(
-        "const authSchemes: Record<string, {{ kind: string; location?: string; name?: string }}> = Object.create(null);\n{}\n",
+        "const authSchemes: Record<string, {{ kind: string; location?: string; name?: string; adapter?: string }}> = Object.create(null);\n{}\n",
         entries.join("\n")
     )
 }

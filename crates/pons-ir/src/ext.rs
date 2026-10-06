@@ -6,13 +6,20 @@ use crate::ValidationError;
 
 pub const RESERVED_PREFIX: &str = "x-pons";
 
+pub const ALIAS: &str = "com.pons.alias/v1";
+pub const OPEN_VARIANT: &str = "com.pons.open_variant/v1";
+
+pub(crate) fn catch_all(variant: &crate::Variant) -> bool {
+    matches!(variant.ext.get(OPEN_VARIANT), Some(Value::Bool(true)))
+}
+
 fn is_label(label: &str) -> bool {
     !label.is_empty()
         && !label.starts_with('-')
         && !label.ends_with('-')
-        && label
-            .bytes()
-            .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-')
+        && label.bytes().all(|byte| {
+            byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-' || byte == b'_'
+        })
 }
 
 fn is_version(segment: &str) -> bool {

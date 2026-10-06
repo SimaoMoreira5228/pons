@@ -1,7 +1,11 @@
 use proc_macro2::{Span, TokenStream};
 use quote::{ToTokens, quote};
-use serde_derive_internals::{ast, attr};
+use serde_derive_internals::{ast, attr, name::Name};
+use std::collections::BTreeSet;
 use syn::{GenericArgument, Ident, Type, parse_quote};
+
+const ALIAS_KEY: &str = "com.pons.alias/v1";
+const OPEN_VARIANT_KEY: &str = "com.pons.open_variant/v1";
 
 pub(super) fn expand(container: &ast::Container<'_>) -> TokenStream {
     let ident = &container.ident;
@@ -190,6 +194,36 @@ fn refuse_both(message: String) -> TokenStream {
     }
 }
 
+fn alias_names<'a>(declared: &'a BTreeSet<Name>, own_wire: &Name) -> Vec<&'a Name> {
+    declared.iter().filter(|alias| *alias != own_wire).collect()
+}
+
+fn input_side_ext(aliases: &[&Name], open_variant: bool) -> TokenStream {
+    let mut entries = Vec::new();
+    if !aliases.is_empty() {
+        entries.push(quote! {
+            ext.insert(#ALIAS_KEY.to_owned(), ::pons_core::serde_json::json!([#(#aliases),*]));
+        });
+    }
+    if open_variant {
+        entries.push(quote! {
+            ext.insert(#OPEN_VARIANT_KEY.to_owned(), ::pons_core::serde_json::Value::Bool(true));
+        });
+    }
+    if entries.is_empty() {
+        return quote!(Default::default());
+    }
+    quote! {
+        {
+            let mut ext = ::std::collections::BTreeMap::new();
+            if matches!(direction, ::pons_core::ir::Direction::Input | ::pons_core::ir::Direction::Both) {
+                #(#entries)*
+            }
+            ext
+        }
+    }
+}
+
 fn side_presence(optional: bool, side: &str, reason: &'static str) -> String {
     match optional {
         true => format!("optional on {side} ({reason})"),
@@ -244,35 +278,15 @@ fn names<T: ToTokens>(members: impl Iterator<Item = T>) -> String {
 }
 
 fn enum_definition(variants: &[ast::Variant<'_>], attrs: &attr::Container) -> TokenStream {
-    let refusals = enum_refusals(variants, attrs);
+    let problems = enum_problems(variants, attrs);
     let variant_builders = variants.iter().map(|variant| {
         let payload = payload_expression(variant.style, &variant.fields);
         let wire_in = variant.attrs.name().deserialize_name();
         let wire_out = variant.attrs.name().serialize_name();
         let ident = words(&variant.ident.to_string());
         let doc = doc_value(&variant.original.attrs);
-        let canonical_name = variant.attrs.name().deserialize_name().to_string();
-        let aliases: Vec<_> = variant
-            .attrs
-            .aliases()
-            .iter()
-            .filter(|alias| alias.to_string() != canonical_name)
-            .map(ToString::to_string)
-            .collect();
-        let alias_warning = if aliases.is_empty() {
-            TokenStream::new()
-        } else {
-            let message = format!(
-                "serde enum aliases {} are not represented separately",
-                aliases.join(", ")
-            );
-            quote!(cx.push_diagnostic("PONS-W101", #message);)
-        };
-        let other_warning = if variant.attrs.other() {
-            quote!(cx.push_diagnostic("PONS-W101", "serde other variant accepts unlisted values");)
-        } else {
-            TokenStream::new()
-        };
+        let aliases = alias_names(variant.attrs.aliases(), wire_in);
+        let ext = input_side_ext(&aliases, variant.attrs.other());
         let include_input = !variant.attrs.skip_deserializing();
         let include_output = !variant.attrs.skip_serializing();
         let side_refusal = if wire_in.value != wire_out.value {
@@ -290,8 +304,6 @@ fn enum_definition(variants: &[ast::Variant<'_>], attrs: &attr::Container) -> To
                 ::pons_core::ir::Direction::Both => #include_input && #include_output,
             };
             if included {
-                #alias_warning
-                #other_warning
                 #side_refusal
                 let wire = match direction {
                     ::pons_core::ir::Direction::Input => #wire_in,
@@ -303,28 +315,28 @@ fn enum_definition(variants: &[ast::Variant<'_>], attrs: &attr::Container) -> To
                     payload: #payload,
                     doc: #doc,
                     diagnostics: Vec::new(),
-                    ext: Default::default(),
+                    ext: #ext,
                 });
             }
         }
     });
     let representation = enum_representation(attrs.tag(), variants);
     quote!({
-        #( #refusals )*
+        #( #problems )*
         let mut variants = Vec::new();
         #(#variant_builders)*
         ::pons_core::ir::TypeKind::Enum { repr: #representation, variants }
     })
 }
 
-fn enum_refusals(variants: &[ast::Variant<'_>], attrs: &attr::Container) -> Vec<TokenStream> {
-    let mut refusals = Vec::new();
+fn enum_problems(variants: &[ast::Variant<'_>], attrs: &attr::Container) -> Vec<TokenStream> {
+    let mut problems = Vec::new();
     if attrs.deny_unknown_fields()
         && variants
             .iter()
             .any(|variant| matches!(variant.style, ast::Style::Struct))
     {
-        refusals.push(refuse(
+        problems.push(refuse(
             "serde #[serde(deny_unknown_fields)] on an enum rejects unknown keys inside struct variant payloads, but VariantPayload::Struct has no openness field".to_owned(),
         ));
     }
@@ -335,22 +347,23 @@ fn enum_refusals(variants: &[ast::Variant<'_>], attrs: &attr::Container) -> Vec<
                 .filter(|variant| !matches!(variant.style, ast::Style::Unit))
                 .collect();
             if payloads.len() > 1 {
-                refusals.push(refuse(format!(
-                    "serde untagged enum writes no discriminator, and variants {} carry payloads, so EnumRepr::Untagged cannot tell them apart",
+                let message = format!(
+                    "serde untagged enum writes no discriminator, so variants {} can overlap on the wire and a decoder has to try them in declaration order and take the first that fits",
                     names(payloads.iter().map(|variant| &variant.ident))
-                )));
+                );
+                problems.push(quote!(cx.push_type_diagnostic("PONS-W104", #message);));
             }
         }
         _ => {
             for variant in variants.iter().filter(|v| v.attrs.untagged()) {
-                refusals.push(refuse(format!(
+                problems.push(refuse(format!(
                     "serde #[serde(untagged)] variant {} writes no tag, but EnumRepr is per enum, so a mixed tagged and untagged enum cannot be described",
                     variant.ident
                 )));
             }
         }
     }
-    refusals
+    problems
 }
 
 fn enum_representation(tag: &attr::TagType, variants: &[ast::Variant<'_>]) -> TokenStream {
@@ -432,23 +445,6 @@ fn field_expression(
     let skip_output = field.attrs.skip_serializing();
     let flatten = field.attrs.flatten();
     let codecs = Codecs::new(&field.attrs);
-    let canonical_name = field.attrs.name().deserialize_name().to_string();
-    let aliases: Vec<_> = field
-        .attrs
-        .aliases()
-        .iter()
-        .filter(|alias| alias.to_string() != canonical_name)
-        .map(ToString::to_string)
-        .collect();
-    let alias_warning = if aliases.is_empty() {
-        TokenStream::new()
-    } else {
-        let message = format!(
-            "serde aliases {} are not represented as separate fields",
-            aliases.join(", ")
-        );
-        quote!(cx.push_diagnostic("PONS-W101", #message);)
-    };
     let included = quote! {
         let included = match direction {
             ::pons_core::ir::Direction::Input => !#skip_input,
@@ -462,7 +458,6 @@ fn field_expression(
         return quote! {
             #included
             if included {
-                #alias_warning
                 #( #refusals )*
                 #regular
             }
@@ -473,7 +468,6 @@ fn field_expression(
     quote! {
         #included
         if included {
-            #alias_warning
             #( #refusals )*
             if #probe {
                 #opaque
@@ -494,6 +488,8 @@ fn field_body(
     let wire_in = field.attrs.name().deserialize_name();
     let wire_out = field.attrs.name().serialize_name();
     let ident = words(&field.member.to_token_stream().to_string());
+    let aliases = alias_names(field.attrs.aliases(), wire_in);
+    let ext = input_side_ext(&aliases, false);
 
     let optional_on_input = container_default || has_default(&field.attrs) || is_option(field.ty);
     let optional_on_output = field.attrs.skip_serializing_if().is_some();
@@ -531,7 +527,7 @@ fn field_body(
                         origin: None,
                         ext: Default::default(),
                     }],
-                    ext: Default::default(),
+                    ext: #ext,
                 });
             }
         };
@@ -584,7 +580,7 @@ fn field_body(
                 access: None,
                 doc: #doc,
                 diagnostics: Vec::new(),
-                ext: Default::default(),
+                ext: #ext,
             });
         }
     }
