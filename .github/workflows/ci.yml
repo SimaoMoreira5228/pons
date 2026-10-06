@@ -1,0 +1,74 @@
+name: ci
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  fmt-and-clippy:
+    name: fmt and clippy
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install the toolchains
+        run: |
+          rustup toolchain install stable --profile minimal --component clippy
+          rustup toolchain install nightly --profile minimal --component rustfmt
+      - name: Format
+        run: cargo +nightly fmt --all --check
+      - name: Lint
+        run: cargo clippy --all-features --all-targets -- -D warnings
+
+  workspace:
+    name: workspace (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install the toolchain
+        run: rustup toolchain install stable --profile minimal
+      # tsc and bun are the only tools the generated-code suites need, and
+      # package.json pins both. The @typescript directory holds the platform
+      # binary, which is what `tsc` resolves to on Windows.
+      - name: Install the generated-code toolchain
+        run: |
+          npm install --no-package-lock
+          echo "$PWD/node_modules/.bin" >> "$GITHUB_PATH"
+          echo "$PWD/node_modules/bun/bin" >> "$GITHUB_PATH"
+          echo "$PWD"/node_modules/@typescript/*/lib >> "$GITHUB_PATH"
+      - name: Report the toolchain the suites will resolve
+        run: |
+          tsc --version
+          bun --version
+      - name: Build
+        run: cargo build --workspace --all-features
+      - name: Test
+        run: cargo test --workspace --all-features
+      - name: Schema drift
+        if: matrix.os == 'ubuntu-latest'
+        run: cargo test -p pons-ir --all-features --test document_model checked_in_schema_matches_the_rust_model
+      - name: Fixture matrix
+        if: matrix.os == 'ubuntu-latest'
+        run: cargo test -p pons-cli --all-features --test commands every_target_classifies_every_fixture_the_same_way
+
+  windows-target:
+    name: windows target
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install the toolchain
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustup target add x86_64-pc-windows-gnu
+      - name: Check
+        run: cargo check --workspace --target x86_64-pc-windows-gnu --all-features

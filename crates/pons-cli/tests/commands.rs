@@ -1,21 +1,30 @@
 use std::collections::BTreeMap;
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use serde_json::Value;
 
 const FIXTURE: &str = include_str!("../../../fixtures/login.json");
+const FIXTURE_DIRECTORY: &str = "../../fixtures";
 
 fn pons() -> Command {
     Command::new(env!("CARGO_BIN_EXE_pons"))
 }
 
-fn wide_number_input(directory: &Path) -> std::path::PathBuf {
+fn fixture_path(name: &str) -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join(FIXTURE_DIRECTORY)
+        .join(name)
+}
+
+fn fixture(name: &str) -> String {
+    fs::read_to_string(fixture_path(name)).unwrap()
+}
+
+fn wide_number_input(directory: &Path) -> PathBuf {
     let path = directory.join("api.json");
-    let mut contract: Value = serde_json::from_str(FIXTURE).unwrap();
-    contract["types"]["User"]["fields"][0]["ty"]["wire"] = serde_json::json!("number");
-    fs::write(&path, serde_json::to_vec(&contract).unwrap()).unwrap();
+    fs::write(&path, fixture("lossy.json")).unwrap();
     path
 }
 
@@ -368,10 +377,11 @@ fn emit_writes_a_typed_typescript_client() {
         String::from_utf8_lossy(&output.stderr)
     );
     let types = fs::read_to_string(output_dir.join("types.ts")).unwrap();
+    let errors = fs::read_to_string(output_dir.join("errors.ts")).unwrap();
     let client = fs::read_to_string(output_dir.join("client.ts")).unwrap();
     assert!(types.contains("export type User"));
     assert!(client.contains("export function createClient"));
-    assert!(client.contains("neverthrow"));
+    assert!(errors.contains("neverthrow"));
     assert!(client.contains("EventsWatchEvent"));
 }
 
@@ -383,24 +393,36 @@ const PRESERVED_SUBJECTS: [&str; 4] = [
 ];
 
 fn coverage_for(target: &str, input: &str) -> Value {
+    coverage_in(target, input, false)
+        .unwrap_or_else(|error| panic!("{target} refused the document: {error}"))
+}
+
+fn coverage_in(target: &str, input: &str, lossy: bool) -> Result<Value, String> {
     let directory = tempfile::tempdir().unwrap();
     let output_dir = directory.path().join("generated");
     let input_path = directory.path().join("api.json");
     fs::write(&input_path, input).unwrap();
-    let output = pons()
+    let mut command = pons();
+    command
         .args(["emit", "--target", target])
         .arg(&input_path)
         .arg(&output_dir)
-        .args(["--coverage", "coverage.json"])
-        .output()
-        .unwrap();
+        .args(["--coverage", "coverage.json"]);
+    if lossy {
+        command.arg("--lossy");
+    }
+    let output = command.output().unwrap();
 
-    assert!(
-        output.status.success(),
-        "{target}: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    serde_json::from_str(&fs::read_to_string(output_dir.join("coverage.json")).unwrap()).unwrap()
+    let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
+    if !output.status.success() {
+        return Err(stderr
+            .trim()
+            .strip_prefix("pons: ")
+            .unwrap_or(stderr.trim())
+            .to_owned());
+    }
+    let reported = fs::read_to_string(output_dir.join("coverage.json")).unwrap();
+    Ok(serde_json::from_str(&reported).unwrap())
 }
 
 fn coverage_levels(coverage: &Value) -> BTreeMap<String, pons_ir::CoverageLevel> {
@@ -465,12 +487,170 @@ fn targets_never_claim_more_capability_than_canonical_coverage() {
     }
 }
 
+const BUILT_INS: [&str; 2] = ["ts", "openapi"];
+
+/// The subjects one fixture's classification puts at each level, so a row can
+/// name the whole answer rather than a difference.
+#[derive(Clone, Copy)]
+struct Levels {
+    exact: &'static [&'static str],
+    opaque: &'static [&'static str],
+    lossy: &'static [&'static str],
+    unsupported: &'static [&'static str],
+}
+
+impl Levels {
+    fn levels(&self) -> BTreeMap<String, pons_ir::CoverageLevel> {
+        [
+            (pons_ir::CoverageLevel::Exact, self.exact),
+            (pons_ir::CoverageLevel::Opaque, self.opaque),
+            (pons_ir::CoverageLevel::Lossy, self.lossy),
+            (pons_ir::CoverageLevel::Unsupported, self.unsupported),
+        ]
+        .into_iter()
+        .flat_map(|(level, subjects)| {
+            subjects
+                .iter()
+                .map(move |subject| ((*subject).to_owned(), level))
+        })
+        .collect()
+    }
+}
+
+const PRESERVED_LEVELS: Levels = Levels {
+    exact: &["types.EventQuery", "types.LoginError"],
+    opaque: &PRESERVED_SUBJECTS,
+    lossy: &[],
+    unsupported: &[],
+};
+
+const EVERY_SUBJECT_EXACT: Levels = Levels {
+    exact: &[
+        "operations.auth.login",
+        "operations.events.watch",
+        "types.EventQuery",
+        "types.LoginError",
+        "types.LoginRequest",
+        "types.User",
+    ],
+    opaque: &[],
+    lossy: &[],
+    unsupported: &[],
+};
+
+const WIDE_INTEGER_LOSSY: Levels = Levels {
+    exact: &["types.EventQuery", "types.LoginError"],
+    opaque: &["types.LoginRequest"],
+    lossy: &[
+        "operations.auth.login",
+        "operations.events.watch",
+        "types.User",
+    ],
+    unsupported: &[],
+};
+
+/// What every built-in target must do with a fixture: the coverage map they all
+/// report, or the refusal each one prints for a feature it cannot describe.
+#[derive(Clone, Copy)]
+enum Expected {
+    Coverage(Levels),
+    Refused(&'static [&'static str]),
+}
+
+struct Row {
+    file: &'static str,
+    carries: &'static str,
+    strict: Expected,
+    lossy: Expected,
+}
+
+const NO_WEB_SOCKET: [&str; 2] = [
+    "the TypeScript emitter supports SSE and NDJSON streams only",
+    "OpenAPI paths cannot describe WebSocket operations",
+];
+
+const FIXTURES: [Row; 4] = [
+    Row {
+        file: "login.json",
+        carries: "opaque",
+        strict: Expected::Coverage(PRESERVED_LEVELS),
+        lossy: Expected::Coverage(PRESERVED_LEVELS),
+    },
+    Row {
+        file: "exact.json",
+        carries: "exact",
+        strict: Expected::Coverage(EVERY_SUBJECT_EXACT),
+        lossy: Expected::Coverage(EVERY_SUBJECT_EXACT),
+    },
+    Row {
+        file: "lossy.json",
+        carries: "lossy",
+        strict: Expected::Coverage(PRESERVED_LEVELS),
+        lossy: Expected::Coverage(WIDE_INTEGER_LOSSY),
+    },
+    Row {
+        file: "unsupported.json",
+        carries: "unsupported",
+        strict: Expected::Refused(&NO_WEB_SOCKET),
+        lossy: Expected::Refused(&NO_WEB_SOCKET),
+    },
+];
+
 #[test]
-fn every_target_classifies_the_fixture_the_same_way() {
+fn every_target_classifies_every_fixture_the_same_way() {
+    let directory = Path::new(env!("CARGO_MANIFEST_DIR")).join(FIXTURE_DIRECTORY);
+    let mut found = fs::read_dir(&directory)
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+        .filter(|name| name.ends_with(".json"))
+        .collect::<Vec<_>>();
+    found.sort();
+    let mut rows = FIXTURES
+        .iter()
+        .map(|row| row.file.to_owned())
+        .collect::<Vec<_>>();
+    rows.sort();
     assert_eq!(
-        coverage_for("openapi", FIXTURE),
-        coverage_for("ts", FIXTURE)
+        found, rows,
+        "every fixture in {FIXTURE_DIRECTORY} needs a row, and every row needs a fixture"
     );
+
+    for row in &FIXTURES {
+        let input = fixture(row.file);
+        let checked = pons()
+            .arg("check")
+            .arg(fixture_path(row.file))
+            .output()
+            .unwrap();
+        assert!(
+            checked.status.success(),
+            "{} must be a valid document: {}",
+            row.file,
+            String::from_utf8_lossy(&checked.stderr)
+        );
+
+        for (lossy, expected) in [(false, row.strict), (true, row.lossy)] {
+            let mode = if lossy { "--lossy" } else { "--strict" };
+            // One expectation for both targets, so agreement is the assertion.
+            for (index, target) in BUILT_INS.iter().enumerate() {
+                let at = format!("{} ({}) {target} {mode}", row.file, row.carries);
+                match (expected, coverage_in(target, &input, lossy)) {
+                    (Expected::Coverage(levels), Ok(reported)) => {
+                        assert_eq!(coverage_levels(&reported), levels.levels(), "{at}");
+                    }
+                    (Expected::Refused(messages), Err(message)) => {
+                        assert_eq!(message, messages[index], "{at}");
+                    }
+                    (Expected::Coverage(_), Err(message)) => {
+                        panic!("{at} refused a document it must describe: {message}");
+                    }
+                    (Expected::Refused(_), Ok(reported)) => {
+                        panic!("{at} described a document it cannot: {reported}");
+                    }
+                }
+            }
+        }
+    }
 }
 
 #[test]
@@ -549,9 +729,10 @@ fn emit_selects_the_throwing_typescript_strategy() {
         "{}",
         String::from_utf8_lossy(&output.stderr)
     );
-    let client = fs::read_to_string(output_dir.join("client.ts")).unwrap();
-    assert!(client.contains("requestOrThrow(request<"));
-    assert!(!client.contains("from \"neverthrow\""));
+    let errors = fs::read_to_string(output_dir.join("errors.ts")).unwrap();
+    let auth = fs::read_to_string(output_dir.join("operations/auth.ts")).unwrap();
+    assert!(auth.contains("requestOrThrow(request<"));
+    assert!(!errors.contains("from \"neverthrow\""));
 }
 
 #[test]
@@ -1080,6 +1261,85 @@ fi
     );
     assert_eq!(
         fs::read_to_string(output_dir.join("client.py")).unwrap(),
+        "generated"
+    );
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn a_fixture_a_target_cannot_build_is_reported_unsupported() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let directory = tempfile::tempdir().unwrap();
+    let bin = directory.path().join("bin");
+    fs::create_dir(&bin).unwrap();
+    let plugin = bin.join("pons-emit-python");
+    fs::write(
+        &plugin,
+        r##"#!/bin/sh
+if [ "$1" = describe ]; then
+  printf '%s' '{"name":"python","version":"1.0.0","protocol":{"min":"2.0","max":"2.0"},"ir_version":{"min":"0.2","max":"0.2"},"capabilities":{"streaming":["sse"],"enum_reprs":["string","external","internal","adjacent","untagged"],"direction_split":true,"provides":true,"flattened":true,"opaque":true,"object_openness":["reject","preserve_typed","preserve_opaque"]}}'
+elif [ "$1" = emit ]; then
+  request=$(cat)
+  printf '%s' "$request" > "$PONS_REQUEST"
+  printf '%s' '{"protocol":2,"files":[{"path":"client.py","content":"generated"}],"coverage":{"exact":["types.EventQuery","types.LoginError"],"opaque":["operations.auth.login","types.LoginRequest","types.User"],"lossy":[],"unsupported":["operations.events.watch"]}}'
+else
+  exit 2
+fi
+"##,
+    )
+    .unwrap();
+    let mut permissions = fs::metadata(&plugin).unwrap().permissions();
+    permissions.set_mode(0o755);
+    fs::set_permissions(&plugin, permissions).unwrap();
+    let path = std::env::join_paths(std::iter::once(bin).chain(std::env::split_paths(
+        &std::env::var_os("PATH").unwrap_or_default(),
+    )))
+    .unwrap();
+
+    let input = directory.path().join("api.json");
+    fs::write(&input, fixture("unsupported.json")).unwrap();
+    let request_path = directory.path().join("request.json");
+    let output_dir = directory.path().join("strict-generated");
+    let output = pons()
+        .args(["emit", "--target", "python"])
+        .arg(&input)
+        .arg(&output_dir)
+        .env("PATH", &path)
+        .env("PONS_REQUEST", &request_path)
+        .output()
+        .unwrap();
+
+    assert!(!output.status.success());
+    assert_eq!(
+        String::from_utf8_lossy(&output.stderr).trim(),
+        "pons: python does not declare support for websocket streams in events.watch"
+    );
+    assert!(!request_path.exists(), "emit must not run in strict mode");
+    assert!(!output_dir.exists());
+
+    let lossy_dir = directory.path().join("lossy-generated");
+    let lossy_request = directory.path().join("lossy-request.json");
+    let output = pons()
+        .args(["emit", "--target", "python"])
+        .arg(&input)
+        .arg(&lossy_dir)
+        .arg("--lossy")
+        .env("PATH", &path)
+        .env("PONS_REQUEST", &lossy_request)
+        .output()
+        .unwrap();
+
+    assert_eq!(output.status.code(), Some(0));
+    assert_eq!(
+        String::from_utf8_lossy(&output.stderr),
+        "warning: python does not declare support for websocket streams in events.watch\n\
+         warning: python emits opaque coverage at operations.auth.login, types.LoginRequest, types.User\n\
+         warning: python emits unsupported coverage at operations.events.watch\n"
+    );
+    assert!(lossy_request.exists());
+    assert_eq!(
+        fs::read_to_string(lossy_dir.join("client.py")).unwrap(),
         "generated"
     );
 }

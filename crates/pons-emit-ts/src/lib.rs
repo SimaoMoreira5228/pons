@@ -1,13 +1,11 @@
 mod client;
 mod runtime;
-mod runtime_auth;
 mod types;
-mod wire_validation;
 
 use std::collections::{BTreeMap, BTreeSet};
 
 use pons_ir::{
-    ApiKeyLocation, AuthScheme, Coverage, DecimalWire, Direction, Document, InlineType,
+    ApiKeyLocation, AuthScheme, Coverage, DecimalWire, Direction, Doc, Document, InlineType,
     IntegerWire, ObjectOpenness, PathSegment, StreamKind, TypeDef, TypeKind, TypeRef,
     VariantPayload, coverage_for_document, operation_subject, strict_violation_message,
     type_subject,
@@ -156,22 +154,26 @@ pub fn emit_with_strategy(
     let wide_integers = type_scan.wide_paths;
     let names = type_names(&document);
     let preserve_wide_integers = mode == EmitMode::Strict && !wide_integers.is_empty();
-    let files = vec![
+    let mut files = vec![
         GeneratedFile {
             path: "types.ts".into(),
             content: types::emit(&document, &names, mode)?,
         },
         GeneratedFile {
-            path: "client.ts".into(),
-            content: client::emit(
-                &document,
-                &names,
-                mode,
-                preserve_wide_integers,
-                error_strategy,
-            )?,
+            path: "errors.ts".into(),
+            content: client::error_types(error_strategy),
         },
     ];
+    files.extend(runtime::files());
+    files.extend(client::emit(
+        &document,
+        &names,
+        mode,
+        preserve_wide_integers,
+        error_strategy,
+    )?);
+    files.push(client::index());
+    let files = files;
     strict_coverage_error(mode, &coverage)?;
     let mut warnings = Vec::new();
     if mode == EmitMode::Lossy {
@@ -702,6 +704,72 @@ pub(crate) fn string(value: &str) -> String {
     serde_json::to_string(value).expect("serializing a string cannot fail")
 }
 
+pub(crate) fn jsdoc(doc: Option<&Doc>) -> String {
+    let Some(doc) = doc else {
+        return String::new();
+    };
+    let mut parts = [doc.summary.as_deref(), doc.description.as_deref()]
+        .into_iter()
+        .flatten()
+        .map(one_line)
+        .filter(|text| !text.is_empty())
+        .collect::<Vec<_>>();
+    if doc.deprecated == Some(true) {
+        parts.push(String::from("@deprecated"));
+    }
+    if parts.is_empty() {
+        return String::new();
+    }
+    format!("/** {} */", parts.join(" "))
+}
+
+fn one_line(text: &str) -> String {
+    text.split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .replace("*/", "*\\/")
+}
+
+pub(crate) fn object_type(members: &[(Option<&Doc>, String)]) -> String {
+    if !members.iter().any(|(doc, _)| doc.is_some()) {
+        return format!(
+            "{{ {} }}",
+            members
+                .iter()
+                .map(|(_, member)| member.as_str())
+                .collect::<Vec<_>>()
+                .join("; ")
+        );
+    }
+    let members = members
+        .iter()
+        .map(|(doc, member)| match jsdoc(*doc) {
+            comment if comment.is_empty() => format!("  {member};"),
+            comment => format!("  {comment}\n  {member};"),
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    format!("{{\n{members}\n}}")
+}
+
+pub(crate) fn union_type(members: &[(Option<&Doc>, String)]) -> String {
+    if !members.iter().any(|(doc, _)| doc.is_some()) {
+        return members
+            .iter()
+            .map(|(_, member)| member.as_str())
+            .collect::<Vec<_>>()
+            .join(" | ");
+    }
+    members
+        .iter()
+        .map(|(doc, member)| match jsdoc(*doc) {
+            comment if comment.is_empty() => member.clone(),
+            comment => format!("{comment}\n  {member}"),
+        })
+        .collect::<Vec<_>>()
+        .join("\n  | ")
+}
+
 #[cfg(test)]
 mod tests {
     use pons_ir::{
@@ -726,87 +794,97 @@ mod tests {
             .collect::<BTreeMap<_, _>>();
         let types = &files["types.ts"];
         let client = &files["client.ts"];
+        let errors = &files["errors.ts"];
+        let auth = &files["operations/auth.ts"];
+        let events = &files["operations/events.ts"];
+        let transport = &files["runtime/transport.ts"];
+        let credentials = &files["runtime/credentials.ts"];
+        let stream = &files["runtime/stream.ts"];
         assert!(types.contains("export type User"));
         assert!(types.contains("export type LoginError"));
+        assert!(files["runtime.ts"].contains("export * from \"./runtime/index.js\";"));
+        assert!(files["index.ts"].contains("export * from \"./client.js\";"));
         assert!(client.contains("export function createClient"));
         assert!(client.contains("auth"));
-        assert!(client.contains("neverthrow"));
+        assert!(errors.contains("neverthrow"));
         assert!(client.contains("kind: \"api_key\", location: \"header\""));
         assert!(client.contains("AuthAttachment"));
         assert!(client.contains("authAdapters?: Record<string, AuthAdapter>"));
-        assert!(client.contains("group.length === 0"));
-        assert!(client.contains("kind: \"auth_adapter\""));
-        assert!(client.contains("attachment.headers"));
+        assert!(transport.contains("group.length === 0"));
+        assert!(transport.contains("kind: \"auth_adapter\""));
+        assert!(transport.contains("attachment.headers"));
         assert!(client.contains("signal?: AbortSignal"));
         assert!(client.contains("timeout?: number"));
         assert!(client.contains("export type CallOptions"));
         assert!(client.contains("headers?: HeadersInit"));
-        assert!(client.contains("callOptions?.headers"));
-        assert!(client.contains("callOptions?.timeout ?? client.timeout"));
-        assert!(client.contains("callOptions?.signal ?? client.signal"));
-        assert!(client.contains("options?: CallOptions"));
+        assert!(transport.contains("callOptions?.headers"));
+        assert!(transport.contains("callOptions?.timeout ?? client.timeout"));
+        assert!(transport.contains("callOptions?.signal ?? client.signal"));
+        assert!(auth.contains("options?: CallOptions"));
         assert!(client.contains("export type RequestInterceptor"));
         assert!(client.contains("export type ResponseInterceptor"));
         assert!(client.contains("headers?: HeadersInit |"));
-        assert!(client.contains("client.interceptors?.request"));
-        assert!(client.contains("client.interceptors?.response"));
+        assert!(transport.contains("client.interceptors?.request"));
+        assert!(transport.contains("client.interceptors?.response"));
         assert!(client.contains("export type RetryOptions"));
         assert!(client.contains("retry?: RetryOptions | false"));
-        assert!(client.contains("fetchWithRetry"));
-        assert!(client.contains("retry-after"));
-        assert!(client.contains("Date.parse(retryAfterText)"));
-        assert!(client.contains("idempotent: boolean"));
-        assert!(client.contains("setTimeout"));
-        assert!(client.contains("kind: \"timeout\""));
-        assert!(client.contains("kind: \"aborted\""));
-        assert!(client.contains("body: Extract<Types.LoginError"));
-        assert!(client.contains("headers: Headers"));
-        assert!(client.contains("headers: declaredError.headers"));
-        assert!(client.contains("ResponseWithHeaders"));
-        assert!(client.contains("withResponseHeaders"));
-        assert!(client.contains("return { value, headers: responseHeaders"));
+        assert!(transport.contains("fetchWithRetry"));
+        assert!(transport.contains("retry-after"));
+        assert!(transport.contains("Date.parse(retryAfterText)"));
+        assert!(transport.contains("idempotent: boolean"));
+        assert!(transport.contains("setTimeout"));
+        assert!(transport.contains("kind: \"timeout\""));
+        assert!(transport.contains("kind: \"aborted\""));
+        assert!(auth.contains("body: Extract<Types.LoginError"));
+        assert!(auth.contains("headers: Headers"));
+        assert!(transport.contains("headers: declaredError.headers"));
+        assert!(errors.contains("ResponseWithHeaders"));
+        assert!(transport.contains("withResponseHeaders"));
+        assert!(transport.contains("return { value, headers: responseHeaders"));
         assert!(client.contains("export type TokenStore"));
         assert!(
             client
                 .contains("A store returns a `{ value, ...metadata }` record, never a bare string")
         );
         assert!(client.contains("export type CredentialSource"));
-        assert!(client.contains("kind: \"auth_source\""));
-        assert!(client.contains("await source.set(nextCredential, {"));
-        assert!(client.contains("client.authRecords[scheme] = records"));
-        assert!(client.contains("credentialRecords(client, provides.scheme)"));
-        assert!(client.contains("storeCredentialRecord(client, provides.scheme, next)"));
+        assert!(transport.contains("kind: \"auth_source\""));
+        assert!(credentials.contains("await source.set(nextCredential, {"));
+        assert!(credentials.contains("client.authRecords[scheme] = records"));
+        assert!(credentials.contains("credentialRecords(client, provides.scheme)"));
+        assert!(credentials.contains("storeCredentialRecord(client, provides.scheme, next)"));
         assert!(client.contains("path?: string"));
-        assert!(client.contains("expiresAt:"));
-        assert!(client.contains("Date.parse(value)"));
-        assert!(client.contains("source.set(nextCredential, {"));
-        assert!(client.contains("host: credentialUrl.hostname"));
-        assert!(client.contains("AsyncIterable<Result<EventsWatchEvent, EventsWatchStreamError>>"));
-        assert!(client.contains(
+        assert!(credentials.contains("let expiresAt: number | undefined;"));
+        assert!(credentials.contains("Date.parse(value)"));
+        assert!(credentials.contains("source.set(nextCredential, {"));
+        assert!(credentials.contains("host: credentialUrl.hostname"));
+        assert!(events.contains("AsyncIterable<Result<EventsWatchEvent, EventsWatchStreamError>>"));
+        assert!(events.contains(
             "ResponseWithHeaders<AsyncIterable<Result<EventsWatchEvent, EventsWatchStreamError>>"
         ));
-        assert!(client.contains("event: \"user\""));
-        assert!(client.contains("name === \"error\""));
-        assert!(client.contains("headers: [{ name: \"X-Trace-ID\", required: true, schema:"));
-        assert!(client.contains("missing required response header"));
-        assert!(client.contains("expectedContentTypes"));
-        assert!(client.contains("application/problem+json"));
-        assert!(client.contains("stream === \"ndjson\""));
-        assert!(client.contains("\"text/event-stream\""));
+        assert!(events.contains("event: \"user\""));
+        assert!(stream.contains("name === \"error\""));
+        assert!(events.contains("headers: [{ name: \"X-Trace-ID\", required: true, schema:"));
+        assert!(transport.contains("missing required response header"));
+        assert!(transport.contains("expectedContentTypes"));
+        assert!(transport.contains("application/problem+json"));
+        assert!(transport.contains("stream === \"ndjson\""));
+        assert!(transport.contains("\"text/event-stream\""));
         assert!(
-            client.contains(
+            transport.contains(
                 "responseMediaTypeMatches(actualContentType, expectedContentType ?? \"\")"
             )
         );
-        assert!(client.contains("function mediaTypeMatches"));
-        assert!(client.contains("const text = await readResponseText(response, responseContent)"));
-        assert!(client.contains("rawValue = parseJson(text, preserveWideIntegers)"));
-        assert!(client.contains("invalid JSON response"));
-        assert!(!client.contains("responseContent.includes(\"text/event-stream\")"));
-        assert!(client.contains("response.headers.has(header.name)"));
-        assert!(client.contains("header.required && !response.headers.has(header.name)"));
-        assert!(client.contains("responseSchema?.headers"));
-        let missing_header_branch = client
+        assert!(transport.contains("function mediaTypeMatches"));
+        assert!(
+            transport.contains("const text = await readResponseText(response, responseContent)")
+        );
+        assert!(transport.contains("rawValue = parseJson(text, preserveWideIntegers)"));
+        assert!(transport.contains("invalid JSON response"));
+        assert!(!transport.contains("responseContent.includes(\"text/event-stream\")"));
+        assert!(transport.contains("response.headers.has(header.name)"));
+        assert!(transport.contains("header.required && !response.headers.has(header.name)"));
+        assert!(transport.contains("responseSchema?.headers"));
+        let missing_header_branch = transport
             .split("const missingHeader")
             .nth(1)
             .unwrap()
@@ -818,17 +896,19 @@ mod tests {
             missing_header_branch.contains("header.required && !response.headers.has(header.name)")
         );
         assert!(missing_header_branch.contains("kind: \"protocol\""));
-        assert!(client.contains("undeclared success response"));
-        assert!(client.contains("matchResponse"));
-        assert!(!client.contains("response.ok"));
-        let declared_success = client.find("const declaredSuccess").unwrap();
-        let declared_error = client.find("const declaredError").unwrap();
-        let undeclared_success = client.find("undeclared success response").unwrap();
+        assert!(transport.contains("undeclared success response"));
+        assert!(transport.contains("matchResponse"));
+        assert!(!transport.contains("response.ok"));
+        let declared_success = transport.find("const declaredSuccess").unwrap();
+        let declared_error = transport.find("const declaredError").unwrap();
+        let undeclared_success = transport.find("undeclared success response").unwrap();
         assert!(declared_success < declared_error && declared_error < undeclared_success);
-        let stream_capture = client
+        let stream_capture = transport
             .find("captureCredential(client, response, provides, undefined, false, finalUrl)")
             .unwrap();
-        let stream_return = client.find("return ok(withSuccessStatus(readSse").unwrap();
+        let stream_return = transport
+            .find("return ok(withSuccessStatus(readSse")
+            .unwrap();
         assert!(stream_capture < stream_return);
     }
 
@@ -841,14 +921,9 @@ mod tests {
             .scopes
             .insert("tenant".into(), vec!["events:read".into()]);
         let output = super::emit(&document).unwrap();
-        let client = output
-            .into_iter()
-            .find(|file| file.path == "client.ts")
-            .unwrap();
-        assert!(client.content.contains("\"tenant\": [\"events:read\"]"));
+        assert!(file(&output, "operations/events.ts").contains("\"tenant\": [\"events:read\"]"));
         assert!(
-            client
-                .content
+            file(&output, "runtime/transport.ts")
                 .contains("Object.prototype.hasOwnProperty.call(authScopes, scheme)")
         );
     }
@@ -914,23 +989,23 @@ mod tests {
             ]
         });
         let document: Document = serde_json::from_value(raw).unwrap();
-        let client = super::emit(&document)
+        let wire = super::emit(&document)
             .unwrap()
             .into_iter()
-            .find(|file| file.path == "client.ts")
+            .find(|file| file.path == "runtime/wire.ts")
             .unwrap()
             .content;
         assert!(
-            client.contains("is read_only and cannot cross the encode direction"),
-            "{client}"
+            wire.contains("is read_only and cannot cross the encode direction"),
+            "{wire}"
         );
         assert!(
-            client.contains("validateWire(item, extra, mode"),
-            "the openness value types the extras it preserves: {client}"
+            wire.contains("validateWire(item, extra, mode"),
+            "the openness value types the extras it preserves: {wire}"
         );
         assert!(
-            !client.contains("|| key !== undefined"),
-            "the unknown-key check cannot wait for a synthesized map key: {client}"
+            !wire.contains("|| key !== undefined"),
+            "the unknown-key check cannot wait for a synthesized map key: {wire}"
         );
     }
 
@@ -1004,13 +1079,13 @@ mod tests {
             .content;
         assert!(types.contains("\"Types.field\": string"));
         assert!(types.contains("\"Types.tag\": \"Types.variant\""));
-        let client = super::emit(&document)
+        let auth = super::emit(&document)
             .unwrap()
             .into_iter()
-            .find(|file| file.path == "client.ts")
+            .find(|file| file.path == "operations/auth.ts")
             .unwrap()
             .content;
-        assert!(client.contains("Types.LoginRequest"));
+        assert!(auth.contains("Types.LoginRequest"));
     }
 
     #[test]
@@ -1245,7 +1320,7 @@ mod tests {
         let output = super::emit(&document).unwrap();
         let client = output
             .into_iter()
-            .find(|file| file.path == "client.ts")
+            .find(|file| file.path == "operations/auth.ts")
             .unwrap();
         assert!(client.content.contains("body?:"));
     }
@@ -1256,36 +1331,20 @@ mod tests {
             serde_json::from_str(include_str!("../../../fixtures/login.json")).unwrap();
         document.operations[0].responses[0].status = ResponseStatus::Unknown;
         let output = super::emit(&document).unwrap();
-        let client = output
-            .into_iter()
-            .find(|file| file.path == "client.ts")
-            .unwrap();
-        assert!(client.content.contains("ResponseWithStatus<"));
-        assert!(client.content.contains("status: \"unknown\""));
+        let auth = file(&output, "operations/auth.ts");
+        let transport = file(&output, "runtime/transport.ts");
+        assert!(auth.contains("ResponseWithStatus<"));
+        assert!(auth.contains("status: \"unknown\""));
         assert!(
-            client
-                .content
-                .contains("const matched = matchResponse(responses, errors, response.status)")
+            transport.contains("const matched = matchResponse(responses, errors, response.status)")
         );
-        assert!(
-            client
-                .content
-                .contains("const declaredSuccess = matched.success")
-        );
-        assert!(
-            client
-                .content
-                .contains("const declaredError = matched.error")
-        );
-        assert!(!client.content.contains("findSuccess"));
+        assert!(transport.contains("const declaredSuccess = matched.success"));
+        assert!(transport.contains("const declaredError = matched.error"));
+        assert!(!transport.contains("findSuccess"));
 
         document.operations[0].responses[0].status = ResponseStatus::Default;
         let output = super::emit(&document).unwrap();
-        let client = output
-            .into_iter()
-            .find(|file| file.path == "client.ts")
-            .unwrap();
-        assert!(client.content.contains("ResponseWithStatus<"));
+        assert!(file(&output, "operations/auth.ts").contains("ResponseWithStatus<"));
     }
 
     #[test]
@@ -1328,16 +1387,9 @@ mod tests {
         login.body.as_mut().unwrap().media_type = Some("application/vnd.acme+json".into());
         login.responses[0].media_type = Some("application/vnd.acme.session+json".into());
         let output = super::emit(&document).unwrap();
-        let client = output
-            .into_iter()
-            .find(|file| file.path == "client.ts")
-            .unwrap();
-        assert!(client.content.contains("\"application/vnd.acme+json\""));
-        assert!(
-            client
-                .content
-                .contains("mediaType: \"application/vnd.acme.session+json\"")
-        );
+        let auth = file(&output, "operations/auth.ts");
+        assert!(auth.contains("\"application/vnd.acme+json\""));
+        assert!(auth.contains("mediaType: \"application/vnd.acme.session+json\""));
     }
 
     #[test]
@@ -1350,14 +1402,10 @@ mod tests {
             super::ErrorStrategy::Throw,
         )
         .unwrap();
-        let client = output
-            .files
-            .iter()
-            .find(|file| file.path == "client.ts")
-            .unwrap();
-        assert!(client.content.contains("requestOrThrow(request<"));
-        assert!(!client.content.contains("from \"neverthrow\""));
-        assert!(client.content.contains("type Result<T, E>"));
+        let errors = file(&output.files, "errors.ts");
+        assert!(file(&output.files, "operations/auth.ts").contains("requestOrThrow(request<"));
+        assert!(!errors.contains("from \"neverthrow\""));
+        assert!(errors.contains("type Result<T, E>"));
     }
 
     #[test]
@@ -1366,12 +1414,8 @@ mod tests {
             serde_json::from_str(include_str!("../../../fixtures/login.json")).unwrap();
         document.operations[1].responses[0].headers[0].presence = pons_ir::Presence::Optional;
         let files = super::emit(&document).unwrap();
-        let client = files.iter().find(|file| file.path == "client.ts").unwrap();
-        assert!(
-            client
-                .content
-                .contains("headers: [{ name: \"X-Trace-ID\", required: false, schema:")
-        );
+        let events = file(&files, "operations/events.ts");
+        assert!(events.contains("headers: [{ name: \"X-Trace-ID\", required: false, schema:"));
     }
 
     #[test]
@@ -1393,18 +1437,10 @@ mod tests {
                 ext: BTreeMap::new(),
             });
         let files = super::emit(&document).unwrap();
-        let client = files.iter().find(|file| file.path == "client.ts").unwrap();
-        assert!(
-            client
-                .content
-                .contains("headers: { \"Retry-After\": string }")
-        );
-        assert!(client.content.contains("retryable: true"));
-        assert!(
-            client
-                .content
-                .contains("headers: [{ name: \"Retry-After\", required: true, schema:")
-        );
+        let auth = file(&files, "operations/auth.ts");
+        assert!(auth.contains("headers: { \"Retry-After\": string }"));
+        assert!(auth.contains("retryable: true"));
+        assert!(auth.contains("headers: [{ name: \"Retry-After\", required: true, schema:"));
     }
 
     #[test]
@@ -1433,16 +1469,12 @@ mod tests {
         document.common_errors.push(common);
 
         let output = super::emit(&document).unwrap();
-        let client = output.iter().find(|file| file.path == "client.ts").unwrap();
-        assert!(client.content.contains("\"X-Retry-Count\": [bigint]"));
-        assert!(client.content.contains(
+        let transport = file(&output, "runtime/transport.ts");
+        assert!(file(&output, "operations/auth.ts").contains("\"X-Retry-Count\": [bigint]"));
+        assert!(transport.contains(
             "decodeWire(parseJson(value, preserveWideIntegers), schema, preserveWideIntegers, opaque)"
         ));
-        assert!(
-            !client
-                .content
-                .contains("decodeWire(JSON.parse(value), schema)")
-        );
+        assert!(!transport.contains("decodeWire(JSON.parse(value), schema)"));
 
         let output = super::emit_with_mode(&document, super::EmitMode::Lossy).unwrap();
         let warning = output
@@ -1493,13 +1525,9 @@ mod tests {
         let files = super::emit(&document).unwrap();
         let types = files.iter().find(|file| file.path == "types.ts").unwrap();
         assert!(types.content.contains("\"id\": bigint"));
-        let client = files.iter().find(|file| file.path == "client.ts").unwrap();
-        assert!(
-            client
-                .content
-                .contains("parseJson(text, preserveWideIntegers)")
-        );
-        assert!(client.content.contains("stringifyJson(encodedBody)"));
+        let transport = file(&files, "runtime/transport.ts");
+        assert!(transport.contains("parseJson(text, preserveWideIntegers)"));
+        assert!(transport.contains("stringifyJson(encodedBody)"));
 
         let output = super::emit_with_mode(&document, super::EmitMode::Lossy).unwrap();
         assert!(
@@ -1634,13 +1662,9 @@ mod tests {
         });
 
         let files = super::emit(&document).unwrap();
-        let client = files.iter().find(|file| file.path == "client.ts").unwrap();
-        assert!(
-            client
-                .content
-                .contains("kind: \"server_error\"; body: string")
-        );
-        assert!(!client.content.contains("event: \"error\"; data:"));
+        let events = file(&files, "operations/events.ts");
+        assert!(events.contains("kind: \"server_error\"; body: string"));
+        assert!(!events.contains("event: \"error\"; data:"));
     }
 
     #[test]
@@ -1691,33 +1715,41 @@ mod tests {
             .find(|file| file.path == "types.ts")
             .unwrap()
             .content;
-        let client = &files
+        let members = files
             .iter()
-            .find(|file| file.path == "client.ts")
-            .unwrap()
-            .content;
-        for source in [types, client] {
+            .filter(|file| file.path.starts_with("operations/"))
+            .map(|file| (file.path.clone(), file.content.clone()))
+            .collect::<Vec<_>>();
+        assert_eq!(members.len(), 4, "one file per top-level member");
+        for source in std::iter::once(types).chain(members.iter().map(|(_, content)| content)) {
             let declarations = source.matches("export type ").count();
             let names = source
                 .lines()
                 .filter_map(|line| line.strip_prefix("export type "))
                 .map(|line| line.split_whitespace().next().unwrap())
                 .collect::<std::collections::BTreeSet<_>>();
-            assert_eq!(names.len(), declarations);
+            assert_eq!(names.len(), declarations, "{source}");
         }
         for name in ["Collision", "Collision2", "Collision3"] {
             assert!(types.contains(&format!("export type {name} =")));
         }
-        for name in ["AEvent", "BItem"] {
-            assert!(client.contains(&format!("export type {name} =")));
-        }
+        let declared = members
+            .iter()
+            .map(|(_, content)| content.as_str())
+            .collect::<Vec<_>>()
+            .join("\n");
         for name in [
+            "AEvent",
+            "BItem",
             "AStreamError",
             "AStreamError2",
             "BStreamError",
             "BStreamError2",
         ] {
-            assert!(client.contains(&format!("export type {name} =")));
+            assert!(
+                declared.contains(&format!("export type {name} =")),
+                "{name}"
+            );
         }
     }
 
@@ -1805,7 +1837,7 @@ mod tests {
 
         let files = super::emit(&document).unwrap();
         let types = file(&files, "types.ts");
-        let client = file(&files, "client.ts");
+        let auth = file(&files, "operations/auth.ts");
         assert!(
             types.contains("export type Account = { \"id\": string };"),
             "{types}"
@@ -1815,8 +1847,8 @@ mod tests {
             "{types}"
         );
         assert!(
-            client.contains("Types.AccountInput") && client.contains("Types.Account"),
-            "{client}"
+            auth.contains("Types.AccountInput") && auth.contains("Types.Account"),
+            "{auth}"
         );
         assert!(
             types.lines().all(|line| !line.contains('#')),
@@ -1918,10 +1950,9 @@ mod tests {
             }),
         };
         let files = super::emit(&document).unwrap();
-        let client = files.iter().find(|file| file.path == "client.ts").unwrap();
-        assert!(client.content.contains("readNdjson"));
-        assert!(client.content.contains("application/x-ndjson"));
-        assert!(client.content.contains("AsyncIterable<Result"));
+        assert!(file(&files, "runtime/stream.ts").contains("readNdjson"));
+        assert!(file(&files, "runtime/transport.ts").contains("application/x-ndjson"));
+        assert!(file(&files, "operations/events.ts").contains("AsyncIterable<Result"));
 
         document.operations[stream_index]
             .stream
@@ -1933,5 +1964,245 @@ mod tests {
         };
         let error = super::emit(&document).unwrap_err();
         assert!(error.0.contains("SSE and NDJSON streams only"));
+    }
+
+    fn fixture() -> Document {
+        serde_json::from_str(include_str!("../../../fixtures/login.json")).unwrap()
+    }
+
+    fn documented() -> Document {
+        let mut raw: Value =
+            serde_json::from_str(include_str!("../../../fixtures/login.json")).unwrap();
+        raw["types"]["User"]["doc"] = json!({
+            "summary": "A person",
+            "description": "As the contract records them."
+        });
+        raw["types"]["User"]["fields"][1]["doc"] =
+            json!({"summary": "How they would like to be called."});
+        raw["types"]["LoginError"]["variants"][0]["doc"] = json!({
+            "summary": "The credentials were refused.",
+            "deprecated": true
+        });
+        raw["operations"][0]["doc"] = json!({
+            "summary": "Exchange a password for a session.",
+            "description": "The session token arrives in the body."
+        });
+        raw["operations"][0]["errors"][0]["doc"] =
+            json!({"summary": "The credentials did not match."});
+        serde_json::from_value(raw).unwrap()
+    }
+
+    fn emitted(document: &Document) -> (String, String, BTreeMap<String, String>) {
+        let files = super::emit(document).unwrap();
+        let operations = files
+            .iter()
+            .filter_map(|file| {
+                file.path.strip_prefix("operations/").map(|member| {
+                    (
+                        member.trim_end_matches(".ts").to_owned(),
+                        file.content.clone(),
+                    )
+                })
+            })
+            .collect();
+        (
+            file(&files, "types.ts").to_owned(),
+            file(&files, "client.ts").to_owned(),
+            operations,
+        )
+    }
+
+    #[test]
+    fn a_documented_type_carries_its_summary_and_its_description() {
+        let (types, ..) = emitted(&documented());
+        assert!(
+            types.contains("/** A person As the contract records them. */\nexport type User = {"),
+            "{types}"
+        );
+    }
+
+    #[test]
+    fn a_documented_struct_field_carries_its_documentation() {
+        let (types, ..) = emitted(&documented());
+        assert!(
+            types.contains(
+                "export type User = {\n  \"id\": string;\n  /** How they would like to be called. */\n  \"nickname\"?: string | null;\n  [key: string]: unknown;\n};"
+            ),
+            "{types}"
+        );
+    }
+
+    #[test]
+    fn a_documented_enum_variant_carries_its_documentation() {
+        let (types, ..) = emitted(&documented());
+        assert!(
+            types.contains(
+                "export type LoginError = /** The credentials were refused. @deprecated */\n  { \"code\": \"invalid\" }\n  | { \"code\": \"locked\" } & { \"retry_after\": number; [key: string]: unknown };"
+            ),
+            "{types}"
+        );
+    }
+
+    #[test]
+    fn a_documented_operation_carries_its_documentation() {
+        let (_, _, operations) = emitted(&documented());
+        assert!(
+            operations["auth"].contains(
+                "/** Exchange a password for a session. The session token arrives in the body. */\n    login: (args: AuthLoginArgs, options?: CallOptions) =>"
+            ),
+            "{}",
+            operations["auth"]
+        );
+    }
+
+    #[test]
+    fn a_documented_error_response_carries_its_documentation() {
+        let (_, _, operations) = emitted(&documented());
+        assert!(
+            operations["auth"].contains(
+                "export type AuthLoginError = ClientFailure\n  | /** The credentials did not match. */\n  { kind: \"http\"; status: number; body: Extract<Types.LoginError, { \"code\": \"invalid\" }>; headers: Headers };"
+            ),
+            "{}",
+            operations["auth"]
+        );
+    }
+
+    #[test]
+    fn a_summary_keeps_its_comment_whole() {
+        let mut raw: Value =
+            serde_json::from_str(include_str!("../../../fixtures/login.json")).unwrap();
+        raw["types"]["User"]["doc"] = json!({
+            "summary": "Ends the comment early */ and then\ncarries on",
+            "description": "Second line."
+        });
+        let (types, client, _) = emitted(&serde_json::from_value(raw).unwrap());
+        for source in [&types, &client] {
+            assert_eq!(
+                source.matches("/**").count(),
+                source.matches("*/").count(),
+                "every comment is closed:\n{source}"
+            );
+        }
+        assert!(
+            types.contains("/** Ends the comment early *\\/ and then carries on Second line. */"),
+            "{types}"
+        );
+        assert!(!types.contains("and then\ncarries on"), "{types}");
+    }
+
+    fn spec_of<'a>(client: &'a str, call: &str) -> &'a str {
+        let line = client
+            .lines()
+            .find(|line| line.contains(call))
+            .unwrap_or_else(|| panic!("no emitted call for {call}"));
+        let start = line.find("configured, {").unwrap() + "configured, ".len();
+        let end = line.rfind("})").unwrap() + 1;
+        &line[start..end]
+    }
+
+    fn keys_of(spec: &str) -> usize {
+        let mut depth = 0i32;
+        let mut keys = 0usize;
+        for character in spec.chars() {
+            match character {
+                '{' | '[' | '(' => depth += 1,
+                '}' | ']' | ')' => depth -= 1,
+                ',' if depth == 1 => keys += 1,
+                _ => {}
+            }
+        }
+        keys + 1
+    }
+
+    fn fnv1a(source: &str) -> u64 {
+        let mut hash = 0xcbf2_9ce4_8422_2325u64;
+        for byte in source.as_bytes() {
+            hash ^= u64::from(*byte);
+            hash = hash.wrapping_mul(0x100_0000_01b3);
+        }
+        hash
+    }
+
+    const TYPES_WITHOUT_DOCS: &str = concat!(
+        "export type EventQuery = { \"limit\"?: number };\n",
+        "\n",
+        "export type LoginError = { \"code\": \"invalid\" } | { \"code\": \"locked\" } & ",
+        "{ \"retry_after\": number; [key: string]: unknown };\n",
+        "\n",
+        "export type LoginRequest = { \"email\": string; [key: string]: unknown };\n",
+        "\n",
+        "export type User = { \"id\": string; \"nickname\"?: string | null; ",
+        "[key: string]: unknown };\n",
+        "\n"
+    );
+    const CLIENT_WITHOUT_DOCS: u64 = 0x9704_38bb_e1f6_bc61;
+
+    #[test]
+    fn a_document_that_documents_nothing_emits_the_bytes_it_emitted_before() {
+        let (types, client, _) = emitted(&fixture());
+        assert!(
+            types.starts_with(TYPES_WITHOUT_DOCS),
+            "the declarations carry no comment the contract did not write:\n{types}"
+        );
+        assert!(
+            types.contains(
+                "export const typeDefinitions: Record<string, any> = Object.assign(Object.create(null), JSON.parse("
+            ),
+            "the runtime reads the wire shape of the same declarations:\n{types}"
+        );
+        assert_eq!(fnv1a(&client), CLIENT_WITHOUT_DOCS);
+        let handwritten = client
+            .match_indices("/**")
+            .map(|(at, _)| &client[at..at + client[at..].find("*/").unwrap() + 2])
+            .collect::<Vec<_>>();
+        assert_eq!(
+            handwritten,
+            vec![
+                "/** Scope and lifetime captured with a credential. `expiresAt` is a Unix \
+                 millisecond timestamp; `host`, `path`, `secure`, and `origin` bind the value to \
+                 the response that issued it. */",
+                "/** A store returns a `{ value, ...metadata }` record, never a bare string, and \
+                 must persist the metadata it is given in `set` so that expiry and origin scope \
+                 survive a new client. A record with a non-string `value` or a metadata field of \
+                 the wrong type is rejected. */",
+            ],
+            "the emitter documents nothing the contract did not document"
+        );
+    }
+
+    #[test]
+    fn the_runtime_call_reads_as_a_request_spec() {
+        let (_, _, operations) = emitted(&fixture());
+        let login = spec_of(
+            &operations["auth"],
+            "request<AuthLoginResponse, AuthLoginError>",
+        );
+        assert_eq!(
+            login,
+            r#"{ method: "POST", path: ["", encodePathSegment("auth"), encodePathSegment("login")].join("/"), body: args.body, bodyContent: "json", bodySchema: {"ref":"LoginRequest"}, inputs: { path: [], query: undefined, headers: [], bodyRequired: true }, responses: [{ status: 200, content: "json", schema: {"ref":"User"} }], errors: [{ status: "4xx", content: "json", schema: {"ref":"LoginError","variant":"invalid"} }], provides: { scheme: "session", value: { from: "body", pointer: "/token" }, expiresAt: undefined }, options: options }"#
+        );
+        let watch = spec_of(
+            &operations["events"],
+            "request<EventsWatchResponse, EventsWatchError>",
+        );
+        assert_eq!(
+            keys_of(login),
+            10,
+            "a spec names what the operation uses:\n{login}"
+        );
+        assert!(
+            keys_of(watch) <= 12,
+            "a spec stays a handful of keys:\n{watch}"
+        );
+        for key in [
+            "pathValues: args.path",
+            "query: args.query",
+            "headers: args.headers",
+            "auth: { alternatives: [[\"tenant\"]] }",
+            "options: options",
+            "idempotent: true",
+        ] {
+            assert!(watch.contains(key), "{key} is missing:\n{watch}");
+        }
     }
 }

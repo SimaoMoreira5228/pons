@@ -1,0 +1,144 @@
+{
+  "ir_version": "0.2",
+  "info": {
+    "title": "Example",
+    "version": "1",
+    "servers": ["https://api.example.test"]
+  },
+  "ext": {
+    "test.example.source/v1": {"kept": true}
+  },
+  "types": {
+    "User": {
+      "kind": "struct",
+      "openness": "preserve_opaque",
+      "name": ["user"],
+      "direction": "output",
+      "ext": {"test.example.source/v1": "kept"},
+      "fields": [
+        {
+          "wire": "id",
+          "ident": ["id"],
+          "ty": {"kind": "int", "bits": 64, "signed": false, "wire": "number"},
+          "presence": "required",
+          "ext": {"test.example.source/v1": 1}
+        },
+        {
+          "wire": "nickname",
+          "ident": ["nickname"],
+          "ty": {"kind": "nullable", "inner": {"kind": "string"}},
+          "presence": "optional"
+        }
+      ]
+    },
+    "LoginRequest": {
+      "kind": "struct",
+      "openness": "preserve_opaque",
+      "name": ["login", "request"],
+      "direction": "input",
+      "fields": [
+        {
+          "wire": "email",
+          "ident": ["email"],
+          "ty": {"kind": "string", "format": "email"},
+          "presence": "required"
+        }
+      ]
+    },
+    "LoginError": {
+      "kind": "enum",
+      "name": ["login", "error"],
+      "direction": "output",
+      "repr": {"kind": "internal", "tag": "code"},
+      "variants": [
+        {"wire": "invalid", "ident": ["invalid"], "payload": {"kind": "unit"}},
+        {
+          "wire": "locked",
+          "ident": ["locked"],
+          "payload": {
+            "kind": "struct",
+            "fields": [
+              {
+                "wire": "retry_after",
+                "ident": ["retry", "after"],
+                "ty": {"kind": "int", "bits": 32, "signed": false, "wire": "number"},
+                "presence": "required"
+              }
+            ]
+          }
+        }
+      ]
+    },
+    "EventQuery": {
+      "kind": "struct",
+      "openness": "reject",
+      "name": ["event", "query"],
+      "direction": "input",
+      "fields": [
+        {
+          "wire": "limit",
+          "ident": ["limit"],
+          "ty": {"kind": "int", "bits": 16, "signed": false, "wire": "number"},
+          "presence": "optional"
+        }
+      ]
+    }
+  },
+  "auth_schemes": {
+    "session": {"kind": "bearer", "format": "jwt"},
+    "tenant": {"kind": "api_key", "in": "header", "name": "X-Tenant"}
+  },
+  "operations": [
+    {
+      "id": [["auth"], ["login"]],
+      "method": "POST",
+      "path": [{"lit": "auth"}, {"lit": "login"}],
+      "body": {"ty": {"ref": "LoginRequest"}, "content": "json", "required": true},
+      "responses": [{"status": 200, "content": "json", "body": {"ref": "User"}}],
+      "errors": [
+        {
+          "status": "4xx",
+          "name": ["login", "error"],
+          "content": "json",
+          "body": {"ref": "LoginError", "variant": "invalid"}
+        }
+      ],
+      "auth": {"alternatives": [], "optional": false},
+      "provides": {"scheme": "session", "value": {"from": "body", "pointer": "/token"}},
+      "semantics": {"safe": false, "idempotent": false}
+    },
+    {
+      "id": [["events"], ["watch"]],
+      "method": "GET",
+      "path": [
+        {"lit": "events"},
+        {"param": "cursor", "ty": {"kind": "string"}}
+      ],
+      "query": {"ref": "EventQuery"},
+      "headers": [
+        {
+          "wire": "X-Request-ID",
+          "ident": ["request", "id"],
+          "ty": {"kind": "string"},
+          "presence": "optional"
+        }
+      ],
+      "auth": {"alternatives": [["tenant"]], "optional": false},
+      "semantics": {"safe": true, "idempotent": true},
+      "responses": [
+        {
+          "status": 200,
+          "content": "stream",
+          "headers": [
+            {
+              "wire": "X-Trace-ID",
+              "ty": {"kind": "string"},
+              "presence": "required"
+            }
+          ]
+        }
+      ],
+      "stream": {"kind": "sse", "events": [{"event": "user", "data": {"ref": "User"}}]}
+    }
+  ]
+}

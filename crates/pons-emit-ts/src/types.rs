@@ -1,11 +1,11 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use pons_ir::{
-    Access, Direction, Document, EnumRepr, Field, InlineType, IntegerWire, ObjectOpenness, TypeDef,
-    TypeKind, TypeRef, Variant, VariantPayload,
+    Access, Direction, Doc, Document, EnumRepr, Field, InlineType, IntegerWire, ObjectOpenness,
+    TypeDef, TypeKind, TypeRef, Variant, VariantPayload,
 };
 
-use crate::{EmitError, EmitMode, string};
+use crate::{EmitError, EmitMode, jsdoc, object_type, string, union_type};
 
 pub(super) fn emit(
     document: &Document,
@@ -15,12 +15,40 @@ pub(super) fn emit(
     let mut output = String::new();
     for (id, definition) in &document.types {
         let name = &names[id];
+        let comment = jsdoc(definition.doc.as_ref());
+        if !comment.is_empty() {
+            output.push_str(&comment);
+            output.push('\n');
+        }
         output.push_str(&format!(
             "export type {name} = {};\n\n",
             definition_type(definition, document, names, mode)?
         ));
     }
+    output.push_str(&type_definitions(document)?);
     Ok(output)
+}
+
+fn type_definitions(document: &Document) -> Result<String, EmitError> {
+    let definitions = document
+        .types
+        .iter()
+        .map(|(id, definition)| {
+            let mut value = serde_json::to_value(&definition.definition)
+                .map_err(|error| EmitError(format!("cannot encode type metadata: {error}")))?;
+            value["direction"] = serde_json::to_value(definition.direction)
+                .map_err(|error| EmitError(format!("cannot encode type direction: {error}")))?;
+            crate::client::normalize_integer_constraints(&mut value);
+            Ok((id.clone(), value))
+        })
+        .collect::<Result<BTreeMap<_, _>, _>>()?;
+    let definitions = serde_json::to_string(&definitions)
+        .map_err(|error| EmitError(format!("cannot encode type metadata: {error}")))?;
+    let encoded = serde_json::to_string(&definitions)
+        .map_err(|error| EmitError(format!("cannot encode type metadata: {error}")))?;
+    Ok(format!(
+        "export const typeDefinitions: Record<string, any> = Object.assign(Object.create(null), JSON.parse({encoded}));\n"
+    ))
 }
 
 fn definition_type(
@@ -60,6 +88,7 @@ fn definition_type(
                         false,
                         &mut BTreeSet::new(),
                     )
+                    .map(|member| (field.doc.as_ref(), member))
                 })
                 .collect::<Result<Vec<_>, _>>()?;
             match openness {
@@ -84,13 +113,13 @@ fn definition_type(
                     } else {
                         extra
                     };
-                    members.push(format!("[key: string]: {index_type}"));
+                    members.push((None, format!("[key: string]: {index_type}")));
                 }
                 ObjectOpenness::PreserveOpaque => {
-                    members.push("[key: string]: unknown".into());
+                    members.push((None, String::from("[key: string]: unknown")));
                 }
             }
-            let mut ty = format!("{{ {} }}", members.join("; "));
+            let mut ty = object_type(&members);
             for flat in flattened {
                 ty = format!("{ty} & {}", local_type_ref(flat, document, names, mode)?);
             }
@@ -319,7 +348,7 @@ fn enum_type(
     names: &BTreeMap<String, String>,
     mode: EmitMode,
 ) -> Result<String, EmitError> {
-    let mut types = Vec::with_capacity(variants.len());
+    let mut types: Vec<(Option<&Doc>, String)> = Vec::with_capacity(variants.len());
     for variant in variants {
         let mut narrowed = BTreeSet::new();
         let payload = payload_type(
@@ -365,12 +394,12 @@ fn enum_type(
             }
             EnumRepr::Untagged => payload,
         };
-        types.push(ty);
+        types.push((variant.doc.as_ref(), ty));
     }
     if types.is_empty() {
         return Err(EmitError("an enum must have at least one variant".into()));
     }
-    Ok(types.join(" | "))
+    Ok(union_type(&types))
 }
 
 fn payload_type(
@@ -399,10 +428,13 @@ fn payload_type(
             let mut members = fields
                 .iter()
                 .filter(|field| field_is_visible(field, direction))
-                .map(|field| field_type(field, direction, document, names, mode, qualify, narrowed))
-                .collect::<Result<Vec<_>, _>>()?;
-            members.push("[key: string]: unknown".into());
-            Ok(format!("{{ {} }}", members.join("; ")))
+                .map(|field| {
+                    field_type(field, direction, document, names, mode, qualify, narrowed)
+                        .map(|member| (field.doc.as_ref(), member))
+                })
+                .collect::<Result<Vec<_>, EmitError>>()?;
+            members.push((None, String::from("[key: string]: unknown")));
+            Ok(object_type(&members))
         }
     }
 }

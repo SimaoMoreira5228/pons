@@ -1,28 +1,31 @@
-pub(super) fn render() -> &'static str {
-    r#"const CANONICAL_INTEGER = /^(0|[1-9][0-9]*)$/;
+import { typeDefinitions } from "../types.js";
+
+export class WirePolicyError extends Error {}
+
+const CANONICAL_INTEGER = /^(0|[1-9][0-9]*)$/;
 const CANONICAL_SIGNED_INTEGER = /^-?(0|[1-9][0-9]*)$/;
 const BASE64 = /^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/;
 const BASE64URL = /^(?:[A-Za-z0-9_-]{4})*(?:[A-Za-z0-9_-]{2}(?:==)?|[A-Za-z0-9_-]{3}=?)?$/;
 
-function validateWire(value: any, schema: any, mode: "encode" | "decode", allowUnsafeWideIntegers = false): any {
+export function validateWire(value: any, schema: any, mode: "encode" | "decode", allowUnsafeWideIntegers = false): any {
   if (schema == null) return;
   if (value === undefined) throw new WirePolicyError("missing value");
   if (schema.ref) {
-     const definition = typeDefinitions[schema.ref];
-     if (!definition) return;
-     if ((mode === "encode" && definition.direction === "output") || (mode === "decode" && definition.direction === "input")) {
-       throw new WirePolicyError(`type ${schema.ref} cannot be used in this direction`);
-     }
-     if (schema.variant && definition.kind === "enum") {
+    const definition = typeDefinitions[schema.ref];
+    if (!definition) return;
+    if ((mode === "encode" && definition.direction === "output") || (mode === "decode" && definition.direction === "input")) {
+      throw new WirePolicyError(`type ${schema.ref} cannot be used in this direction`);
+    }
+    if (schema.variant && definition.kind === "enum") {
       const variant = definition.variants.find((entry: any) => entry.wire === schema.variant);
       if (!variant) throw new WirePolicyError(`unknown enum variant ${schema.variant}`);
-       return validateEnum(value, definition, variant, mode, allowUnsafeWideIntegers);
+      return validateEnum(value, definition, variant, mode, allowUnsafeWideIntegers);
     } else if (definition.kind === "struct") {
-       return validateStruct(value, definition, mode, allowUnsafeWideIntegers);
+      return validateStruct(value, definition, mode, allowUnsafeWideIntegers);
     } else if (definition.kind === "enum") {
-       return validateEnum(value, definition, undefined, mode, allowUnsafeWideIntegers);
+      return validateEnum(value, definition, undefined, mode, allowUnsafeWideIntegers);
     } else if (definition.kind === "newtype") {
-       return validateWire(value, definition.inner, mode, allowUnsafeWideIntegers);
+      return validateWire(value, definition.inner, mode, allowUnsafeWideIntegers);
     }
     return;
   }
@@ -32,7 +35,7 @@ function validateWire(value: any, schema: any, mode: "encode" | "decode", allowU
     return;
   }
   if (schema.kind === "nullable") {
-     if (value !== null) validateWire(value, schema.inner, mode, allowUnsafeWideIntegers);
+    if (value !== null) validateWire(value, schema.inner, mode, allowUnsafeWideIntegers);
     return;
   }
   if (schema.kind === "bool") {
@@ -106,7 +109,7 @@ function validateWire(value: any, schema: any, mode: "encode" | "decode", allowU
   }
   if (schema.kind === "array") {
     if (!Array.isArray(value)) throw new WirePolicyError("expected array");
-     for (const item of value) validateWire(item, schema.item, mode, allowUnsafeWideIntegers);
+    for (const item of value) validateWire(item, schema.item, mode, allowUnsafeWideIntegers);
     if (schema.unique === true) {
       const values = new Set(value.map(stableValue));
       if (values.size !== value.length) throw new WirePolicyError("array values must be unique");
@@ -116,8 +119,8 @@ function validateWire(value: any, schema: any, mode: "encode" | "decode", allowU
   if (schema.kind === "map") {
     if (!isRecord(value)) throw new WirePolicyError("expected object");
     for (const [key, item] of Object.entries(value)) {
-       validateWire(key, schema.key, mode, allowUnsafeWideIntegers);
-       validateWire(item, schema.value, mode, allowUnsafeWideIntegers);
+      validateWire(key, schema.key, mode, allowUnsafeWideIntegers);
+      validateWire(item, schema.value, mode, allowUnsafeWideIntegers);
     }
     return;
   }
@@ -125,7 +128,7 @@ function validateWire(value: any, schema: any, mode: "encode" | "decode", allowU
     if (!Array.isArray(value) || value.length !== schema.items.length) {
       throw new WirePolicyError("expected tuple");
     }
-     schema.items.forEach((item: any, index: number) => validateWire(value[index], item, mode, allowUnsafeWideIntegers));
+    schema.items.forEach((item: any, index: number) => validateWire(value[index], item, mode, allowUnsafeWideIntegers));
     return;
   }
 }
@@ -271,39 +274,39 @@ function validateEnum(value: any, definition: any, expected: any, mode: "encode"
     if (!variant || !matchesExpected(variant)) {
       throw new WirePolicyError(`invalid enum variant ${wire}`);
     }
-     validateVariantPayload(value[wire], variant, mode, "external", definition.direction, allowUnsafeWideIntegers);
+    validateVariantPayload(value[wire], variant, mode, "external", definition.direction, allowUnsafeWideIntegers);
     return variant;
   }
   if (!isRecord(value)) throw new WirePolicyError("expected enum object");
-   const tag = Object.hasOwn(value, repr.tag) ? value[repr.tag] : undefined;
-   const variant = variantFor(tag);
-   if (!variant || !matchesExpected(variant)) {
-     throw new WirePolicyError(`invalid enum variant ${String(tag)}`);
-   }
-   if (repr.kind === "internal" && variant.payload.kind === "tuple") {
-     throw new WirePolicyError("internal enum payload must be an object");
-   }
-    if (repr.kind === "internal" && variant.payload.kind === "newtype") {
-      let payloadType = variant.payload.ty.ref ? typeDefinitions[variant.payload.ty.ref] : undefined;
-      while (payloadType?.kind === "newtype") {
-        payloadType = payloadType.inner.ref ? typeDefinitions[payloadType.inner.ref] : undefined;
-      }
-      if (payloadType?.kind !== "struct") throw new WirePolicyError("internal enum payload must be an object");
+  const tag = Object.hasOwn(value, repr.tag) ? value[repr.tag] : undefined;
+  const variant = variantFor(tag);
+  if (!variant || !matchesExpected(variant)) {
+    throw new WirePolicyError(`invalid enum variant ${String(tag)}`);
+  }
+  if (repr.kind === "internal" && variant.payload.kind === "tuple") {
+    throw new WirePolicyError("internal enum payload must be an object");
+  }
+  if (repr.kind === "internal" && variant.payload.kind === "newtype") {
+    let payloadType = variant.payload.ty.ref ? typeDefinitions[variant.payload.ty.ref] : undefined;
+    while (payloadType?.kind === "newtype") {
+      payloadType = payloadType.inner.ref ? typeDefinitions[payloadType.inner.ref] : undefined;
     }
-   if (variant.payload.kind !== "unit") {
-     const payload = repr.kind === "adjacent"
-       ? (Object.hasOwn(value, repr.content) ? value[repr.content] : undefined)
-       : value;
-     validateVariantPayload(payload, variant, mode, repr.kind, definition.direction, allowUnsafeWideIntegers);
+    if (payloadType?.kind !== "struct") throw new WirePolicyError("internal enum payload must be an object");
+  }
+  if (variant.payload.kind !== "unit") {
+    const payload = repr.kind === "adjacent"
+      ? (Object.hasOwn(value, repr.content) ? value[repr.content] : undefined)
+      : value;
+    validateVariantPayload(payload, variant, mode, repr.kind, definition.direction, allowUnsafeWideIntegers);
   }
   return variant;
 }
 
-function selectUntaggedVariant(value: any, definition: any, expected: any, mode: "encode" | "decode", allowUnsafeWideIntegers: boolean): any {
+export function selectUntaggedVariant(value: any, definition: any, expected: any, mode: "encode" | "decode", allowUnsafeWideIntegers: boolean): any {
   const variants = expected === undefined ? definition.variants : [expected];
   for (const variant of variants) {
     try {
-       validateVariantPayload(value, variant, mode, "untagged", definition.direction, allowUnsafeWideIntegers);
+      validateVariantPayload(value, variant, mode, "untagged", definition.direction, allowUnsafeWideIntegers);
       return variant;
     } catch {
     }
@@ -318,21 +321,127 @@ function validateVariantPayload(value: any, variant: any, mode: "encode" | "deco
     return;
   }
   if (payload.kind === "newtype") {
-     validateWire(value, payload.ty, mode, allowUnsafeWideIntegers);
+    validateWire(value, payload.ty, mode, allowUnsafeWideIntegers);
     return;
   }
   if (payload.kind === "tuple") {
     if (!Array.isArray(value) || value.length !== payload.items.length) {
       throw new WirePolicyError("expected enum tuple");
     }
-     payload.items.forEach((item: any, index: number) => validateWire(value[index], item, mode, allowUnsafeWideIntegers));
+    payload.items.forEach((item: any, index: number) => validateWire(value[index], item, mode, allowUnsafeWideIntegers));
     return;
   }
-   validateStruct(value, { kind: "struct", direction, fields: payload.fields, flattened: [], openness: "preserve_opaque" }, mode, allowUnsafeWideIntegers);
+  validateStruct(value, { kind: "struct", direction, fields: payload.fields, flattened: [], openness: "preserve_opaque" }, mode, allowUnsafeWideIntegers);
 }
 
-function isRecord(value: any): boolean {
+export function isRecord(value: any): boolean {
   return value !== null && typeof value === "object" && !Array.isArray(value);
 }
-"#
+
+export function definitionApplies(definition: any, mode?: "encode" | "decode"): boolean {
+  if (mode === undefined) return true;
+  const direction = definition.direction ?? "both";
+  return mode === "encode" ? direction !== "output" : direction !== "input";
+}
+
+function fieldApplies(field: any, definition: any, mode?: "encode" | "decode"): boolean {
+  if (!definitionApplies(definition, mode)) return false;
+  if (mode === "encode" && field.access === "read_only") return false;
+  return mode !== "decode" || field.access !== "write_only";
+}
+
+export function collectFields(
+  definition: any,
+  mode?: "encode" | "decode",
+  seen = new Set<any>(),
+): any[] {
+  if (!definitionApplies(definition, mode) || seen.has(definition)) return [];
+  const next = new Set(seen);
+  next.add(definition);
+  const fields = (definition.fields ?? []).filter((field: any) => fieldApplies(field, definition, mode));
+  for (const reference of definition.flattened ?? []) {
+    const flattened = reference.ref ? typeDefinitions[reference.ref] : undefined;
+    if (flattened && !definitionApplies(flattened, mode)) {
+      throw new WirePolicyError("flattened type cannot be used in this direction");
+    }
+    if (flattened?.kind === "struct") fields.push(...collectFields(flattened, mode, next));
+    if (flattened?.kind === "newtype") {
+      let nested = flattened;
+      while (nested?.kind === "newtype" && nested.inner.ref && !next.has(nested)) {
+        next.add(nested);
+        nested = typeDefinitions[nested.inner.ref];
+        if (nested && !definitionApplies(nested, mode)) {
+          throw new WirePolicyError("flattened type cannot be used in this direction");
+        }
+      }
+      if (nested?.kind === "struct") fields.push(...collectFields(nested, mode, next));
+    }
+  }
+  return fields;
+}
+
+export function collectMapValues(references: any[]): any[] {
+  return references.flatMap((reference) => {
+    if (reference.kind === "map") return [reference.value];
+    if (!reference.ref) return [];
+    const definition = typeDefinitions[reference.ref];
+    return definition?.kind === "newtype" && definition.inner.kind === "map"
+      ? [definition.inner.value]
+      : definition?.kind === "struct"
+        ? collectMapValues(definition.flattened ?? [])
+        : [];
+  });
+}
+
+export function opennessValue(schema: any, seen = new Set<string>()): any {
+  if (schema?.kind === "map") return schema.value;
+  if (!schema?.ref || seen.has(schema.ref)) return schema;
+  const definition = typeDefinitions[schema.ref];
+  if (definition?.kind !== "newtype") return schema;
+  seen.add(schema.ref);
+  return opennessValue(definition.inner, seen);
+}
+
+export function hasOpaque(schema: any, seen = new Set<string>()): boolean {
+  if (schema == null) return false;
+  if (schema.kind === "opaque") return true;
+  if (schema.ref) {
+    if (seen.has(schema.ref)) return false;
+    const next = new Set(seen);
+    next.add(schema.ref);
+    return hasOpaque(typeDefinitions[schema.ref], next);
+  }
+  if (schema.kind === "nullable") return hasOpaque(schema.inner, seen);
+  if (schema.kind === "array") return hasOpaque(schema.item, seen);
+  if (schema.kind === "map") return hasOpaque(schema.value, seen);
+  if (schema.kind === "tuple") return schema.items.some((item: any) => hasOpaque(item, seen));
+  if (schema.kind === "struct") {
+    return (schema.fields ?? []).some((field: any) => hasOpaque(field.ty, seen))
+      || (schema.flattened ?? []).some((item: any) => hasOpaque(item, seen))
+      || hasOpaque(schema.openness?.preserve_typed?.value, seen);
+  }
+  if (schema.kind === "enum") {
+    return (schema.variants ?? []).some((variant: any) => hasOpaque(variant.payload, seen));
+  }
+  if (schema.kind === "newtype") return hasOpaque(schema.inner, seen);
+  return false;
+}
+
+export function flattenedOpaqueSchema(schema: any, seen = new Set<string>()): any | undefined {
+  if (schema?.kind === "opaque") return schema;
+  if (!schema?.ref || seen.has(schema.ref)) return undefined;
+  const definition = typeDefinitions[schema.ref];
+  if (definition?.kind !== "newtype" && definition?.kind !== "struct") return undefined;
+  const next = new Set(seen);
+  next.add(schema.ref);
+  if (definition.kind === "newtype") return flattenedOpaqueSchema(definition.inner, next);
+  for (const item of definition.flattened ?? []) {
+    const nested = flattenedOpaqueSchema(item, next);
+    if (nested !== undefined) return nested;
+  }
+  return undefined;
+}
+
+export function isFlattenedOpaque(schema: any): boolean {
+  return flattenedOpaqueSchema(schema) !== undefined;
 }

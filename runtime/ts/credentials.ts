@@ -1,5 +1,14 @@
-pub(super) fn render() -> &'static str {
-    r#"type CredentialValue = { value: string | undefined; expiresAt?: number | undefined; path?: string | undefined; secure?: boolean | undefined; host?: string | undefined; origin?: string | undefined };
+import type { AuthAdapter, AuthSchemeDefinition, CredentialMetadata, StoredCredential } from "../client.js";
+import type { AttachedQueryCredential, ConfiguredClient } from "./transport.js";
+
+type CredentialLocator =
+  | { from: "body"; pointer: string }
+  | { from: "header"; name: string }
+  | { from: "set_cookie"; name: string };
+export type CredentialProvision = { scheme: string; value: CredentialLocator; expiresAt?: CredentialLocator | undefined };
+export type CredentialValue = { value: string | undefined; expiresAt?: number | undefined; path?: string | undefined; secure?: boolean | undefined; host?: string | undefined; origin?: string | undefined };
+
+type CredentialRead = { value: unknown; deleted: boolean; expiresAt?: number | undefined; path?: string | undefined; secure?: boolean | undefined; domain?: string | undefined };
 
 const CREDENTIAL_METADATA_KINDS: ReadonlyArray<readonly [keyof CredentialMetadata, string]> = [["expiresAt", "number"], ["path", "string"], ["secure", "boolean"], ["host", "string"], ["origin", "string"]];
 
@@ -25,11 +34,11 @@ function storedCredential(stored: unknown): StoredCredential | undefined {
   return record;
 }
 
-function credentialRecords(client: ConfiguredClient, scheme: string): CredentialValue[] {
+export function credentialRecords(client: ConfiguredClient, scheme: string): CredentialValue[] {
   return client.authRecords[scheme] ?? [];
 }
 
-function latestCredentialRecord(client: ConfiguredClient, scheme: string): CredentialValue | undefined {
+export function latestCredentialRecord(client: ConfiguredClient, scheme: string): CredentialValue | undefined {
   const records = credentialRecords(client, scheme);
   return records.length === 0 ? undefined : records[records.length - 1];
 }
@@ -79,7 +88,7 @@ async function expireCredentialRecords(client: ConfiguredClient, scheme: string)
   }
 }
 
-async function credentialValue(client: ConfiguredClient, scheme: string, url: URL): Promise<CredentialValue> {
+export async function credentialValue(client: ConfiguredClient, scheme: string, url: URL): Promise<CredentialValue> {
   await expireCredentialRecords(client, scheme);
   if (client.authInvalidated[scheme] === true) return { value: undefined };
   const cached = selectCredentialRecord(client, scheme, url);
@@ -91,7 +100,7 @@ async function credentialValue(client: ConfiguredClient, scheme: string, url: UR
     if (source !== undefined) {
       const stored = storedCredential(await source.get());
       if (stored !== undefined) {
-        if (isCookieAuth(authSchemes[scheme]) && (stored.host === undefined || stored.path === undefined)) {
+        if (isCookieAuth(client.authSchemes[scheme]) && (stored.host === undefined || stored.path === undefined)) {
           throw new Error("cookie token store record is missing scope metadata");
         }
         if (stored.expiresAt !== undefined && stored.expiresAt <= Date.now()) {
@@ -107,7 +116,19 @@ async function credentialValue(client: ConfiguredClient, scheme: string, url: UR
   return { value: undefined };
 }
 
-type CredentialRead = { value: unknown; deleted: boolean; expiresAt?: number | undefined; path?: string | undefined; secure?: boolean | undefined; domain?: string | undefined };
+export class CredentialSourceError extends Error {
+  constructor(readonly scheme: string, readonly sourceCause: unknown) {
+    super(`credential source failed for ${scheme}`);
+  }
+}
+
+export class CredentialRedirectError extends Error {
+  constructor(readonly schemes: string[]) {
+    super(schemes.length > 0
+      ? "redirect would forward credentials outside their scope"
+      : "cross-origin redirect would carry request state outside the origin that produced it");
+  }
+}
 
 function readCredential(
   response: Response,
@@ -162,7 +183,7 @@ function cookieScopeMatches(
     (expectedSecure !== true || responseProtocol === "https:");
 }
 
-async function captureCredential(
+export async function captureCredential(
   client: ConfiguredClient,
   response: Response,
   provides: CredentialProvision | undefined,
@@ -178,7 +199,7 @@ async function captureCredential(
     ? normalizeCookiePath(credentialRead.path, credentialUrl.pathname) ?? defaultCookiePath(credentialUrl.pathname)
     : undefined;
   if (provides.value.from === "set_cookie") {
-    const definition = authSchemes[provides.scheme];
+    const definition = client.authSchemes[provides.scheme];
     const targetName = isCookieAuth(definition) ? definition?.name : undefined;
     const prefixNames = targetName === undefined ? [provides.value.name] : [provides.value.name, targetName];
     const invalidPrefix = prefixNames.some((name) =>
@@ -214,7 +235,7 @@ async function captureCredential(
         throw new CredentialSourceError(provides.scheme, cause);
       }
       if (stored === undefined) return;
-      if (isCookieAuth(authSchemes[provides.scheme]) && (stored.host === undefined || stored.path === undefined)) {
+      if (isCookieAuth(client.authSchemes[provides.scheme]) && (stored.host === undefined || stored.path === undefined)) {
         throw new CredentialSourceError(provides.scheme, new Error("cookie token store record is missing scope metadata"));
       }
       if (!cookieScopeMatches(
@@ -276,5 +297,117 @@ async function captureCredential(
   next.origin = credentialUrl.origin;
   storeCredentialRecord(client, provides.scheme, next);
 }
-"#
+
+export function isCookieAuth(definition: AuthSchemeDefinition | undefined): boolean {
+  return definition?.kind === "cookie" || (definition?.kind === "api_key" && definition.location === "cookie");
+}
+
+export function customAdapter(
+  client: ConfiguredClient,
+  definition: AuthSchemeDefinition,
+  scheme: string,
+): AuthAdapter | undefined {
+  return client.authAdapters?.[definition.adapter ?? scheme];
+}
+
+export function dropCredentialScheme<T extends { scheme: string }>(credentials: T[], scheme: string): void {
+  for (let index = credentials.length - 1; index >= 0; index -= 1) {
+    const credential = credentials[index];
+    if (credential !== undefined && credential.scheme === scheme) credentials.splice(index, 1);
+  }
+}
+
+export function reattachQueryCredentials(
+  url: URL,
+  credentials: AttachedQueryCredential[],
+  invalidated: Record<string, boolean>,
+): void {
+  for (const credential of credentials) {
+    for (const [name, value] of credential.params) {
+      if (invalidated[credential.scheme] === true) url.searchParams.delete(name);
+      else url.searchParams.set(name, value);
+    }
+  }
+}
+
+function defaultCookiePath(requestPath: string): string {
+  const lastSlash = requestPath.lastIndexOf("/");
+  return lastSlash <= 0 ? "/" : requestPath.slice(0, lastSlash);
+}
+
+function normalizeCookiePath(path: string | undefined, requestPath: string): string | undefined {
+  if (path === undefined || path.length === 0) return undefined;
+  return path.startsWith("/") ? path : defaultCookiePath(requestPath);
+}
+
+export function removeCookieHeader(headers: Headers, name: string): void {
+  const current = headers.get("cookie");
+  if (current === null) return;
+  const cookies = current
+    .split(";")
+    .map((part) => part.trim())
+    .filter((part) => part.length > 0 && !part.startsWith(`${name}=`));
+  if (cookies.length === 0) headers.delete("cookie");
+  else headers.set("cookie", cookies.join("; "));
+}
+
+export function cookiePathMatches(cookiePath: string, requestPath: string): boolean {
+  if (!cookiePath || cookiePath === "/") return true;
+  const prefix = cookiePath.endsWith("/") ? cookiePath : `${cookiePath}/`;
+  return requestPath === cookiePath || requestPath.startsWith(prefix);
+}
+
+export function setCookieHeader(headers: Headers, name: string, value: string, scheme: string): void {
+  if (!/^[!#$%&'*+\-.^_`|~0-9A-Za-z]+$/.test(name) || /[;\u0000-\u001f\u007f]/.test(value)) {
+    throw new CredentialSourceError(scheme, new Error("cookie credential contains an invalid character"));
+  }
+  const current = headers.get("cookie");
+  const cookies = (current ?? "")
+    .split(";")
+    .map((part) => part.trim())
+    .filter((part) => part.length > 0 && !part.startsWith(`${name}=`));
+  cookies.push(`${name}=${value}`);
+  headers.set("cookie", cookies.join("; "));
+}
+
+function cookieValue(header: string | null, name: string): { value: string; deleted: boolean; expiresAt?: number | undefined; path?: string | undefined; secure?: boolean | undefined; domain?: string | undefined } | undefined {
+  const parts = header?.split(";").map((part) => part.trim()) ?? [];
+  const cookie = parts.find((part) => part.startsWith(`${name}=`));
+  if (cookie === undefined) return undefined;
+  const maxAge = parts.slice(1).find((part) => part.toLowerCase().startsWith("max-age="));
+  const expires = parts.slice(1).find((part) => part.toLowerCase().startsWith("expires="));
+  const path = parts.slice(1).find((part) => part.toLowerCase().startsWith("path="));
+  const domain = parts.slice(1).find((part) => part.toLowerCase().startsWith("domain="));
+  const secure = parts.slice(1).some((part) => part.toLowerCase() === "secure");
+  const maxAgeValue = maxAge === undefined ? undefined : Number(maxAge.slice("max-age=".length));
+  const expiresValue = expires === undefined ? undefined : Date.parse(expires.slice("expires=".length));
+  let deleted = false;
+  let expiresAt: number | undefined;
+  if (maxAgeValue !== undefined && Number.isFinite(maxAgeValue)) {
+    deleted = maxAgeValue <= 0;
+    if (!deleted) expiresAt = Date.now() + maxAgeValue * 1000;
+  } else if (expiresValue !== undefined && Number.isFinite(expiresValue)) {
+    deleted = expiresValue <= Date.now();
+    if (!deleted) expiresAt = expiresValue;
+  }
+  return {
+    value: cookie.slice(name.length + 1),
+    deleted,
+    expiresAt,
+    path: path === undefined || path.slice("path=".length).trim().length === 0
+      ? undefined
+      : path.slice("path=".length).trim(),
+    domain: domain === undefined ? undefined : domain.slice("domain=".length).trim(),
+    secure,
+  };
+}
+
+function pointerValue(value: unknown, pointer: string): unknown {
+  if (pointer === "") return value;
+  return pointer.split("/").slice(1).reduce<unknown>((current, part) => {
+    const key = part.replaceAll("~1", "/").replaceAll("~0", "~");
+    return current && typeof current === "object" && Object.hasOwn(current, key)
+      ? (current as Record<string, unknown>)[key]
+      : undefined;
+  }, value);
 }

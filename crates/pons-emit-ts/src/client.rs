@@ -1,39 +1,40 @@
 use std::collections::BTreeMap;
 
 use pons_ir::{
-    ApiKeyLocation, AuthScheme, ContentKind, CredentialLocator, Document, ErrorContent,
-    ErrorResponse, ErrorStatus, Operation, PathSegment, Presence, Response, ResponseHeader,
-    ResponseStatus, StreamKind, TypeRef,
+    ApiKeyLocation, AuthRequirement, AuthScheme, ContentKind, CredentialLocator,
+    CredentialProvision, Doc, Document, ErrorContent, ErrorResponse, ErrorStatus, Operation,
+    PathSegment, Presence, Response, ResponseHeader, ResponseStatus, StreamKind, TypeRef,
 };
 
-use crate::runtime;
-use crate::{EmitError, EmitMode, ErrorStrategy, camel, pascal, string, types, unique_names};
+use crate::{
+    EmitError, EmitMode, ErrorStrategy, GeneratedFile, camel, jsdoc, pascal, string, types,
+    union_type, unique_names,
+};
 
+#[derive(Default)]
 struct Node {
     children: BTreeMap<String, Node>,
-    operations: Vec<(String, String)>,
+    operations: Vec<(Option<Doc>, String, String)>,
 }
 
 impl Node {
-    fn new() -> Self {
-        Self {
-            children: BTreeMap::new(),
-            operations: Vec::new(),
-        }
-    }
-
     fn render(&self, depth: usize) -> String {
         let indent = " ".repeat(depth);
         let mut members = self
             .operations
             .iter()
-            .map(|(name, value)| {
+            .map(|(doc, name, value)| {
                 let key = if name == "__proto__" {
                     format!("[{}]", string(name))
                 } else {
                     name.clone()
                 };
-                format!("{indent}{key}: {value}")
+                let comment = jsdoc(doc.as_ref());
+                if comment.is_empty() {
+                    format!("{indent}{key}: {value}")
+                } else {
+                    format!("{indent}{comment}\n{indent}{key}: {value}")
+                }
             })
             .collect::<Vec<_>>();
         members.extend(self.children.iter().map(|(name, child)| {
@@ -86,40 +87,38 @@ fn operation_type_names(document: &Document) -> Vec<Vec<String>> {
         .collect()
 }
 
+pub(super) fn error_types(error_strategy: ErrorStrategy) -> String {
+    let mut output = if error_strategy == ErrorStrategy::Throw {
+        String::from(
+            "type Result<T, E> = { isOk(): boolean; isErr(): boolean; value?: T; error?: E };\nfunction ok<T>(value: T): Result<T, never> { return { isOk: () => true, isErr: () => false, value }; }\nfunction err<E>(error: E): Result<never, E> { return { isOk: () => false, isErr: () => true, error }; }\nexport { ok, err };\nexport type { Result };\n",
+        )
+    } else {
+        String::from(
+            "import { err, ok, type Result } from \"neverthrow\";\nexport { err, ok };\nexport type { Result };\n",
+        )
+    };
+    output.push_str("export type ResponseWithHeaders<T, H> = { value: T; headers: H };\n");
+    output.push_str("export type ResponseWithStatus<T> = { value: T; status: number };\n");
+    output.push_str("export type ClientFailure = { kind: \"network\"; cause: unknown } | { kind: \"timeout\"; afterMs: number } | { kind: \"aborted\"; cause: unknown } | { kind: \"auth_adapter\"; scheme: string; cause: unknown } | { kind: \"auth_source\"; scheme: string; cause: unknown } | { kind: \"opaque_codec\"; codec: string; phase: \"encode\" | \"decode\"; cause: unknown } | { kind: \"interceptor\"; phase: \"request\" | \"response\"; cause: unknown } | { kind: \"protocol\"; message: string } | { kind: \"unexpected_http\"; status: number; body: unknown } | { kind: \"auth\"; schemes: string[] };\n");
+    output
+}
+
+pub(super) fn index() -> GeneratedFile {
+    GeneratedFile {
+        path: "index.ts".into(),
+        content: "export * from \"./client.js\";\n".into(),
+    }
+}
+
 pub(super) fn emit(
     document: &Document,
     names: &BTreeMap<String, String>,
     mode: EmitMode,
     preserve_wide_integers: bool,
     error_strategy: ErrorStrategy,
-) -> Result<String, EmitError> {
+) -> Result<Vec<GeneratedFile>, EmitError> {
     let opaque_required = mode == EmitMode::Strict && document.has_reachable_opaque();
-    let mut output = if error_strategy == ErrorStrategy::Throw {
-        String::from(
-            "type Result<T, E> = { isOk(): boolean; isErr(): boolean; value?: T; error?: E };\nfunction ok<T>(value: T): Result<T, never> { return { isOk: () => true, isErr: () => false, value }; }\nfunction err<E>(error: E): Result<never, E> { return { isOk: () => false, isErr: () => true, error }; }\n",
-        )
-    } else {
-        String::from("import { err, ok, type Result } from \"neverthrow\";\n")
-    };
-    if !document.types.is_empty() {
-        output.push_str("import type * as Types from \"./types.js\";\n");
-    }
-    output.push('\n');
-    output.push_str(&auth_types(document));
-    output.push_str(&type_definitions(document)?);
-    output.push_str("export type OpaqueWire = \"json\" | \"text\" | \"bytes\" | \"unknown\";\n");
-    output.push_str("export type OpaqueCodec = { encode(value: unknown, wire: OpaqueWire): unknown; decode(value: unknown, wire: OpaqueWire): unknown };\n");
-    output.push_str("export type OpaqueCodecRegistry = Record<string, OpaqueCodec>;\n");
-    output.push_str("\nexport type AuthAttachment = { headers?: Record<string, string>; query?: Record<string, string>; cookies?: Record<string, string> };\nexport type AuthAdapter = (context: { scheme: string; scopes: readonly string[]; method: string; url: URL; headers: Headers }) => AuthAttachment | Promise<AuthAttachment>;\n/** Scope and lifetime captured with a credential. `expiresAt` is a Unix millisecond timestamp; `host`, `path`, `secure`, and `origin` bind the value to the response that issued it. */\nexport type CredentialMetadata = { expiresAt?: number | undefined; path?: string | undefined; secure?: boolean | undefined; host?: string | undefined; origin?: string | undefined };\nexport type StoredCredential = { value: string } & CredentialMetadata;\n/** A store returns a `{ value, ...metadata }` record, never a bare string, and must persist the metadata it is given in `set` so that expiry and origin scope survive a new client. A record with a non-string `value` or a metadata field of the wrong type is rejected. */\nexport type TokenStore = { get(): StoredCredential | undefined | Promise<StoredCredential | undefined>; set(value: string, metadata?: CredentialMetadata): void | Promise<void>; clear(): void | Promise<void> };\nexport type CredentialSource = string | (() => string | undefined | Promise<string | undefined>) | TokenStore;\nexport type RequestInterceptor = (context: { url: URL; init: RequestInit }) => void | Promise<void>;\nexport type ResponseInterceptor = (context: { response: Response; url: URL; init: RequestInit }) => void | Promise<void>;\nexport type Interceptors = { request?: RequestInterceptor; response?: ResponseInterceptor };\nexport type ResponseWithHeaders<T, H> = { value: T; headers: H };\nexport type ResponseWithStatus<T> = { value: T; status: number };\nexport type ClientFailure = { kind: \"network\"; cause: unknown } | { kind: \"timeout\"; afterMs: number } | { kind: \"aborted\"; cause: unknown } | { kind: \"auth_adapter\"; scheme: string; cause: unknown } | { kind: \"auth_source\"; scheme: string; cause: unknown } | { kind: \"opaque_codec\"; codec: string; phase: \"encode\" | \"decode\"; cause: unknown } | { kind: \"interceptor\"; phase: \"request\" | \"response\"; cause: unknown } | { kind: \"protocol\"; message: string } | { kind: \"unexpected_http\"; status: number; body: unknown } | { kind: \"auth\"; schemes: string[] };\n\n");
-    output.push_str("export type RetryOptions = { attempts?: number; backoffMs?: number; maxBackoffMs?: number; jitterMs?: number };\n");
-    output.push_str("export type CallOptions = { headers?: HeadersInit; signal?: AbortSignal; timeout?: number; retry?: RetryOptions | false };\n");
-    output.push_str(&format!(
-        "export type ClientOptions = {{ baseUrl: string; headers?: HeadersInit | (() => HeadersInit | Promise<HeadersInit>); auth?: Record<string, CredentialSource>; authAdapters?: Record<string, AuthAdapter>; opaqueCodecs{}: OpaqueCodecRegistry; fetch?: typeof fetch; signal?: AbortSignal; timeout?: number; retry?: RetryOptions; interceptors?: Interceptors }};\n\n",
-        if opaque_required { "" } else { "?" },
-    ));
-    output.push_str(&runtime::render());
-
-    let mut tree = Node::new();
+    let mut namespaces: BTreeMap<String, Namespace> = BTreeMap::new();
     let operation_names = operation_type_names(document);
     for (operation, declaration_names) in document.operations.iter().zip(operation_names) {
         let (declarations, function) = operation_function(
@@ -131,34 +130,202 @@ pub(super) fn emit(
             preserve_wide_integers,
             error_strategy,
         )?;
-        output.push_str(&declarations);
         let (parents, leaf) = operation
             .id
             .split_last()
             .map(|(leaf, parents)| (parents, camel(leaf)))
             .ok_or_else(|| EmitError("operation id cannot be empty".into()))?;
-        let mut node = &mut tree;
-        for parent in parents {
+        let (member, rest) = match parents.split_first() {
+            Some((parent, rest)) => (camel(parent), rest),
+            None => (leaf.clone(), &[][..]),
+        };
+        let namespace = namespaces.entry(member.clone()).or_default();
+        namespace.declarations.push(declarations);
+        namespace.aliases.extend(declaration_names.iter().cloned());
+        namespace.is_operation |= parents.is_empty();
+        namespace.encodes_path |= !operation.path.is_empty();
+        namespace.carries_path_values |= operation
+            .path
+            .iter()
+            .any(|segment| matches!(segment, PathSegment::Param { .. }));
+        namespace.streams |= operation.stream.is_some();
+        namespace.wraps_status |= operation.responses.iter().any(|response| {
+            matches!(
+                response.status,
+                ResponseStatus::Default | ResponseStatus::Unknown
+            )
+        });
+        namespace.declares_headers |= operation
+            .responses
+            .iter()
+            .any(|response| !response.headers.is_empty())
+            || (operation.errors_inherit
+                && document
+                    .common_errors
+                    .iter()
+                    .any(|error| !error.headers.is_empty()));
+        let mut node = &mut namespace.node;
+        for parent in rest {
             let segment = camel(parent);
-            if node.operations.iter().any(|(name, _)| name == &segment) {
+            if node.operations.iter().any(|(_, name, _)| name == &segment) {
                 return Err(EmitError(format!("client member collision at {segment}")));
             }
-            node = node.children.entry(segment).or_insert_with(Node::new);
+            node = node.children.entry(segment).or_default();
         }
         if node.children.contains_key(&leaf)
-            || node.operations.iter().any(|(name, _)| name == &leaf)
+            || node.operations.iter().any(|(_, name, _)| name == &leaf)
         {
             return Err(EmitError(format!("client member collision at {leaf}")));
         }
-        node.operations.push((leaf, function));
+        node.operations
+            .push((operation.doc.clone(), leaf, function));
+    }
+    let mut files = Vec::new();
+    for (member, namespace) in &namespaces {
+        files.push(GeneratedFile {
+            path: format!("operations/{member}.ts"),
+            content: namespace_file(namespace, document, error_strategy),
+        });
+    }
+    files.push(GeneratedFile {
+        path: "client.ts".into(),
+        content: client_file(
+            document,
+            &namespaces,
+            opaque_required,
+            !preserve_wide_integers,
+        ),
+    });
+    Ok(files)
+}
+
+#[derive(Default)]
+struct Namespace {
+    node: Node,
+    declarations: Vec<String>,
+    aliases: Vec<String>,
+    encodes_path: bool,
+    carries_path_values: bool,
+    streams: bool,
+    wraps_status: bool,
+    declares_headers: bool,
+    is_operation: bool,
+}
+
+fn namespace_file(
+    namespace: &Namespace,
+    document: &Document,
+    error_strategy: ErrorStrategy,
+) -> String {
+    let mut runtime = vec!["request".to_owned()];
+    if error_strategy == ErrorStrategy::Throw {
+        runtime.push("requestOrThrow".into());
+    }
+    if namespace.encodes_path {
+        runtime.push("encodePathSegment".into());
+    }
+    if namespace.carries_path_values {
+        runtime.push("stringifyCarrier".into());
+    }
+    runtime.push("type ConfiguredClient".into());
+    let mut output = String::new();
+    if !document.types.is_empty() {
+        output.push_str("import type * as Types from \"../types.js\";\n");
+    }
+    output.push_str("import type { CallOptions } from \"../client.js\";\n");
+    let mut declared = vec!["ClientFailure"];
+    if namespace.declares_headers {
+        declared.push("ResponseWithHeaders");
+    }
+    if namespace.wraps_status {
+        declared.push("ResponseWithStatus");
+    }
+    if namespace.streams {
+        declared.push("Result");
     }
     output.push_str(&format!(
-        "export function createClient(client: ClientOptions) {{\n  const auth: Record<string, CredentialSource> = Object.assign(Object.create(null), client.auth ?? {{}});\n  const authAdapters: Record<string, AuthAdapter> = Object.assign(Object.create(null), client.authAdapters ?? {{}});\n  const authRecords: Record<string, CredentialValue[]> = Object.create(null);\n  const authInvalidated: Record<string, boolean> = Object.create(null);\n  const configured = {{ ...client, auth, authAdapters, authRecords, authInvalidated, opaque: {{ codecs: client.opaqueCodecs, required: {opaque_required}, allowUnsafeWideIntegers: {} }} }};\n  return ",
-        !preserve_wide_integers,
+        "import type {{ {} }} from \"../errors.js\";\n",
+        declared.join(", ")
     ));
-    output.push_str(&tree.render(2));
-    output.push_str(";\n}\n");
-    Ok(output)
+    output.push_str(&format!(
+        "import {{ {} }} from \"../runtime.js\";\n",
+        runtime.join(", ")
+    ));
+    output.push('\n');
+    for declaration in &namespace.declarations {
+        output.push_str(declaration);
+    }
+    let body = match namespace.node.operations.as_slice() {
+        [(doc, _, function)] if namespace.is_operation => {
+            let comment = jsdoc(doc.as_ref());
+            let comment = if comment.is_empty() {
+                String::new()
+            } else {
+                format!("  {comment}\n")
+            };
+            format!("{comment}  return {function};\n")
+        }
+        _ => format!("  return {};\n", namespace.node.render(4)),
+    };
+    output.push_str(&format!(
+        "export function operations(configured: ConfiguredClient) {{\n{body}}}\n"
+    ));
+    output
+}
+
+fn client_file(
+    document: &Document,
+    namespaces: &BTreeMap<String, Namespace>,
+    opaque_required: bool,
+    allow_unsafe_wide_integers: bool,
+) -> String {
+    let mut output = String::new();
+    for member in namespaces.keys() {
+        output.push_str(&format!(
+            "import {{ operations as {member}Operations }} from \"./operations/{member}.js\";\n"
+        ));
+    }
+    output.push_str("import type { ConfiguredClient, CredentialValue, OpaqueCodecRegistry } from \"./runtime.js\";\n");
+    output.push_str(
+        "export type { OpaqueCodec, OpaqueCodecRegistry, OpaqueWire } from \"./runtime.js\";\n",
+    );
+    for (member, namespace) in namespaces {
+        output.push_str(&format!(
+            "export type {{ {} }} from \"./operations/{member}.js\";\n",
+            namespace.aliases.join(", ")
+        ));
+    }
+    output.push('\n');
+    output.push_str(&option_types(opaque_required));
+    output.push_str(&auth_types(document));
+    output.push_str(&format!("export function createClient(client: ClientOptions) {{\n  const auth: Record<string, CredentialSource> = Object.assign(Object.create(null), client.auth ?? {{}});\n  const authAdapters: Record<string, AuthAdapter> = Object.assign(Object.create(null), client.authAdapters ?? {{}});\n  const authRecords: Record<string, CredentialValue[]> = Object.create(null);\n  const authInvalidated: Record<string, boolean> = Object.create(null);\n  const configured: ConfiguredClient = {{ ...client, auth, authAdapters, authRecords, authInvalidated, authSchemes, opaque: {{ codecs: client.opaqueCodecs, required: {opaque_required}, allowUnsafeWideIntegers: {allow_unsafe_wide_integers} }} }};\n  return {{\n"));
+    for (index, member) in namespaces.keys().enumerate() {
+        let key = if member == "__proto__" {
+            format!("[{}]", string(member))
+        } else {
+            member.clone()
+        };
+        let tail = if index + 1 == namespaces.len() {
+            ""
+        } else {
+            ","
+        };
+        output.push_str(&format!(
+            "    {key}: {member}Operations(configured){tail}\n"
+        ));
+    }
+    output.push_str("  };\n}\n");
+    output
+}
+
+fn option_types(opaque_required: bool) -> String {
+    let mut output = String::new();
+    output.push_str("export type AuthAttachment = { headers?: Record<string, string>; query?: Record<string, string>; cookies?: Record<string, string> };\nexport type AuthAdapter = (context: { scheme: string; scopes: readonly string[]; method: string; url: URL; headers: Headers }) => AuthAttachment | Promise<AuthAttachment>;\n/** Scope and lifetime captured with a credential. `expiresAt` is a Unix millisecond timestamp; `host`, `path`, `secure`, and `origin` bind the value to the response that issued it. */\nexport type CredentialMetadata = { expiresAt?: number | undefined; path?: string | undefined; secure?: boolean | undefined; host?: string | undefined; origin?: string | undefined };\nexport type StoredCredential = { value: string } & CredentialMetadata;\n/** A store returns a `{ value, ...metadata }` record, never a bare string, and must persist the metadata it is given in `set` so that expiry and origin scope survive a new client. A record with a non-string `value` or a metadata field of the wrong type is rejected. */\nexport type TokenStore = { get(): StoredCredential | undefined | Promise<StoredCredential | undefined>; set(value: string, metadata?: CredentialMetadata): void | Promise<void>; clear(): void | Promise<void> };\nexport type CredentialSource = string | (() => string | undefined | Promise<string | undefined>) | TokenStore;\nexport type RequestInterceptor = (context: { url: URL; init: RequestInit }) => void | Promise<void>;\nexport type ResponseInterceptor = (context: { response: Response; url: URL; init: RequestInit }) => void | Promise<void>;\nexport type Interceptors = { request?: RequestInterceptor; response?: ResponseInterceptor };\nexport type AuthSchemeDefinition = { kind: string; location?: string | undefined; name?: string | undefined; adapter?: string | undefined };\nexport type RetryOptions = { attempts?: number; backoffMs?: number; maxBackoffMs?: number; jitterMs?: number };\nexport type CallOptions = { headers?: HeadersInit; signal?: AbortSignal; timeout?: number; retry?: RetryOptions | false };\n");
+    output.push_str(&format!(
+        "export type ClientOptions = {{ baseUrl: string; headers?: HeadersInit | (() => HeadersInit | Promise<HeadersInit>); auth?: Record<string, CredentialSource>; authAdapters?: Record<string, AuthAdapter>; opaqueCodecs{}: OpaqueCodecRegistry; fetch?: typeof fetch; signal?: AbortSignal; timeout?: number; retry?: RetryOptions; interceptors?: Interceptors }};\n\n",
+        if opaque_required { "" } else { "?" },
+    ));
+    output
 }
 
 fn auth_types(document: &Document) -> String {
@@ -185,34 +352,12 @@ fn auth_types(document: &Document) -> String {
                 None => "{ kind: \"custom\" }".into(),
             },
         };
-        entries.push(format!("  authSchemes[{key}] = {value};"));
+        entries.push(format!("authSchemes[{key}] = {value};"));
     }
     format!(
-        "const authSchemes: Record<string, {{ kind: string; location?: string; name?: string; adapter?: string }}> = Object.create(null);\n{}\n",
+        "const authSchemes: Record<string, AuthSchemeDefinition> = Object.create(null);\n{}\n\n",
         entries.join("\n")
     )
-}
-
-fn type_definitions(document: &Document) -> Result<String, EmitError> {
-    let definitions = document
-        .types
-        .iter()
-        .map(|(id, definition)| {
-            let mut value = serde_json::to_value(&definition.definition)
-                .map_err(|error| EmitError(format!("cannot encode type metadata: {error}")))?;
-            value["direction"] = serde_json::to_value(definition.direction)
-                .map_err(|error| EmitError(format!("cannot encode type direction: {error}")))?;
-            normalize_integer_constraints(&mut value);
-            Ok((id.clone(), value))
-        })
-        .collect::<Result<BTreeMap<_, _>, _>>()?;
-    let definitions = serde_json::to_string(&definitions)
-        .map_err(|error| EmitError(format!("cannot encode type metadata: {error}")))?;
-    let encoded = serde_json::to_string(&definitions)
-        .map_err(|error| EmitError(format!("cannot encode type metadata: {error}")))?;
-    Ok(format!(
-        "const typeDefinitions: Record<string, any> = Object.assign(Object.create(null), JSON.parse({encoded}));\n"
-    ))
 }
 
 fn operation_function(
@@ -240,57 +385,83 @@ fn operation_function(
         operation.errors.iter().collect()
     };
     let failure = error_type(&errors, document, names, mode)?;
-    let path = path_expression(operation);
-    let query = if operation.query.is_some() {
-        "args.query"
+    let method = operation.method.as_str();
+    let (args_type, options) = if args.is_empty() {
+        ("(_options?: CallOptions) =>".to_owned(), "_options")
     } else {
-        "undefined"
+        (
+            format!("(args: {args_name}, options?: CallOptions) =>"),
+            "options",
+        )
     };
-    let headers = if operation.headers.is_empty() {
-        "undefined"
-    } else {
-        "args.headers"
-    };
-    let body = if operation.body.is_some() {
-        "args.body"
-    } else {
-        "undefined"
-    };
-    let body_schema = operation
-        .body
-        .as_ref()
-        .map(|body| type_ref_json(&body.ty))
-        .transpose()?
-        .unwrap_or_else(|| "undefined".into());
-    let request_inputs = request_input_descriptor(operation)?;
-    let path_values = if operation
+    let mut spec = vec![
+        format!("method: {method:?}"),
+        format!("path: {}", path_expression(operation)),
+    ];
+    if operation
         .path
         .iter()
         .any(|segment| matches!(segment, PathSegment::Param { .. }))
     {
-        "args.path"
+        spec.push(String::from("pathValues: args.path"));
+    }
+    if operation.query.is_some() {
+        spec.push(String::from("query: args.query"));
+    }
+    if !operation.headers.is_empty() {
+        spec.push(String::from("headers: args.headers"));
+    }
+    if let Some(body) = &operation.body {
+        spec.push(String::from("body: args.body"));
+        spec.push(format!(
+            "bodyContent: {}",
+            string(content_name(body.content))
+        ));
+        if let Some(media_type) = &body.media_type {
+            spec.push(format!("bodyMediaType: {}", string(media_type)));
+        }
+        spec.push(format!("bodySchema: {}", type_ref_json(&body.ty)?));
+    }
+    if !operation.auth.alternatives.is_empty() {
+        spec.push(format!("auth: {}", auth_requirement(&operation.auth)));
+    }
+    spec.push(format!("inputs: {}", request_input_descriptor(operation)?));
+    spec.push(format!("responses: [{}]", response_descriptors(operation)?));
+    spec.push(format!(
+        "errors: [{}]",
+        errors
+            .iter()
+            .map(|error| error_descriptor(error))
+            .collect::<Result<Vec<_>, _>>()?
+            .join(", ")
+    ));
+    if preserve_wide_integers {
+        spec.push(String::from("preserveWideIntegers: true"));
+    }
+    if let Some(provides) = &operation.provides {
+        spec.push(format!("provides: {}", credential_provision(provides)));
+    }
+    spec.push(format!("options: {options}"));
+    if operation.semantics.idempotent {
+        spec.push(String::from("idempotent: true"));
+    }
+    let declarations = format!(
+        "export type {args_name} = {{ {args} }};\n{stream_types}export type {success_name} = {success};\nexport type {error_name} = {failure};\n",
+    );
+    let request = format!(
+        "request<{success_name}, {error_name}>(configured, {{ {} }})",
+        spec.join(", ")
+    );
+    let function = if error_strategy == ErrorStrategy::Throw {
+        format!("{args_type} requestOrThrow({request})")
     } else {
-        "undefined"
+        format!("{args_type} {request}")
     };
-    let response_schemas = response_descriptors(operation)?;
-    let error_schemas = errors
-        .iter()
-        .map(|error| error_descriptor(error))
-        .collect::<Result<Vec<_>, _>>()?
-        .join(", ");
-    let content = operation
-        .body
-        .as_ref()
-        .map(|body| string(content_name(body.content)))
-        .unwrap_or_else(|| "undefined".into());
-    let media_type = operation
-        .body
-        .as_ref()
-        .and_then(|body| body.media_type.as_deref())
-        .map(string)
-        .unwrap_or_else(|| "undefined".into());
-    let groups = operation
-        .auth
+    Ok((declarations, function))
+}
+
+fn auth_requirement(auth: &AuthRequirement) -> String {
+    let alternatives = auth
         .alternatives
         .iter()
         .map(|group| {
@@ -305,77 +476,59 @@ fn operation_function(
         })
         .collect::<Vec<_>>()
         .join(", ");
-    let scopes = operation
-        .auth
-        .scopes
-        .iter()
-        .map(|(scheme, scopes)| {
-            let key = string(scheme);
-            let key = if scheme == "__proto__" {
-                format!("[{key}]")
-            } else {
-                key
-            };
-            format!(
-                "{key}: [{}]",
-                scopes
-                    .iter()
-                    .map(|scope| string(scope))
-                    .collect::<Vec<_>>()
-                    .join(", ")
-            )
-        })
-        .collect::<Vec<_>>()
-        .join(", ");
-    let provides = operation
-        .provides
+    let mut keys = vec![format!("alternatives: [{alternatives}]")];
+    if !auth.scopes.is_empty() {
+        let scopes = auth
+            .scopes
+            .iter()
+            .map(|(scheme, scopes)| {
+                let key = string(scheme);
+                let key = if scheme == "__proto__" {
+                    format!("[{key}]")
+                } else {
+                    key
+                };
+                format!(
+                    "{key}: [{}]",
+                    scopes
+                        .iter()
+                        .map(|scope| string(scope))
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(", ");
+        keys.push(format!("scopes: {{{scopes}}}"));
+    }
+    if auth.optional {
+        keys.push(String::from("optional: true"));
+    }
+    format!("{{ {} }}", keys.join(", "))
+}
+
+fn credential_provision(provides: &CredentialProvision) -> String {
+    let locator = |locator: &CredentialLocator| match locator {
+        CredentialLocator::Body { pointer } => {
+            format!("{{ from: \"body\", pointer: {} }}", string(pointer))
+        }
+        CredentialLocator::Header { name } => {
+            format!("{{ from: \"header\", name: {} }}", string(name))
+        }
+        CredentialLocator::SetCookie { name } => {
+            format!("{{ from: \"set_cookie\", name: {} }}", string(name))
+        }
+    };
+    let value = locator(&provides.value);
+    let expires_at = provides
+        .expires_at
         .as_ref()
-        .map(|provides| {
-            let locator = |locator: &CredentialLocator| match locator {
-                CredentialLocator::Body { pointer } => {
-                    format!("{{ from: \"body\", pointer: {} }}", string(pointer))
-                }
-                CredentialLocator::Header { name } => {
-                    format!("{{ from: \"header\", name: {} }}", string(name))
-                }
-                CredentialLocator::SetCookie { name } => {
-                    format!("{{ from: \"set_cookie\", name: {} }}", string(name))
-                }
-            };
-            let value = locator(&provides.value);
-            let expires_at = provides
-                .expires_at
-                .as_ref()
-                .map(locator)
-                .unwrap_or_else(|| "undefined".into());
-            format!(
-                "{{ scheme: {}, value: {value}, expiresAt: {expires_at} }}",
-                string(&provides.scheme)
-            )
-        })
+        .map(locator)
         .unwrap_or_else(|| "undefined".into());
-    let method = operation.method.as_str();
-    let (args_type, options) = if args.is_empty() {
-        ("(_options?: CallOptions) =>".to_owned(), "_options")
-    } else {
-        (
-            format!("(args: {args_name}, options?: CallOptions) =>"),
-            "options",
-        )
-    };
-    let declarations = format!(
-        "export type {args_name} = {{ {args} }};\n{stream_types}export type {success_name} = {success};\nexport type {error_name} = {failure};\n",
-    );
-    let request = format!(
-        "request<{success_name}, {error_name}>(configured, {method:?}, {path}, {path_values}, {query}, {headers}, {body}, {content}, {media_type}, [{groups}], {{{scopes}}}, {body_schema}, {request_inputs}, [{response_schemas}], [{error_schemas}], {}, {}, {provides}, {options}, {})",
-        operation.auth.optional, preserve_wide_integers, operation.semantics.idempotent,
-    );
-    let function = if error_strategy == ErrorStrategy::Throw {
-        format!("{args_type} requestOrThrow({request})")
-    } else {
-        format!("{args_type} {request}")
-    };
-    Ok((declarations, function))
+    format!(
+        "{{ scheme: {}, value: {value}, expiresAt: {expires_at} }}",
+        string(&provides.scheme)
+    )
 }
 
 fn operation_args(
@@ -604,7 +757,7 @@ fn error_type(
     names: &BTreeMap<String, String>,
     mode: EmitMode,
 ) -> Result<String, EmitError> {
-    let mut failures = vec!["ClientFailure".into()];
+    let mut failures = vec![(None, "ClientFailure".to_owned())];
     for error in errors {
         let status = match error.status {
             ErrorStatus::Exact(status) => status.to_string(),
@@ -622,11 +775,12 @@ fn error_type(
             response_headers_type(&error.headers, document, names, mode)?
         };
         let body = body.unwrap_or_else(|| "unknown".into());
-        failures.push(format!(
-            "{{ kind: \"http\"; status: {status}; body: {body}; headers: {headers} }}"
+        failures.push((
+            error.doc.as_ref(),
+            format!("{{ kind: \"http\"; status: {status}; body: {body}; headers: {headers} }}"),
         ));
     }
-    Ok(failures.join(" | "))
+    Ok(union_type(&failures))
 }
 
 fn request_input_descriptor(operation: &Operation) -> Result<String, EmitError> {
@@ -842,7 +996,7 @@ fn type_ref_json(reference: &TypeRef) -> Result<String, EmitError> {
         .map_err(|error| EmitError(format!("cannot encode type reference: {error}")))
 }
 
-fn normalize_integer_constraints(value: &mut serde_json::Value) {
+pub(crate) fn normalize_integer_constraints(value: &mut serde_json::Value) {
     match value {
         serde_json::Value::Object(fields) => {
             if fields.get("kind").and_then(serde_json::Value::as_str) == Some("int") {
@@ -872,7 +1026,7 @@ mod tests {
 
     use serde_json::{Value, json};
 
-    fn client_of(operations: Value) -> String {
+    fn operations_of(operations: Value) -> String {
         let raw = json!({
             "ir_version": pons_ir::IR_VERSION,
             "info": {"title": "Verbs", "version": "1"},
@@ -882,9 +1036,10 @@ mod tests {
         crate::emit(&document)
             .unwrap()
             .into_iter()
-            .find(|file| file.path == "client.ts")
-            .unwrap()
-            .content
+            .filter(|file| file.path.starts_with("operations/"))
+            .map(|file| file.content)
+            .collect::<Vec<_>>()
+            .join("\n")
     }
 
     #[test]
@@ -904,11 +1059,11 @@ mod tests {
                 })
             })
             .collect::<Vec<_>>();
-        let client = client_of(Value::Array(operations));
+        let client = operations_of(Value::Array(operations));
         let sent = client
             .lines()
             .filter_map(|line| {
-                let after = line.split_once("configured, ")?.1;
+                let after = line.split_once("configured, { method: ")?.1;
                 let verb = after.split(',').next().unwrap().trim();
                 let path = line
                     .split("encodePathSegment(\"")

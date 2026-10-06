@@ -222,7 +222,11 @@ fn run_bun(files: &[GeneratedFile], harness: &str) {
     assert!(version.status.success());
     let directory = tempfile::tempdir().unwrap();
     for file in files {
-        fs::write(directory.path().join(&file.path), &file.content).unwrap();
+        let destination = directory.path().join(&file.path);
+        if let Some(parent) = destination.parent() {
+            fs::create_dir_all(parent).unwrap();
+        }
+        fs::write(destination, &file.content).unwrap();
     }
     let harness_path = directory.path().join("validation.ts");
     fs::write(&harness_path, harness).unwrap();
@@ -248,7 +252,12 @@ fn generated_client_rejects_missing_fields_and_unknown_enum_variants() {
         .unwrap()
         .files;
     let client = files.iter().find(|file| file.path == "client.ts").unwrap();
-    assert!(client.content.contains("function validateWire"));
+    assert!(client.content.contains("export function createClient"));
+    let wire = files
+        .iter()
+        .find(|file| file.path == "runtime/wire.ts")
+        .unwrap();
+    assert!(wire.content.contains("function validateWire"));
 
     let harness = r#"
 import { createClient } from "./client.ts";
@@ -417,7 +426,12 @@ fn opaque_values_require_a_runtime_codec_in_strict_mode() {
             .contains("opaqueCodecs: OpaqueCodecRegistry")
     );
     assert!(strict_client.content.contains("required: true"));
-    assert!(strict_client.content.contains("transformOpaque"));
+    let strict_codec = strict
+        .files
+        .iter()
+        .find(|file| file.path == "runtime/codec.ts")
+        .unwrap();
+    assert!(strict_codec.content.contains("transformOpaque"));
 
     let output = emit_with_strategy(&document, EmitMode::Lossy, ErrorStrategy::Throw).unwrap();
     assert!(
@@ -442,7 +456,12 @@ fn opaque_values_require_a_runtime_codec_in_strict_mode() {
             .content
             .contains("opaqueCodecs?: OpaqueCodecRegistry")
     );
-    assert!(client.content.contains("schema.kind === \"opaque\""));
+    let codec = output
+        .files
+        .iter()
+        .find(|file| file.path == "runtime/codec.ts")
+        .unwrap();
+    assert!(codec.content.contains("schema.kind === \"opaque\""));
 }
 
 #[test]
@@ -1160,8 +1179,11 @@ fn generated_client_enforces_integer_constraints() {
     let files = emit_with_strategy(&document, EmitMode::Strict, ErrorStrategy::Throw)
         .unwrap()
         .files;
-    let client = files.iter().find(|file| file.path == "client.ts").unwrap();
-    assert!(client.content.contains("function validateInteger"));
+    let wire = files
+        .iter()
+        .find(|file| file.path == "runtime/wire.ts")
+        .unwrap();
+    assert!(wire.content.contains("function validateInteger"));
 
     let harness = r#"
 import { createClient } from "./client.ts";
@@ -3677,7 +3699,7 @@ fn returns_non_stream_success_values_for_stream_operations() {
     assert!(
         files
             .iter()
-            .find(|file| file.path == "client.ts")
+            .find(|file| file.path == "operations/events.ts")
             .unwrap()
             .content
             .contains("| string")
@@ -4151,7 +4173,7 @@ fn generated_client_preflights_request_inputs() {
         .files;
     let optional_client = optional_files
         .iter()
-        .find(|file| file.path == "client.ts")
+        .find(|file| file.path == "runtime/transport.ts")
         .unwrap();
     assert!(optional_client.content.contains("preflightPath"));
     assert!(
@@ -4398,8 +4420,11 @@ fn generated_client_transforms_untagged_byte_payloads() {
     let files = emit_with_strategy(&document, EmitMode::Strict, ErrorStrategy::Throw)
         .unwrap()
         .files;
-    let client = files.iter().find(|file| file.path == "client.ts").unwrap();
-    assert!(client.content.contains("selectUntaggedVariant"));
+    let wire = files
+        .iter()
+        .find(|file| file.path == "runtime/wire.ts")
+        .unwrap();
+    assert!(wire.content.contains("selectUntaggedVariant"));
 
     let harness = r#"
 import { createClient } from "./client.ts";
@@ -4459,13 +4484,15 @@ fn a_narrowed_untagged_variant_only_tries_the_variant_it_names() {
     let files = emit_with_strategy(&document, EmitMode::Lossy, ErrorStrategy::Throw)
         .unwrap()
         .files;
-    let client = files.iter().find(|file| file.path == "client.ts").unwrap();
+    let auth = files
+        .iter()
+        .find(|file| file.path == "operations/auth.ts")
+        .unwrap();
     assert!(
-        client
-            .content
+        auth.content
             .contains("{ kind: \"http\"; status: number; body: string; headers: Headers }"),
         "the narrowed declaration must not offer the other variant:\n{}",
-        client.content
+        auth.content
     );
 
     let harness = r#"

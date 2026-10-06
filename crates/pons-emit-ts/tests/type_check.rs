@@ -56,6 +56,38 @@ fn fixture() -> Value {
     serde_json::from_str(include_str!("../../../fixtures/login.json")).unwrap()
 }
 
+fn documented() -> Value {
+    let mut raw = fixture();
+    raw["types"]["User"]["doc"] = serde_json::json!({
+        "summary": "A person",
+        "description": "Ends the comment early */ and then\ncarries on"
+    });
+    raw["types"]["User"]["fields"][1]["doc"] =
+        serde_json::json!({"summary": "How they would like to be called."});
+    raw["types"]["LoginRequest"]["doc"] =
+        serde_json::json!({"summary": "Credentials", "deprecated": true});
+    raw["types"]["LoginError"]["variants"][0]["doc"] = serde_json::json!({
+        "summary": "The credentials were refused.",
+        "deprecated": true
+    });
+    raw["types"]["LoginError"]["variants"][1]["payload"]["fields"][0]["doc"] =
+        serde_json::json!({"summary": "How long to wait."});
+    raw["operations"][0]["doc"] = serde_json::json!({
+        "summary": "Exchange a password for a session.",
+        "description": "The session token arrives in the body."
+    });
+    raw["operations"][0]["errors"][0]["doc"] =
+        serde_json::json!({"summary": "The credentials did not match."});
+    raw["common_errors"] = serde_json::json!([{
+        "status": "5xx",
+        "name": ["server"],
+        "content": "text",
+        "body": {"kind": "string"},
+        "doc": {"summary": "The server failed."}
+    }]);
+    raw
+}
+
 fn files(document: &Document) -> Vec<GeneratedFile> {
     emit_with_strategy(document, EmitMode::Strict, ErrorStrategy::Throw)
         .expect("the TypeScript emitter must accept the document")
@@ -74,6 +106,14 @@ fn client_of(files: &[GeneratedFile]) -> &str {
     &files
         .iter()
         .find(|file| file.path == "client.ts")
+        .unwrap()
+        .content
+}
+
+fn operations_of<'a>(files: &'a [GeneratedFile], member: &str) -> &'a str {
+    &files
+        .iter()
+        .find(|file| file.path == format!("operations/{member}.ts"))
         .unwrap()
         .content
 }
@@ -164,16 +204,13 @@ fn type_checks(files: &[GeneratedFile], probe: &str) {
     let checked = checked_files(files);
     let directory = tempfile::tempdir().unwrap();
     for file in files {
-        fs::write(directory.path().join(&file.path), &file.content).unwrap();
+        let destination = directory.path().join(&file.path);
+        fs::create_dir_all(destination.parent().unwrap()).unwrap();
+        fs::write(destination, &file.content).unwrap();
     }
     fs::write(directory.path().join(PROBE), probe).unwrap();
     fs::write(directory.path().join(PROJECT), tsconfig(&checked)).unwrap();
-    let mut written = fs::read_dir(directory.path())
-        .unwrap()
-        .map(|entry| entry.unwrap().path())
-        .filter(|path| path.extension().is_some_and(|extension| extension == "ts"))
-        .map(|path| path.file_name().unwrap().to_string_lossy().into_owned())
-        .collect::<Vec<_>>();
+    let mut written = written_sources(directory.path());
     written.sort();
     assert_eq!(
         written,
@@ -196,6 +233,27 @@ fn type_checks(files: &[GeneratedFile], probe: &str) {
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );
+}
+
+fn written_sources(root: &Path) -> Vec<String> {
+    let mut written = Vec::new();
+    let mut directories = vec![root.to_path_buf()];
+    while let Some(directory) = directories.pop() {
+        for entry in fs::read_dir(&directory).unwrap() {
+            let path = entry.unwrap().path();
+            if path.is_dir() {
+                directories.push(path);
+            } else if path.extension().is_some_and(|extension| extension == "ts") {
+                written.push(
+                    path.strip_prefix(root)
+                        .unwrap()
+                        .to_string_lossy()
+                        .replace('\\', "/"),
+                );
+            }
+        }
+    }
+    written
 }
 
 #[test]
@@ -273,11 +331,34 @@ fn the_check_covers_every_file_the_emitter_produced() {
     );
 
     let extra = GeneratedFile {
-        path: "runtime.ts".into(),
-        content: "export const runtime = 1;\n".into(),
+        path: "runtime/extra.ts".into(),
+        content: "export const extra = 1;\n".into(),
     };
     let grown = checked_files(&[files, vec![extra]].concat());
-    assert!(grown.contains(&"runtime.ts".to_string()), "{grown:?}");
+    assert!(grown.contains(&"runtime/extra.ts".to_string()), "{grown:?}");
+}
+
+#[test]
+fn the_check_covers_the_vendored_runtime_sources() {
+    let document: Document = serde_json::from_value(fixture()).unwrap();
+    let files = files(&document);
+    let checked = checked_files(&files);
+    for module in [
+        "runtime.ts",
+        "runtime/index.ts",
+        "runtime/wire.ts",
+        "runtime/codec.ts",
+        "runtime/stream.ts",
+        "runtime/credentials.ts",
+        "runtime/transport.ts",
+    ] {
+        assert!(
+            checked.contains(&module.to_string()),
+            "{module} escapes the type check: {checked:?}"
+        );
+    }
+    let config: Value = serde_json::from_str(&tsconfig(&checked)).unwrap();
+    assert_eq!(config["files"], serde_json::to_value(&checked).unwrap());
 }
 
 #[test]
@@ -304,9 +385,9 @@ fn a_headers_bag_of_optional_headers_is_itself_optional() {
     let document: Document = serde_json::from_value(fixture()).unwrap();
     let files = files(&document);
     assert!(
-        client_of(&files).contains("headers?: { \"X-Request-ID\"?: string }"),
+        operations_of(&files, "events").contains("headers?: { \"X-Request-ID\"?: string }"),
         "{}",
-        client_of(&files)
+        operations_of(&files, "events")
     );
     type_checks(
         &files,
@@ -333,9 +414,9 @@ fn a_required_header_keeps_the_bag_required() {
     let document: Document = serde_json::from_value(raw).unwrap();
     let files = files(&document);
     assert!(
-        client_of(&files).contains("headers: { \"X-Request-ID\": string }"),
+        operations_of(&files, "events").contains("headers: { \"X-Request-ID\": string }"),
         "{}",
-        client_of(&files)
+        operations_of(&files, "events")
     );
     type_checks(
         &files,
@@ -461,10 +542,10 @@ fn a_narrowed_untagged_variant_carries_only_its_own_payload() {
         .expect("the TypeScript emitter must accept the document")
         .files;
     assert!(
-        client_of(&files)
+        operations_of(&files, "auth")
             .contains("{ kind: \"http\"; status: number; body: string; headers: Headers }"),
         "{}",
-        client_of(&files)
+        operations_of(&files, "auth")
     );
     type_checks(
         &files,
@@ -484,6 +565,49 @@ if (typeof failure === "object" && failure !== null && "error" in failure) {
     console.log(label, other);
   }
 }
+"#,
+    );
+}
+
+#[test]
+fn a_documented_contract_compiles_under_the_strictest_flags() {
+    let document: Document = serde_json::from_value(documented()).unwrap();
+    let files = files(&document);
+    for source in [
+        types_of(&files),
+        client_of(&files),
+        operations_of(&files, "auth"),
+        operations_of(&files, "events"),
+    ] {
+        assert!(
+            source.contains("/**"),
+            "the document is documented:\n{source}"
+        );
+        assert_eq!(
+            source.matches("/**").count(),
+            source.matches("*/").count(),
+            "a summary that ends a comment early leaves every comment closed:\n{source}"
+        );
+        assert!(
+            !source.contains("\n */"),
+            "a comment ends on the line it starts:\n{source}"
+        );
+    }
+    assert!(
+        types_of(&files)
+            .contains("/** A person Ends the comment early *\\/ and then carries on */"),
+        "{}",
+        types_of(&files)
+    );
+    type_checks(
+        &files,
+        r#"
+import { createClient, type AuthLoginError } from "./client.js";
+
+const client = createClient({ baseUrl: "https://api.example.test" });
+const loggedIn = await client.auth.login({ body: { email: "person@example.test" } });
+const failure: AuthLoginError | undefined = undefined;
+console.log(loggedIn, failure);
 "#,
     );
 }

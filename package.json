@@ -1,0 +1,10 @@
+{
+  "name": "pons",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Toolchain for the generated-code suites in crates/pons-emit-ts/tests. Nothing here is a dependency of any published client.",
+  "devDependencies": {
+    "bun": "1.4.4",
+    "typescript": "7.0.2"
+  }
+}
