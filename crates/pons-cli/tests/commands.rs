@@ -1619,37 +1619,93 @@ fn the_typescript_options_reach_the_built_in_target() {
 }
 
 #[test]
-fn a_typescript_option_the_emitter_has_not_built_is_refused_by_name() {
-    for (option, value, refusal) in [
-        (
-            "runtime",
-            "package",
-            "cannot import a published runtime yet",
-        ),
-        ("validation", "zod", "cannot emit a schema validator yet"),
-    ] {
-        let directory = tempfile::tempdir().unwrap();
-        fs::write(directory.path().join("api.json"), FIXTURE).unwrap();
-        fs::write(
-            directory.path().join("pons.toml"),
-            format!("[emit.ts]\nout_dir = \"generated\"\n{option} = \"{value}\"\n"),
-        )
+fn a_zod_contract_emits_the_schemas_a_consumer_can_use() {
+    let directory = tempfile::tempdir().unwrap();
+    fs::write(directory.path().join("api.json"), FIXTURE).unwrap();
+    fs::write(
+        directory.path().join("pons.toml"),
+        "[emit.ts]\nout_dir = \"generated\"\nvalidation = \"zod\"\n",
+    )
+    .unwrap();
+
+    let output = pons()
+        .args(["emit", "--target", "ts", "api.json"])
+        .current_dir(directory.path())
+        .output()
         .unwrap();
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(output.status.success(), "{stderr}");
 
-        let output = pons()
-            .args(["emit", "--target", "ts", "api.json"])
-            .current_dir(directory.path())
-            .output()
-            .unwrap();
+    let schemas = fs::read_to_string(directory.path().join("generated/schemas.ts")).unwrap();
+    assert!(schemas.contains("z."), "{schemas}");
+    let index = fs::read_to_string(directory.path().join("generated/index.ts")).unwrap();
+    assert!(index.contains("./schemas.js"), "{index}");
+    assert!(
+        directory.path().join("generated/types.ts").exists(),
+        "the option adds a file, it does not replace the contract"
+    );
+}
 
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        assert!(!output.status.success(), "{option} = {value:?}: {stderr}");
-        assert!(stderr.contains(refusal), "{option} = {value:?}: {stderr}");
-        assert!(
-            !directory.path().join("generated").exists(),
-            "{option} = {value:?} wrote output"
-        );
-    }
+#[test]
+fn a_builtin_contract_emits_the_validators_the_runtime_walks() {
+    let directory = tempfile::tempdir().unwrap();
+    fs::write(directory.path().join("api.json"), FIXTURE).unwrap();
+    fs::write(
+        directory.path().join("pons.toml"),
+        "[emit.ts]\nout_dir = \"generated\"\nvalidation = \"builtin\"\n",
+    )
+    .unwrap();
+
+    let output = pons()
+        .args(["emit", "--target", "ts", "api.json"])
+        .current_dir(directory.path())
+        .output()
+        .unwrap();
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(output.status.success(), "{stderr}");
+
+    let validators = fs::read_to_string(directory.path().join("generated/validators.ts")).unwrap();
+    assert!(validators.contains("validateContract"), "{validators}");
+    assert!(
+        validators.contains("export const validateUser"),
+        "{validators}"
+    );
+    assert!(
+        !directory.path().join("generated/schemas.ts").exists(),
+        "the builtin backend writes no library schema"
+    );
+    let index = fs::read_to_string(directory.path().join("generated/index.ts")).unwrap();
+    assert!(index.contains("./validators.js"), "{index}");
+}
+
+#[test]
+fn a_packaged_runtime_is_an_import_the_consumers_build_resolves() {
+    let directory = tempfile::tempdir().unwrap();
+    fs::write(directory.path().join("api.json"), FIXTURE).unwrap();
+    fs::write(
+        directory.path().join("pons.toml"),
+        "[emit.ts]\nout_dir = \"generated\"\nruntime = \"package\"\n",
+    )
+    .unwrap();
+
+    let output = pons()
+        .args(["emit", "--target", "ts", "api.json"])
+        .current_dir(directory.path())
+        .output()
+        .unwrap();
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(output.status.success(), "{stderr}");
+
+    let client = fs::read_to_string(directory.path().join("generated/client.ts")).unwrap();
+    assert!(client.contains("\"@pons/runtime\""), "{client}");
+    assert!(
+        !directory.path().join("generated/runtime.ts").exists(),
+        "a packaged runtime is not vendored"
+    );
+    assert!(
+        !directory.path().join("generated/runtime").exists(),
+        "a packaged runtime is not vendored"
+    );
 }
 
 #[test]

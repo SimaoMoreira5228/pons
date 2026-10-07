@@ -7,8 +7,9 @@ use pons_ir::{
 };
 
 use crate::{
-    DateMode, EmitError, EmitMode, ErrorStrategy, GeneratedFile, Int64, Namespaces, TsOptions,
-    camel, identifier, is_plain_identifier, jsdoc, pascal, string, types, union_type, unique_names,
+    DateMode, EmitError, EmitMode, ErrorStrategy, GeneratedFile, Int64, Namespaces, Runtime,
+    TsOptions, camel, identifier, is_plain_identifier, jsdoc, pascal, string, types, union_type,
+    unique_names, validation,
 };
 
 #[derive(Default)]
@@ -103,10 +104,15 @@ pub(super) fn error_types(error_strategy: ErrorStrategy) -> String {
     output
 }
 
-pub(super) fn index() -> GeneratedFile {
+pub(super) fn index(validation: Option<&str>) -> GeneratedFile {
     GeneratedFile {
         path: "index.ts".into(),
-        content: "export * from \"./client.js\";\n".into(),
+        content: format!(
+            "export * from \"./client.js\";\n{}",
+            validation.map_or_else(String::new, |module| format!(
+                "export * from \"./{module}.js\";\n"
+            ))
+        ),
     }
 }
 
@@ -115,6 +121,7 @@ pub(super) fn emit(
     names: &BTreeMap<String, String>,
     options: &TsOptions,
     preserve_wide_integers: bool,
+    validation: &mut validation::Backend,
 ) -> Result<Vec<GeneratedFile>, EmitError> {
     let opaque_required = options.mode == EmitMode::Strict && document.has_reachable_opaque();
     let mut namespaces: BTreeMap<String, Namespace> = BTreeMap::new();
@@ -127,7 +134,9 @@ pub(super) fn emit(
             names,
             options,
             preserve_wide_integers,
+            validation,
         )?;
+        let imports = validation.take_imports();
         let (parents, leaf) = operation
             .id
             .split_last()
@@ -151,6 +160,15 @@ pub(super) fn emit(
         let namespace = namespaces.entry(member.clone()).or_default();
         if options.namespaces == Namespaces::Flat && !namespace.declarations.is_empty() {
             return Err(EmitError(format!("client member collision at {member}")));
+        }
+        if !imports.is_empty() {
+            let capabilities = validation
+                .capabilities()
+                .expect("a backend that imports a validator has capabilities");
+            namespace
+                .validation_module
+                .get_or_insert(capabilities.module);
+            namespace.imports.merge(imports);
         }
         namespace.declarations.push(declarations);
         namespace.aliases.extend(declaration_names.iter().cloned());
@@ -196,7 +214,7 @@ pub(super) fn emit(
     for (member, namespace) in &namespaces {
         files.push(GeneratedFile {
             path: format!("operations/{member}.ts"),
-            content: namespace_file(namespace, document, options.errors),
+            content: namespace_file(namespace, document, options.errors, options.runtime),
         });
     }
     files.push(GeneratedFile {
@@ -223,24 +241,27 @@ struct Namespace {
     wraps_status: bool,
     declares_headers: bool,
     is_operation: bool,
+    validation_module: Option<&'static str>,
+    imports: validation::Imports,
 }
 
 fn namespace_file(
     namespace: &Namespace,
     document: &Document,
     error_strategy: ErrorStrategy,
+    runtime: Runtime,
 ) -> String {
-    let mut runtime = vec!["request".to_owned()];
+    let mut members = vec!["request".to_owned()];
     if error_strategy == ErrorStrategy::Throw {
-        runtime.push("requestOrThrow".into());
+        members.push("requestOrThrow".into());
     }
     if namespace.encodes_path {
-        runtime.push("encodePathSegment".into());
+        members.push("encodePathSegment".into());
     }
     if namespace.carries_path_values {
-        runtime.push("stringifyCarrier".into());
+        members.push("stringifyCarrier".into());
     }
-    runtime.push("type ConfiguredClient".into());
+    members.push("type ConfiguredClient".into());
     let mut output = String::new();
     if !document.types.is_empty() {
         output.push_str("import type * as Types from \"../types.js\";\n");
@@ -261,9 +282,21 @@ fn namespace_file(
         declared.join(", ")
     ));
     output.push_str(&format!(
-        "import {{ {} }} from \"../runtime.js\";\n",
-        runtime.join(", ")
+        "import {{ {} }} from {};\n",
+        members.join(", "),
+        crate::runtime::specifier(runtime, "\"../runtime.js\"")
     ));
+    if let Some(module) = namespace.validation_module {
+        let names = namespace
+            .imports
+            .prefix
+            .into_iter()
+            .map(str::to_owned)
+            .chain(namespace.imports.names.iter().cloned())
+            .collect::<Vec<_>>()
+            .join(", ");
+        output.push_str(&format!("import {{ {names} }} from \"../{module}.js\";\n"));
+    }
     output.push('\n');
     for declaration in &namespace.declarations {
         output.push_str(declaration);
@@ -294,16 +327,26 @@ fn client_file(
     options: &TsOptions,
 ) -> String {
     let mut output = String::new();
+    if options.runtime == Runtime::Package {
+        output.push_str(&format!(
+            "// runtime = \"package\": the runtime is the {package} package beside this file, not \
+             the vendored runtime/*.ts the default writes here\n",
+            package = crate::runtime::PACKAGE
+        ));
+    }
     for member in namespaces.keys() {
         output.push_str(&format!(
             "import {{ operations as {} }} from \"./operations/{member}.js\";\n",
             binding(member)
         ));
     }
-    output.push_str("import type { ConfiguredClient, CredentialValue, OpaqueCodecRegistry } from \"./runtime.js\";\n");
-    output.push_str(
-        "export type { OpaqueCodec, OpaqueCodecRegistry, OpaqueWire } from \"./runtime.js\";\n",
-    );
+    let runtime = crate::runtime::specifier(options.runtime, "\"./runtime.js\"");
+    output.push_str(&format!(
+        "import type {{ ConfiguredClient, CredentialValue, OpaqueCodecRegistry }} from {runtime};\n"
+    ));
+    output.push_str(&format!(
+        "export type {{ OpaqueCodec, OpaqueCodecRegistry, OpaqueWire }} from {runtime};\n"
+    ));
     for (member, namespace) in namespaces {
         output.push_str(&format!(
             "export type {{ {} }} from \"./operations/{member}.js\";\n",
@@ -391,6 +434,7 @@ fn operation_function(
     names: &BTreeMap<String, String>,
     options: &TsOptions,
     preserve_wide_integers: bool,
+    validation: &mut validation::Backend,
 ) -> Result<(String, String), EmitError> {
     let args_name = &declaration_names[0];
     let success_name = &declaration_names[1];
@@ -454,13 +498,13 @@ fn operation_function(
     ));
     spec.push(format!(
         "responses: [{}]",
-        response_descriptors(operation, options)?
+        response_descriptors(operation, options, validation)?
     ));
     spec.push(format!(
         "errors: [{}]",
         errors
             .iter()
-            .map(|error| error_descriptor(error, options))
+            .map(|error| error_descriptor(error, options, validation))
             .collect::<Result<Vec<_>, _>>()?
             .join(", ")
     ));
@@ -902,7 +946,11 @@ fn content_name(content: ContentKind) -> &'static str {
     }
 }
 
-fn response_descriptors(operation: &Operation, options: &TsOptions) -> Result<String, EmitError> {
+fn response_descriptors(
+    operation: &Operation,
+    options: &TsOptions,
+    validation: &mut validation::Backend,
+) -> Result<String, EmitError> {
     let stream_descriptor = match operation.stream.as_ref().map(|stream| &stream.kind) {
         Some(StreamKind::Sse { events }) => Some(format!(
             "stream: \"sse\", events: [{}]",
@@ -928,12 +976,15 @@ fn response_descriptors(operation: &Operation, options: &TsOptions) -> Result<St
         .responses
         .iter()
         .map(|response| {
-            let schema = response
-                .body
-                .as_ref()
-                .map(|ty| type_ref_json(ty, options))
-                .transpose()?
-                .unwrap_or_else(|| "undefined".into());
+            let validate = if response.content == ContentKind::Stream {
+                String::new()
+            } else {
+                validator(response.body.as_ref(), validation)?
+            };
+            let schema = match &response.body {
+                Some(body) => type_ref_json(body, options),
+                None => Ok("undefined".into()),
+            }?;
             let stream = if response.content == ContentKind::Stream {
                 stream_descriptor
                     .as_ref()
@@ -967,7 +1018,7 @@ fn response_descriptors(operation: &Operation, options: &TsOptions) -> Result<St
             let status = serde_json::to_string(&response.status)
                 .map_err(|error| EmitError(format!("cannot encode response status: {error}")))?;
             Ok(format!(
-                "{{ status: {status}, content: {}, schema: {schema}{media_type}{stream}{headers} }}",
+                "{{ status: {status}, content: {}, schema: {schema}{validate}{media_type}{stream}{headers} }}",
                 string(content_name(response.content))
             ))
         })
@@ -975,7 +1026,25 @@ fn response_descriptors(operation: &Operation, options: &TsOptions) -> Result<St
         .map(|descriptors| descriptors.join(", "))
 }
 
-fn error_descriptor(error: &ErrorResponse, options: &TsOptions) -> Result<String, EmitError> {
+fn validator(
+    body: Option<&TypeRef>,
+    validation: &mut validation::Backend,
+) -> Result<String, EmitError> {
+    let Some(body) = body else {
+        return Ok(String::new());
+    };
+    let Some(expression) = validation.validate(body)? else {
+        return Ok(String::new());
+    };
+    Ok(format!(", validate: {expression}"))
+}
+
+fn error_descriptor(
+    error: &ErrorResponse,
+    options: &TsOptions,
+    validation: &mut validation::Backend,
+) -> Result<String, EmitError> {
+    let validate = validator(error.body.as_ref(), validation)?;
     let status = serde_json::to_string(&error.status)
         .map_err(|error| EmitError(format!("cannot encode error status: {error}")))?;
     let content = match error.content {
@@ -1018,12 +1087,12 @@ fn error_descriptor(error: &ErrorResponse, options: &TsOptions) -> Result<String
         .map(|value| format!(", mediaType: {}", string(value)))
         .unwrap_or_default();
     Ok(format!(
-        "{{ status: {status}, content: {}, schema: {schema}{media_type}{retryable}{headers} }}",
+        "{{ status: {status}, content: {}, schema: {schema}{validate}{media_type}{retryable}{headers} }}",
         string(content)
     ))
 }
 
-fn type_ref_json(reference: &TypeRef, options: &TsOptions) -> Result<String, EmitError> {
+pub(crate) fn type_ref_json(reference: &TypeRef, options: &TsOptions) -> Result<String, EmitError> {
     let mut value = serde_json::to_value(reference)
         .map_err(|error| EmitError(format!("cannot encode type reference: {error}")))?;
     normalize_integer_constraints(&mut value);

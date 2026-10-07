@@ -1,4 +1,4 @@
-use std::{fs, process::Command};
+use std::{fs, path::Path, process::Command};
 
 use pons_emit_ts::{
     DateMode, EmitMode, ErrorStrategy, FieldCase, GeneratedFile, Int64, Namespaces, Newtypes,
@@ -31,6 +31,10 @@ fn file_of(document: &Document, options: TsOptions, path: &str) -> String {
 }
 
 fn run_bun(files: &[GeneratedFile], harness: &str) {
+    run_bun_with(files, harness, Runtime::Vendor)
+}
+
+fn run_bun_with(files: &[GeneratedFile], harness: &str, runtime: Runtime) {
     let version = Command::new("bun")
         .arg("--version")
         .output()
@@ -43,6 +47,9 @@ fn run_bun(files: &[GeneratedFile], harness: &str) {
             fs::create_dir_all(parent).unwrap();
         }
         fs::write(destination, &file.content).unwrap();
+    }
+    if runtime == Runtime::Package {
+        install_runtime_package(directory.path());
     }
     let harness_path = directory.path().join("options.ts");
     fs::write(&harness_path, harness).unwrap();
@@ -58,6 +65,26 @@ fn run_bun(files: &[GeneratedFile], harness: &str) {
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );
+}
+
+fn install_runtime_package(output: &Path) {
+    let source = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../runtime/ts");
+    let installed = output.join("runtime");
+    fs::create_dir_all(&installed).unwrap();
+    for entry in fs::read_dir(source).unwrap() {
+        let entry = entry.unwrap();
+        let name = entry.file_name();
+        if name.to_string_lossy().ends_with(".ts") || name == "package.json" {
+            fs::copy(entry.path(), installed.join(&name)).unwrap();
+        }
+    }
+    let scope = output.join("node_modules").join("@pons");
+    fs::create_dir_all(&scope).unwrap();
+    let link = scope.join("runtime");
+    #[cfg(unix)]
+    std::os::unix::fs::symlink(&installed, &link).unwrap();
+    #[cfg(windows)]
+    std::os::windows::fs::symlink_dir(&installed, &link).unwrap();
 }
 
 fn operation(id: Value, path: &str) -> Value {
@@ -659,31 +686,189 @@ if (sent !== '{"count":9007199254740992}') {
 }
 
 #[test]
-fn the_two_options_the_next_pass_owns_are_refused() {
+fn the_zod_option_writes_the_schemas_the_response_is_checked_against() {
     let document: Document = serde_json::from_value(fixture()).unwrap();
-    for (options, expected) in [
-        (
-            TsOptions {
-                runtime: Runtime::Package,
-                ..TsOptions::default()
-            },
-            "import a published runtime",
-        ),
-        (
-            TsOptions {
-                validation: Validation::Zod,
-                ..TsOptions::default()
-            },
-            "emit a schema validator",
-        ),
-    ] {
-        let error = emit_with_options(&document, options).unwrap_err();
-        assert!(
-            error.0.starts_with("the TypeScript emitter cannot ") && error.0.contains(expected),
-            "the refusal names what it would take: {}",
-            error.0
+    let zod = emitted(
+        &document,
+        TsOptions {
+            validation: Validation::Zod,
+            ..TsOptions::default()
+        },
+    );
+    let schemas = file(&zod, "schemas.ts");
+    assert!(schemas.contains("import { z } from \"zod\";"), "{schemas}");
+    assert!(
+        schemas.contains("export const UserSchema"),
+        "a named type carries a schema: {schemas}"
+    );
+    assert!(
+        schemas.contains("export function mismatch(schema: z.ZodType)"),
+        "the check the client calls is exported beside the schemas: {schemas}"
+    );
+    let operations = file(&zod, "operations/auth.ts");
+    assert!(
+        operations.contains("import { mismatch,"),
+        "the operation file imports what it calls: {operations}"
+    );
+    assert!(
+        operations.contains("validate: mismatch(UserSchema)"),
+        "a declared response carries the check: {operations}"
+    );
+
+    assert!(
+        file(&zod, "index.ts").contains("export * from \"./schemas.js\";"),
+        "the entry point reaches the schemas it checked against: {}",
+        file(&zod, "index.ts")
+    );
+
+    let none = emitted(&document, TsOptions::default());
+    assert!(!paths(&none).contains(&"schemas.ts".to_owned()));
+    assert!(
+        !file(&none, "operations/auth.ts").contains("mismatch"),
+        "the default writes the bytes it wrote before the option did anything"
+    );
+    assert_eq!(
+        file(&none, "index.ts"),
+        "export * from \"./client.js\";\n",
+        "the default's entry point is one line"
+    );
+    assert_eq!(
+        paths(&none),
+        paths(&zod)
+            .into_iter()
+            .filter(|path| path != "schemas.ts")
+            .collect::<Vec<_>>(),
+        "the schema file is the only file the option adds"
+    );
+}
+
+fn paths(files: &[GeneratedFile]) -> Vec<String> {
+    let mut paths = files
+        .iter()
+        .map(|file| file.path.clone())
+        .collect::<Vec<_>>();
+    paths.sort();
+    paths
+}
+
+#[test]
+fn runtime_package_writes_no_runtime_and_imports_the_package_instead() {
+    let document: Document = serde_json::from_value(fixture()).unwrap();
+    let vendored_options = TsOptions {
+        errors: ErrorStrategy::Throw,
+        ..TsOptions::default()
+    };
+    let vendor = emitted(&document, vendored_options);
+    let package = emitted(
+        &document,
+        TsOptions {
+            runtime: Runtime::Package,
+            ..vendored_options
+        },
+    );
+    assert_eq!(
+        paths(&vendor),
+        [
+            "client.ts",
+            "errors.ts",
+            "index.ts",
+            "operations/auth.ts",
+            "operations/events.ts",
+            "runtime.ts",
+            "runtime/codec.ts",
+            "runtime/credentials.ts",
+            "runtime/index.ts",
+            "runtime/stream.ts",
+            "runtime/transport.ts",
+            "runtime/wire.ts",
+            "types.ts",
+        ]
+        .map(String::from)
+        .to_vec(),
+        "the default writes the runtime"
+    );
+    assert_eq!(
+        paths(&package),
+        [
+            "client.ts",
+            "errors.ts",
+            "index.ts",
+            "operations/auth.ts",
+            "operations/events.ts",
+            "types.ts",
+        ]
+        .map(String::from)
+        .to_vec(),
+        "the package supplies the runtime, so the emitter writes neither it nor its entry point"
+    );
+    const MARKER: &str = "// runtime = \"package\": the runtime is the @pons/runtime package beside this file, not the vendored runtime/*.ts the default writes here\n";
+    for emitted_file in &package {
+        let swapped = file(&vendor, &emitted_file.path)
+            .replace("from \"../runtime.js\"", "from \"@pons/runtime\"")
+            .replace("from \"./runtime.js\"", "from \"@pons/runtime\"");
+        let expected = if emitted_file.path == "client.ts" {
+            format!("{MARKER}{swapped}")
+        } else {
+            swapped
+        };
+        assert_eq!(
+            emitted_file.content, expected,
+            "only the runtime import changes, and the client names the mode: {}",
+            emitted_file.path
         );
     }
+    assert!(
+        file(&package, "client.ts").starts_with(MARKER),
+        "the file set no longer says which mode wrote it, so the client says it: {}",
+        file(&package, "client.ts")
+    );
+    assert!(
+        file(&package, "client.ts").contains(
+            "import type { ConfiguredClient, CredentialValue, OpaqueCodecRegistry } from \
+             \"@pons/runtime\";"
+        ) && file(&package, "client.ts").contains(
+            "export type { OpaqueCodec, OpaqueCodecRegistry, OpaqueWire } from \"@pons/runtime\";"
+        ),
+        "{}",
+        file(&package, "client.ts")
+    );
+    assert!(
+        file(&package, "operations/auth.ts").contains(
+            "import { request, requestOrThrow, encodePathSegment, type ConfiguredClient } from \
+             \"@pons/runtime\";"
+        ),
+        "{}",
+        file(&package, "operations/auth.ts")
+    );
+    for emitted_file in &package {
+        assert!(
+            !emitted_file.content.contains("runtime.js"),
+            "{} still names the vendored file: {}",
+            emitted_file.path,
+            emitted_file.content
+        );
+    }
+    run_bun_with(
+        &package,
+        r#"
+import { createClient } from "./client.js";
+
+const client = createClient({
+  baseUrl: "http://example.test",
+  fetch: async () => new Response("{}", { status: 200, headers: { "content-type": "application/json" } }),
+});
+let failure: any;
+try {
+  await client.auth.login({ body: { email: "person@example.test" } });
+} catch (cause) {
+  failure = cause;
+}
+if (failure?.kind !== "protocol" || !failure.message.includes("missing required field id")) {
+  throw new Error(`the wire validator in the package did not refuse it: ${JSON.stringify(failure)}`);
+}
+"#,
+        Runtime::Package,
+    );
 }
 
 fn camel_document() -> Document {

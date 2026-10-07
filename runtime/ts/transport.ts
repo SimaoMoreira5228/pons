@@ -54,6 +54,7 @@ type RequestInputDescriptor = {
   bodyRequired: boolean;
 };
 type HeaderDescriptor = { name: string; required: boolean; schema: unknown };
+type Validator = (value: unknown) => string | undefined;
 type ResponseDescriptor = {
   status: number | string;
   content: string;
@@ -63,6 +64,7 @@ type ResponseDescriptor = {
   item?: unknown;
   events?: Array<{ event: string; schema: unknown }>;
   headers?: HeaderDescriptor[];
+  validate?: Validator;
 };
 type ErrorDescriptor = {
   status: number | string;
@@ -72,6 +74,7 @@ type ErrorDescriptor = {
   retryable?: boolean;
   events?: Array<{ event: string; schema: unknown }>;
   headers?: HeaderDescriptor[];
+  validate?: Validator;
 };
 export type RequestSpec = {
   method: string;
@@ -426,9 +429,11 @@ export async function request<T, E>(
     if (declaredSuccess !== undefined) {
       await captureCredential(client, response, provides, rawValue, true, finalUrl);
     }
-    const value = responseSchema?.schema && (jsonResponse || textResponse || hasOpaque(responseSchema.schema))
-      ? decodeWire(rawValue, responseSchema.schema, preserveWideIntegers, client.opaque)
-      : rawValue;
+    const schema = responseSchema?.schema;
+    const decoded = schema && (jsonResponse || textResponse || hasOpaque(schema));
+    const value = decoded ? decodeWire(rawValue, schema, preserveWideIntegers, client.opaque) : rawValue;
+    const violation = decoded ? responseSchema?.validate?.(value) : undefined;
+    if (violation !== undefined) return err({ kind: "protocol", message: `the response does not match the contract: ${violation}` });
     if (declaredSuccess === undefined) {
       return declaredError
         ? err({

@@ -1,6 +1,8 @@
 mod client;
 mod runtime;
+mod schemas;
 mod types;
+mod validation;
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -89,6 +91,7 @@ pub enum Runtime {
 pub enum Validation {
     #[default]
     None,
+    Builtin,
     Zod,
 }
 
@@ -142,7 +145,6 @@ pub fn emit_with_strategy(
 }
 
 pub fn emit_with_options(document: &Document, options: TsOptions) -> Result<EmitOutput, EmitError> {
-    unbuilt_options(options)?;
     let mode = options.mode;
     let mut document = document.clone();
     document.canonicalize();
@@ -255,14 +257,23 @@ pub fn emit_with_options(document: &Document, options: TsOptions) -> Result<Emit
             content: client::error_types(options.errors),
         },
     ];
-    files.extend(runtime::files());
-    files.extend(client::emit(
+    let mut validation = validation::Backend::new(&document, &names, &options);
+    let client_files = client::emit(
         &document,
         &names,
         &options,
         preserve_wide_integers,
-    )?);
-    files.push(client::index());
+        &mut validation,
+    )?;
+    if let Some(file) = validation.render()? {
+        files.push(file);
+    }
+    let module = validation
+        .capabilities()
+        .map(|capabilities| capabilities.module);
+    files.extend(runtime::files(options.runtime));
+    files.extend(client_files);
+    files.push(client::index(module));
     let files = files;
     strict_coverage_error(mode, &coverage)?;
     let mut warnings = Vec::new();
@@ -291,24 +302,6 @@ pub fn emit_with_options(document: &Document, options: TsOptions) -> Result<Emit
         warnings,
         coverage,
     })
-}
-
-fn unbuilt_options(options: TsOptions) -> Result<(), EmitError> {
-    match (options.runtime, options.validation) {
-        (Runtime::Vendor, Validation::None) => Ok(()),
-        (Runtime::Package, _) => Err(EmitError(
-            "the TypeScript emitter cannot import a published runtime yet, because the emitted \
-             client vendors runtime/*.ts and naming a package is a dependency this target does \
-             not declare yet"
-                .into(),
-        )),
-        (_, Validation::Zod) => Err(EmitError(
-            "the TypeScript emitter cannot emit a schema validator yet, because the vendored \
-             runtime validates every value against the contract itself and no emitted file \
-             depends on a validator yet"
-                .into(),
-        )),
-    }
 }
 
 fn strict_coverage_error(mode: EmitMode, coverage: &Coverage) -> Result<(), EmitError> {

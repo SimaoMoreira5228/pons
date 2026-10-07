@@ -1,0 +1,16 @@
+{
+  "name": "@pons/runtime",
+  "version": "0.1.0",
+  "description": "The TypeScript runtime a pons client runs on: the wire validator, the codecs, the stream readers, the credential store, and the transport. These are the same sources the TypeScript emitter vendors into runtime/, and they import ../types.js and ../errors.js, so a client resolves them from the directory beside it.",
+  "license": "MIT OR Apache-2.0",
+  "type": "module",
+  "exports": {
+    ".": "./index.ts"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "peerDependencies": {
+    "typescript": ">=7.0.2"
+  }
+}

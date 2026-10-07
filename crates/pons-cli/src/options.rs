@@ -19,7 +19,7 @@ const NEWTYPES: &[&str] = &["alias", "branded"];
 const INT64: &[&str] = &["bigint", "string", "number"];
 const DATE_MODE: &[&str] = &["string", "date"];
 const RUNTIME: &[&str] = &["vendor", "package"];
-const VALIDATION: &[&str] = &["none", "zod"];
+const VALIDATION: &[&str] = &["none", "builtin", "zod"];
 
 const TS: &[(&str, &[&str])] = &[
     ("mode", MODE),
@@ -230,6 +230,7 @@ fn ts_options(
             ("date_mode", _) => options.date_mode = DateMode::String,
             ("runtime", "package") => options.runtime = Runtime::Package,
             ("runtime", _) => options.runtime = Runtime::Vendor,
+            ("validation", "builtin") => options.validation = Validation::Builtin,
             ("validation", "zod") => options.validation = Validation::Zod,
             ("validation", _) => options.validation = Validation::None,
             _ => {}
@@ -311,6 +312,7 @@ fn ts_words(options: &TsOptions) -> BTreeMap<String, Value> {
             "validation",
             match options.validation {
                 Validation::None => "none",
+                Validation::Builtin => "builtin",
                 Validation::Zod => "zod",
             },
         ),

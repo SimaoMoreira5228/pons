@@ -5,6 +5,7 @@
   "description": "Toolchain for the generated-code suites in crates/pons-emit-ts/tests. Nothing here is a dependency of any published client.",
   "devDependencies": {
     "bun": "1.4.4",
-    "typescript": "7.0.2"
+    "typescript": "7.0.2",
+    "zod": "4.6.7"
   }
 }

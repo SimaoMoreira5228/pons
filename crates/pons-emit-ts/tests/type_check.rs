@@ -11,6 +11,18 @@ use serde_json::Value;
 const PROBE: &str = "probe.ts";
 const PROJECT: &str = "tsconfig.json";
 
+const CLIENT_PROBE: &str = r#"
+import { createClient } from "./client.js";
+
+const client = createClient({ baseUrl: "https://api.example.test" });
+const loggedIn = await client.auth.login({ body: { email: "person@example.test" } });
+const watched = await client.events.watch({ path: { cursor: "c" }, query: { limit: 1 } });
+for await (const event of watched.value) {
+  if (event.isOk() && event.value !== undefined) console.log(event.value.data.id);
+}
+console.log(loggedIn);
+"#;
+
 const COMPILER_OPTIONS: &str = r#"{
     "target": "es2022",
     "module": "esnext",
@@ -212,6 +224,14 @@ fn tsc_command() -> Compiler {
 }
 
 fn type_checks(files: &[GeneratedFile], probe: &str) {
+    type_checks_with(files, probe, false)
+}
+
+fn type_checks_with(files: &[GeneratedFile], probe: &str, packaged: bool) {
+    type_checks_beside(files, probe, packaged, false)
+}
+
+fn type_checks_beside(files: &[GeneratedFile], probe: &str, packaged: bool, zod: bool) {
     let compiler = tsc_command();
     let checked = checked_files(files);
     let directory = tempfile::tempdir().unwrap();
@@ -222,16 +242,20 @@ fn type_checks(files: &[GeneratedFile], probe: &str) {
     }
     fs::write(directory.path().join(PROBE), probe).unwrap();
     fs::write(directory.path().join(PROJECT), tsconfig(&checked)).unwrap();
+    let mut expected = checked.clone();
+    if packaged {
+        expected.extend(install_runtime_package(directory.path()));
+    }
+    if zod {
+        install_zod(directory.path());
+    }
     let mut written = written_sources(directory.path());
     written.sort();
+    expected.sort();
     assert_eq!(
-        written,
-        {
-            let mut expected = checked.clone();
-            expected.sort();
-            expected
-        },
-        "the type check must cover every emitted file, listed in {PROJECT}"
+        written, expected,
+        "the type check must cover every emitted file and the runtime beside them, listed in \
+         {PROJECT}"
     );
     let output = Command::new(&compiler.program)
         .args(&compiler.arguments)
@@ -247,6 +271,55 @@ fn type_checks(files: &[GeneratedFile], probe: &str) {
     );
 }
 
+fn install_zod(output: &Path) {
+    let mut directory = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let package = loop {
+        let candidate = directory.join("node_modules").join("zod");
+        if candidate.join("package.json").is_file() {
+            break candidate;
+        }
+        if !directory.pop() {
+            panic!(
+                "no zod beside the workspace to type check the emitted schemas against, looked in \
+                 {:?} and every directory above it; install it with `bun add --dev zod` or \
+                 `npm install --save-dev zod`",
+                env!("CARGO_MANIFEST_DIR")
+            );
+        }
+    };
+    let scope = output.join("node_modules");
+    fs::create_dir_all(&scope).unwrap();
+    let link = scope.join("zod");
+    #[cfg(unix)]
+    std::os::unix::fs::symlink(&package, &link).unwrap();
+    #[cfg(windows)]
+    std::os::windows::fs::symlink_dir(&package, &link).unwrap();
+}
+
+fn install_runtime_package(output: &Path) -> Vec<String> {
+    let source = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../runtime/ts");
+    let installed = output.join("runtime");
+    fs::create_dir_all(&installed).unwrap();
+    let mut written = Vec::new();
+    for entry in fs::read_dir(&source).unwrap() {
+        let entry = entry.unwrap();
+        let name = entry.file_name();
+        if name.to_string_lossy().ends_with(".ts") {
+            fs::copy(entry.path(), installed.join(&name)).unwrap();
+            written.push(format!("runtime/{}", name.to_string_lossy()));
+        }
+    }
+    fs::copy(source.join("package.json"), installed.join("package.json")).unwrap();
+    let scope = output.join("node_modules").join("@pons");
+    fs::create_dir_all(&scope).unwrap();
+    let link = scope.join("runtime");
+    #[cfg(unix)]
+    std::os::unix::fs::symlink(&installed, &link).unwrap();
+    #[cfg(windows)]
+    std::os::windows::fs::symlink_dir(&installed, &link).unwrap();
+    written
+}
+
 fn written_sources(root: &Path) -> Vec<String> {
     let mut written = Vec::new();
     let mut directories = vec![root.to_path_buf()];
@@ -254,6 +327,9 @@ fn written_sources(root: &Path) -> Vec<String> {
         for entry in fs::read_dir(&directory).unwrap() {
             let path = entry.unwrap().path();
             if path.is_dir() {
+                if path.file_name().is_some_and(|name| name == "node_modules") {
+                    continue;
+                }
                 directories.push(path);
             } else if path.extension().is_some_and(|extension| extension == "ts") {
                 written.push(
@@ -376,20 +452,66 @@ fn the_check_covers_the_vendored_runtime_sources() {
 #[test]
 fn the_generated_client_compiles_under_the_strictest_flags() {
     let document: Document = serde_json::from_value(fixture()).unwrap();
-    type_checks(
-        &files(&document),
-        r#"
-import { createClient } from "./client.js";
-
-const client = createClient({ baseUrl: "https://api.example.test" });
-const loggedIn = await client.auth.login({ body: { email: "person@example.test" } });
-const watched = await client.events.watch({ path: { cursor: "c" }, query: { limit: 1 } });
-for await (const event of watched.value) {
-  if (event.isOk() && event.value !== undefined) console.log(event.value.data.id);
+    type_checks(&files(&document), CLIENT_PROBE);
 }
-console.log(loggedIn);
-"#,
+
+#[test]
+fn a_client_that_imports_the_runtime_package_compiles_beside_it() {
+    let document: Document = serde_json::from_value(fixture()).unwrap();
+    let files = files_with(
+        &document,
+        pons_emit_ts::TsOptions {
+            runtime: pons_emit_ts::Runtime::Package,
+            ..pons_emit_ts::TsOptions::default()
+        },
     );
+    assert!(
+        files.iter().all(|file| !file.path.starts_with("runtime")),
+        "the package supplies the runtime, so the emitter writes none of it: {:?}",
+        files.iter().map(|file| &file.path).collect::<Vec<_>>()
+    );
+    type_checks_with(&files, CLIENT_PROBE, true);
+}
+
+#[test]
+fn a_client_that_checks_its_responses_against_zod_compiles_beside_zod() {
+    let document: Document = serde_json::from_value(fixture()).unwrap();
+    for packaged in [false, true] {
+        let files = files_with(
+            &document,
+            pons_emit_ts::TsOptions {
+                validation: pons_emit_ts::Validation::Zod,
+                runtime: if packaged {
+                    pons_emit_ts::Runtime::Package
+                } else {
+                    pons_emit_ts::Runtime::Vendor
+                },
+                ..pons_emit_ts::TsOptions::default()
+            },
+        );
+        assert!(
+            files.iter().any(|file| file.path == "schemas.ts"),
+            "the option writes the schemas: {:?}",
+            files.iter().map(|file| &file.path).collect::<Vec<_>>()
+        );
+        type_checks_beside(
+            &files,
+            r#"
+import { createClient } from "./client.js";
+import { mismatch, UserSchema, LoginErrorInvalidSchema } from "./schemas.js";
+
+export const client = createClient({ baseUrl: "https://api.example.test" });
+export const loggedIn = await client.auth.login({ body: { email: "person@example.test" } });
+export const id = loggedIn.id;
+export const user = mismatch(UserSchema)({ id: "1" });
+export const invalid = mismatch(LoginErrorInvalidSchema)({ code: "invalid" });
+// @ts-expect-error the schema takes one argument and returns a check
+export const wrong = mismatch(UserSchema, { id: "1" });
+"#,
+            packaged,
+            true,
+        );
+    }
 }
 
 #[test]
