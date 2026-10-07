@@ -448,11 +448,12 @@ import {
   SealedSchema, ShapesSchema, SpreadsSchema, TreeSchema, TypedSchema, WholeSchema, mismatch,
 } from "./schemas.ts";
 
-const admits = (label: string, check: (value: unknown) => string | undefined, value: unknown) => {
-  if (check(value) !== undefined) throw new Error(`${label} was refused: ${check(value)}`);
+const admits = (label: string, check: (value: unknown) => object | null, value: unknown) => {
+  const found = check(value);
+  if (found !== null) throw new Error(`${label} was refused: ${JSON.stringify(found)}`);
 };
-const refuses = (label: string, check: (value: unknown) => string | undefined, value: unknown) => {
-  if (check(value) === undefined) throw new Error(`${label} was admitted`);
+const refuses = (label: string, check: (value: unknown) => object | null, value: unknown) => {
+  if (check(value) === null) throw new Error(`${label} was admitted`);
 };
 
 admits("a string enum", mismatch(ChoicesSchema), "one");
@@ -972,10 +973,10 @@ import { mismatch, ShapesCountSchema, ShapesSchema } from "./schemas.ts";
 const check = mismatch(ShapesSchema);
 const admits = (label: string, value: unknown) => {
   const found = check(value);
-  if (found !== undefined) throw new Error(`${label} was refused: ${found}`);
+  if (found !== null) throw new Error(`${label} was refused: ${JSON.stringify(found)}`);
 };
 const refuses = (label: string, value: unknown) => {
-  if (check(value) === undefined) throw new Error(`${label} was admitted`);
+  if (check(value) === null) throw new Error(`${label} was admitted`);
 };
 admits("a count", 3);
 admits("a struct", { name: "a" });
@@ -984,7 +985,7 @@ admits("a unit", null);
 refuses("a struct without its field", {});
 refuses("a value no variant fits", "a");
 refuses("a count out of range", 2 ** 33);
-if (mismatch(ShapesCountSchema)(2 ** 33) === undefined) throw new Error("the narrowed schema bounds the count");
+if (mismatch(ShapesCountSchema)(2 ** 33) === null) throw new Error("the narrowed schema bounds the count");
 
 const client = createClient({
   baseUrl: "http://example.test",

@@ -61,7 +61,7 @@ const PRELUDE: &[(&str, &str)] = &[
     ),
 ];
 
-const MISMATCH: &str = "export function mismatch(schema: z.ZodType): (value: unknown) => string | undefined {\n  return (value) => {\n    const result = schema.safeParse(value);\n    if (result.success) return undefined;\n    const issue = result.error.issues[0];\n    if (issue === undefined) return \"the value does not match the contract\";\n    const path = issue.path.map((step) => String(step)).join(\".\");\n    return path === \"\" ? issue.message : `${path}: ${issue.message}`;\n  };\n}\n";
+const MISMATCH: &str = "export function mismatch(schema: z.ZodType): (value: unknown) => { readonly path: readonly (string | number)[]; readonly message: string } | null {\n  return (value) => {\n    const result = schema.safeParse(value);\n    if (result.success) return null;\n    const issue = result.error.issues[0];\n    if (issue === undefined) return { path: [], message: \"the value does not match the contract\" };\n    return { path: issue.path.map((step) => typeof step === \"number\" ? step : String(step)), message: issue.message };\n  };\n}\n";
 
 struct Schemas<'a> {
     document: &'a pons_ir::Document,

@@ -32,6 +32,7 @@ import {
   type CredentialValue,
 } from "./credentials.js";
 import { MAX_STREAM_BUFFER, readNdjson, readSse } from "./stream.js";
+import type { Validator, ValidationIssue } from "./validate.js";
 import { WirePolicyError, definitionApplies, hasOpaque, validateWire } from "./wire.js";
 
 const MAX_TIMER_DELAY = 2_147_483_647;
@@ -54,7 +55,6 @@ type RequestInputDescriptor = {
   bodyRequired: boolean;
 };
 type HeaderDescriptor = { name: string; required: boolean; schema: unknown };
-type Validator = (value: unknown) => string | undefined;
 type ResponseDescriptor = {
   status: number | string;
   content: string;
@@ -432,8 +432,19 @@ export async function request<T, E>(
     const schema = responseSchema?.schema;
     const decoded = schema && (jsonResponse || textResponse || hasOpaque(schema));
     const value = decoded ? decodeWire(rawValue, schema, preserveWideIntegers, client.opaque) : rawValue;
-    const violation = decoded ? responseSchema?.validate?.(value) : undefined;
-    if (violation !== undefined) return err({ kind: "protocol", message: `the response does not match the contract: ${violation}` });
+    if (decoded && responseSchema?.validate) {
+      let violation: ValidationIssue | null;
+      try {
+        violation = responseSchema.validate(value);
+      } catch (cause) {
+        return err({
+          kind: "protocol",
+          message: "the response does not match the contract: the validator threw",
+          cause,
+        });
+      }
+      if (violation !== null) return err(contractFailure(violation));
+    }
     if (declaredSuccess === undefined) {
       return declaredError
         ? err({
@@ -871,6 +882,26 @@ function findCatchAll<T extends { status: number | string }>(entries: T[]): T | 
 
 function findError<E extends { status: number | string }>(entries: E[], actual: number): E | undefined {
   return findSpecific(entries, actual) ?? findCatchAll(entries);
+}
+
+function contractFailure(violation: ValidationIssue): ClientFailure {
+  const location = violation.path.length === 0 ? "" : `${contractPath(violation.path)}: `;
+  return {
+    kind: "protocol",
+    message: `the response does not match the contract: ${location}${violation.message}`,
+  };
+}
+
+function contractPath(path: readonly (string | number)[]): string {
+  let output = "";
+  for (const step of path) {
+    if (typeof step === "number") {
+      output += `[${step}]`;
+    } else {
+      output += output === "" ? step : `.${step}`;
+    }
+  }
+  return output;
 }
 
 function matchResponse<T extends { status: number | string }, E extends { status: number | string }>(

@@ -164,6 +164,7 @@ fn the_default_options_leave_the_vendored_runtime_the_bytes_it_was() {
     for module in [
         "runtime/wire.ts",
         "runtime/codec.ts",
+        "runtime/validate.ts",
         "runtime/stream.ts",
         "runtime/credentials.ts",
         "runtime/transport.ts",
@@ -780,6 +781,7 @@ fn runtime_package_writes_no_runtime_and_imports_the_package_instead() {
             "runtime/index.ts",
             "runtime/stream.ts",
             "runtime/transport.ts",
+            "runtime/validate.ts",
             "runtime/wire.ts",
             "types.ts",
         ]

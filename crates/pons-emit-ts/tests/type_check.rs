@@ -436,6 +436,7 @@ fn the_check_covers_the_vendored_runtime_sources() {
         "runtime/index.ts",
         "runtime/wire.ts",
         "runtime/codec.ts",
+        "runtime/validate.ts",
         "runtime/stream.ts",
         "runtime/credentials.ts",
         "runtime/transport.ts",

@@ -6,6 +6,10 @@ const MODULES: &[(&str, &str)] = &[
     ("index.ts", include_str!("../../../runtime/ts/index.ts")),
     ("wire.ts", include_str!("../../../runtime/ts/wire.ts")),
     ("codec.ts", include_str!("../../../runtime/ts/codec.ts")),
+    (
+        "validate.ts",
+        include_str!("../../../runtime/ts/validate.ts"),
+    ),
     ("stream.ts", include_str!("../../../runtime/ts/stream.ts")),
     (
         "credentials.ts",
