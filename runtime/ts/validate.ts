@@ -22,10 +22,11 @@ const DECIMAL = /^-?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?$/;
 const DATE = /^(\d{4})-(\d{2})-(\d{2})$/;
 const TIME = /^(\d{2}):(\d{2}):(\d{2})(?:\.\d+)?(?:[Zz]|([+-])(\d{2}):(\d{2}))$/;
 const DATE_TIME = /^(\d{4})-(\d{2})-(\d{2})[Tt](\d{2}):(\d{2}):(\d{2})(?:\.\d{1,3})?(?:[Zz]|([+-])(\d{2}):(\d{2}))$/;
-const DURATION = /^-?P(?!$)(?:\d+(?:[.,]\d+)?Y)?(?:\d+(?:[.,]\d+)?M)?(?:\d+(?:[.,]\d+)?W)?(?:\d+(?:[.,]\d+)?D)?(?:T(?=\d)(?:\d+(?:[.,]\d+)?H)?(?:\d+(?:[.,]\d+)?M)?(?:\d+(?:[.,]\d+)?S)?)?$/;
 const UUID = /^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/;
-const EMAIL = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+const EMAIL = /^(?:[A-Za-z0-9_'+\-]+\.)*[A-Za-z0-9_'+\-]*[A-Za-z0-9_+-]@(?:[A-Za-z0-9][A-Za-z0-9\-]*\.)+[A-Za-z]{2,}$/;
+const DURATION = /^P(?:(\d+W)|(?!.*W)(?=\d|T\d)(\d+Y)?(\d+M)?(\d+D)?(T(?=\d)(\d+H)?(\d+M)?(\d+([.,]\d+)?S)?)?)$/;
 const IPV4 = /^(?:(?:25[0-5]|2[0-4][0-9]|1[0-9][0-9]|[1-9]?[0-9])\.){3}(?:25[0-5]|2[0-4][0-9]|1[0-9][0-9]|[1-9]?[0-9])$/;
+const IPV6 = /^(([0-9a-fA-F]{1,4}:){7}[0-9a-fA-F]{1,4}|([0-9a-fA-F]{1,4}:){1,7}:|([0-9a-fA-F]{1,4}:){1,6}:[0-9a-fA-F]{1,4}|([0-9a-fA-F]{1,4}:){1,5}(:[0-9a-fA-F]{1,4}){1,2}|([0-9a-fA-F]{1,4}:){1,4}(:[0-9a-fA-F]{1,4}){1,3}|([0-9a-fA-F]{1,4}:){1,3}(:[0-9a-fA-F]{1,4}){1,4}|([0-9a-fA-F]{1,4}:){1,2}(:[0-9a-fA-F]{1,4}){1,5}|[0-9a-fA-F]{1,4}:((:[0-9a-fA-F]{1,4}){1,6})|:((:[0-9a-fA-F]{1,4}){1,7}|:))$/;
 
 export function validateContract(value: unknown, schema: any): ValidationIssue | null {
   return validate(value, schema, []);
@@ -78,9 +79,6 @@ function validateInteger(value: any, schema: any, path: readonly (string | numbe
   } else if (typeof value === "bigint") {
     integer = value;
   } else if (typeof value === "number" && Number.isInteger(value)) {
-    integer = BigInt(value);
-  } else if (typeof value === "string" && schema.bits > 53) {
-    if (!canonical.test(value)) return issue(path, "expected integer string");
     integer = BigInt(value);
   } else {
     return issue(path, "expected an exact integer");
@@ -135,7 +133,6 @@ function validateString(value: any, schema: any, path: readonly (string | number
     return value instanceof Date && Number.isFinite(value.getTime()) ? null : issue(path, "expected a Date");
   }
   if (typeof value !== "string") {
-    if (schema.format === "date-time" && schema.carrier === undefined && value instanceof Date) return null;
     return issue(path, "expected string");
   }
   if (schema.format !== undefined && !matchesFormat(schema.format, value)) {
@@ -174,8 +171,8 @@ function matchesFormat(format: string, value: string): boolean {
   if (format === "uri") return isUri(value);
   if (format === "email") return EMAIL.test(value);
   if (format === "ipv4") return IPV4.test(value);
-  if (format === "ipv6") return isIpv6(value);
-  return true;
+  if (format === "ipv6") return IPV6.test(value);
+  return false;
 }
 
 function formatMessage(format: string): string {
@@ -188,7 +185,7 @@ function formatMessage(format: string): string {
   if (format === "email") return "expected an email";
   if (format === "ipv4") return "expected an ipv4 address";
   if (format === "ipv6") return "expected an ipv6 address";
-  return "string does not match its format";
+  return "unknown string format";
 }
 
 function isCalendarDay(year: string, month: string, day: string): boolean {
@@ -215,17 +212,9 @@ function isOffset(hour: string | undefined, minute: string | undefined): boolean
 }
 
 function isUri(value: string): boolean {
+  if (/\s/.test(value)) return false;
   try {
     return new URL(value).protocol.length > 1;
-  } catch {
-    return false;
-  }
-}
-
-function isIpv6(value: string): boolean {
-  if (!value.includes(":")) return false;
-  try {
-    return new URL(`http://[${value}]/`).hostname.startsWith("[");
   } catch {
     return false;
   }
@@ -262,8 +251,14 @@ function stableValue(value: any): string {
   return JSON.stringify(value);
 }
 
+function isPlainRecord(value: any): boolean {
+  if (value === null || typeof value !== "object" || Array.isArray(value)) return false;
+  const prototype = Object.getPrototypeOf(value);
+  return prototype === Object.prototype || prototype === null;
+}
+
 function validateMap(value: any, schema: any, path: readonly (string | number)[]): ValidationIssue | null {
-  if (!isRecord(value)) return issue(path, "expected object");
+  if (!isPlainRecord(value)) return issue(path, "expected object");
   for (const [key, item] of Object.entries(value)) {
     const keyIssue = validate(key, schema.key, path);
     if (keyIssue !== null) return keyIssue;
@@ -284,8 +279,8 @@ function validateTuple(value: any, schema: any, path: readonly (string | number)
 
 function validateStruct(value: any, definition: any, path: readonly (string | number)[]): ValidationIssue | null {
   const flattened = definition.flattened ?? [];
-  if (flattened.some((item: any) => flattenedOpaqueSchema(item) !== undefined)) return null;
-  if (!isRecord(value)) return issue(path, "expected object");
+  const opaqueFlattened = flattened.some((item: any) => flattenedOpaqueSchema(item) !== undefined);
+  if (!isPlainRecord(value)) return issue(path, "expected object");
   let declared: any[];
   try {
     declared = collectFields(definition, "decode");
@@ -296,7 +291,7 @@ function validateStruct(value: any, definition: any, path: readonly (string | nu
   const unknown = Object.keys(value).filter((key) => !known.has(key));
   const openness = definition.openness ?? "preserve_opaque";
   const policy = typeof openness === "string" ? openness : "preserve_typed";
-  if (unknown.length > 0) {
+  if (unknown.length > 0 && !opaqueFlattened) {
     if (policy === "reject") return issue([...path, unknown[0]!], "unknown property");
     if (policy === "preserve_typed") {
       const extra = opennessValue(openness.preserve_typed.value);

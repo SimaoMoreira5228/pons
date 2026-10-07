@@ -232,7 +232,7 @@ fn ts_options(
             ("runtime", _) => options.runtime = Runtime::Vendor,
             ("validation", "builtin") => options.validation = Validation::Builtin,
             ("validation", "zod") => options.validation = Validation::Zod,
-            ("validation", _) => options.validation = Validation::None,
+            ("validation", "none") => options.validation = Validation::None,
             _ => {}
         }
     }

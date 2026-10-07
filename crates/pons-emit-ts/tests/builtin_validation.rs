@@ -1,16 +1,24 @@
 use std::{fs, path::Path, process::Command};
 
 use pons_emit_ts::{
-    ErrorStrategy, GeneratedFile, Runtime, TsOptions, Validation, emit_with_options,
+    DateMode, ErrorStrategy, GeneratedFile, Int64, Runtime, TsOptions, Validation,
+    emit_with_options,
 };
 use pons_ir::Document;
+use serde_json::{Value, json};
 
 fn document() -> Document {
     serde_json::from_str(include_str!("../../../fixtures/login.json")).unwrap()
 }
 
+fn files_with(document: &Document, options: TsOptions) -> Vec<GeneratedFile> {
+    emit_with_options(document, options)
+        .expect("the TypeScript emitter must accept the document")
+        .files
+}
+
 fn files(document: &Document) -> Vec<GeneratedFile> {
-    emit_with_options(
+    files_with(
         document,
         TsOptions {
             runtime: Runtime::Package,
@@ -19,8 +27,6 @@ fn files(document: &Document) -> Vec<GeneratedFile> {
             ..TsOptions::default()
         },
     )
-    .expect("the TypeScript emitter must accept the document")
-    .files
 }
 
 fn install_runtime_package(directory: &Path) {
@@ -106,23 +112,20 @@ fn a_builtin_contract_checks_a_decoded_value_against_the_runtime_walker() {
     );
 
     let harness = r#"
-import { validateLoginErrorInvalid, validateLoginRequest, validateUser } from "./validators.ts";
+import { validateLoginErrorInvalid, validateUser } from "./validators.ts";
 
 const admits = (label: string, check: (value: unknown) => unknown, value: unknown) => {
   const issue = check(value);
-  if (issue !== undefined) throw new Error(`${label} was refused: ${String(issue)}`);
+  if (issue !== null) throw new Error(`${label} was refused: ${String(issue)}`);
 };
 const refuses = (label: string, check: (value: unknown) => unknown, value: unknown) => {
-  if (check(value) === undefined) throw new Error(`${label} was admitted`);
+  if (check(value) === null) throw new Error(`${label} was admitted`);
 };
 
 admits("a user", validateUser, { id: "1", nickname: null });
 admits("a user without a nickname", validateUser, { id: "1" });
 refuses("a user whose id is not canonical text", validateUser, { id: 1 });
 refuses("a user without an id", validateUser, {});
-
-admits("a login request", validateLoginRequest, { email: "person@example.test" });
-refuses("an email that is not one", validateLoginRequest, { email: "person" });
 
 admits("an invalid-credentials error", validateLoginErrorInvalid, { code: "invalid" });
 refuses("a locked error under the invalid variant", validateLoginErrorInvalid, {
@@ -131,4 +134,129 @@ refuses("a locked error under the invalid variant", validateLoginErrorInvalid, {
 });
 "#;
     run_bun(&files, harness);
+}
+
+#[test]
+fn a_builtin_contract_checks_the_decoded_carriers() {
+    let mut raw: Value =
+        serde_json::from_str(include_str!("../../../fixtures/login.json")).unwrap();
+    raw["types"]["User"]["fields"][0]["ty"] =
+        json!({"kind": "int", "bits": 64, "signed": false, "wire": "number"});
+    raw["types"]["User"]["fields"]
+        .as_array_mut()
+        .unwrap()
+        .push(json!({
+            "wire": "created_at",
+            "ident": ["created", "at"],
+            "ty": {"kind": "string", "format": "date-time"},
+            "presence": "required"
+        }));
+    let document: Document = serde_json::from_value(raw).unwrap();
+    let files = files_with(
+        &document,
+        TsOptions {
+            runtime: Runtime::Package,
+            validation: Validation::Builtin,
+            errors: ErrorStrategy::Throw,
+            int64: Int64::Bigint,
+            date_mode: DateMode::Date,
+            ..TsOptions::default()
+        },
+    );
+    let harness = r#"
+import { validateUser } from "./validators.ts";
+
+const admits = (label: string, check: (value: unknown) => unknown, value: unknown) => {
+  const issue = check(value);
+  if (issue !== null) throw new Error(`${label} was refused: ${String(issue)}`);
+};
+const refuses = (label: string, check: (value: unknown) => unknown, value: unknown) => {
+  if (check(value) === null) throw new Error(`${label} was admitted`);
+};
+
+const created = new Date("2024-01-02T03:04:05.678Z");
+admits("a decoded wide integer and date", validateUser, { id: 1n, created_at: created });
+refuses("a wide integer as text", validateUser, { id: "1", created_at: created });
+refuses("a date-time string under the date carrier", validateUser, {
+  id: 1n,
+  created_at: "2024-01-02T03:04:05.678Z",
+});
+"#;
+    run_bun(&files, harness);
+}
+
+#[test]
+fn a_namespace_keeps_every_response_validator_in_one_deterministic_import() {
+    let mut raw: Value =
+        serde_json::from_str(include_str!("../../../fixtures/login.json")).unwrap();
+    let mut refresh = raw["operations"][0].clone();
+    let refresh = refresh.as_object_mut().unwrap();
+    refresh.remove("body");
+    refresh.remove("provides");
+    refresh.insert("id".into(), json!([["auth"], ["refresh"]]));
+    refresh.insert("method".into(), json!("GET"));
+    refresh.insert("path".into(), json!([{"lit": "auth"}, {"lit": "refresh"}]));
+    refresh.insert(
+        "responses".into(),
+        json!([{"status": 200, "content": "json", "body": {"ref": "LoginError"}}]),
+    );
+    refresh.remove("errors");
+    raw["operations"]
+        .as_array_mut()
+        .unwrap()
+        .push(Value::Object(refresh.clone()));
+    let document: Document = serde_json::from_value(raw).unwrap();
+    let emitted = files(&document);
+    let auth = emitted
+        .iter()
+        .find(|file| file.path == "operations/auth.ts")
+        .expect("both operations share the auth namespace");
+    let expected = "import { validateLoginError, validateLoginErrorInvalid, validateUser } from \"../validators.js\";";
+    assert_eq!(
+        auth.content.matches(expected).count(),
+        1,
+        "{}",
+        auth.content
+    );
+    assert!(
+        auth.content.contains("validate: validateUser"),
+        "{}",
+        auth.content
+    );
+    assert!(
+        auth.content.contains("validate: validateLoginError"),
+        "{}",
+        auth.content
+    );
+    assert_eq!(
+        emitted,
+        files(&document),
+        "the import order must be deterministic"
+    );
+}
+
+#[test]
+fn a_bytes_response_descriptor_carries_a_validator() {
+    let mut raw: Value =
+        serde_json::from_str(include_str!("../../../fixtures/login.json")).unwrap();
+    raw["operations"][0]["responses"][0]["content"] = json!("bytes");
+    raw["operations"][0]["responses"][0]["body"] = json!({"kind": "bytes", "encoding": "base64"});
+    let document: Document = serde_json::from_value(raw).unwrap();
+    let files = files(&document);
+    let validators = validators_of(&files);
+    assert!(
+        validators.contains(
+            "export const validateInline1: Validator = (value) => validateContract(value, {\"encoding\":\"base64\",\"kind\":\"bytes\"});"
+        ),
+        "{validators}"
+    );
+    let auth = files
+        .iter()
+        .find(|file| file.path == "operations/auth.ts")
+        .expect("the login operation is emitted");
+    assert!(
+        auth.content.contains("content: \"bytes\", schema: {\"encoding\":\"base64\",\"kind\":\"bytes\"}, validate: validateInline1"),
+        "{}",
+        auth.content
+    );
 }

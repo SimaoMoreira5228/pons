@@ -892,8 +892,7 @@ fn status_defaults_and_classes_keep_their_wire_form() {
 #[test]
 fn checked_in_schema_matches_the_rust_model() {
     let generated = serde_json::to_value(schemars::schema_for!(Document)).unwrap();
-    let checked_in: Value =
-        serde_json::from_str(include_str!("../schema/ir.schema.json")).unwrap();
+    let checked_in: Value = serde_json::from_str(include_str!("../schema/ir.schema.json")).unwrap();
     assert_eq!(generated, checked_in);
 }
 

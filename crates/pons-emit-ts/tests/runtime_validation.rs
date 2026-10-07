@@ -4375,6 +4375,82 @@ if (!String(failure.message).includes("version=1")) throw new Error("strict medi
 }
 
 #[test]
+fn a_bytes_response_runs_its_validator_on_the_read_bytes() {
+    let document: pons_ir::Document =
+        serde_json::from_str(include_str!("../../../fixtures/login.json")).unwrap();
+    let files = emit_with_strategy(&document, EmitMode::Strict, ErrorStrategy::Throw)
+        .unwrap()
+        .files;
+    let transport = files
+        .iter()
+        .find(|file| file.path == "runtime/transport.ts")
+        .unwrap();
+    assert!(transport.content.contains("responseKind !== \"bytes\""));
+    assert!(transport.content.contains("responseKind === \"bytes\""));
+
+    let harness = r#"
+import { request } from "./runtime/transport.ts";
+
+const client = () => ({
+  baseUrl: "https://example.test",
+  auth: {},
+  authAdapters: {},
+  authRecords: Object.create(null),
+  authInvalidated: Object.create(null),
+  authSchemes: {},
+  opaque: { required: false },
+  fetch: async () => new Response(new Uint8Array([1, 2, 3]), {
+    status: 200,
+    headers: { "content-type": "application/octet-stream" },
+  }),
+});
+const spec = (validate: any) => ({
+  method: "GET",
+  path: "/bytes",
+  inputs: { path: [], headers: [], bodyRequired: false },
+  responses: [{ status: 200, content: "bytes", schema: { kind: "bytes", encoding: "base64" }, validate }],
+  errors: [],
+});
+
+let seen: unknown;
+const accepted = await request(client(), spec((value: unknown) => {
+  seen = value;
+  return null;
+}));
+if (accepted.isErr()) throw new Error(`bytes response was rejected: ${JSON.stringify(accepted.error)}`);
+if (!(seen instanceof Uint8Array) || seen.length !== 3) {
+  throw new Error("the bytes validator did not receive the read bytes");
+}
+
+const rejected = await request(client(), spec(() => ({ path: ["body"], message: "expected bytes" })));
+if (!rejected.isErr()) throw new Error("a bytes validator issue was ignored");
+if (rejected.error.kind !== "protocol") throw new Error(`unexpected failure ${JSON.stringify(rejected.error)}`);
+if (!String(rejected.error.message).includes("body: expected bytes")) {
+  throw new Error("the bytes validator issue was lost");
+}
+
+for (const malformed of [undefined, "not an issue", { message: "missing path" }, { path: [], message: 42 }]) {
+  const result = await request(client(), spec(() => malformed));
+  if (!result.isErr() || result.error.kind !== "protocol") {
+    throw new Error(`a malformed validator result escaped: ${JSON.stringify(result)}`);
+  }
+  if (!String(result.error.message).includes("invalid issue")) {
+    throw new Error("a malformed validator result was not a protocol failure");
+  }
+}
+
+const thrown = await request(client(), spec(() => { throw new Error("boom"); }));
+if (!thrown.isErr() || thrown.error.kind !== "protocol") {
+  throw new Error(`a thrown validator became ${JSON.stringify(thrown)}`);
+}
+if (!String(thrown.error.message).includes("validator threw")) {
+  throw new Error("a thrown validator was not reported as a contract failure");
+}
+"#;
+    run_bun(&files, harness);
+}
+
+#[test]
 fn maps_unsupported_response_charset_to_protocol_failure() {
     let mut document: pons_ir::Document =
         serde_json::from_str(include_str!("../../../fixtures/login.json")).unwrap();

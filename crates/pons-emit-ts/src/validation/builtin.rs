@@ -39,11 +39,9 @@ impl<'a> Generator<'a> {
         self.validators
             .get(&(id.to_owned(), variant.map(str::to_owned)))
             .cloned()
-            .ok_or_else(|| {
-                EmitError(format!(
-                    "unknown enum variant {} of the type {id}",
-                    variant.unwrap_or_default()
-                ))
+            .ok_or_else(|| match variant {
+                Some(variant) => EmitError(format!("unknown enum variant {variant} of type {id}")),
+                None => EmitError(format!("unknown validator for type {id}")),
             })
     }
 
@@ -129,7 +127,8 @@ impl ValidationGenerator for Generator<'_> {
         Ok(Rendered {
             file: "validators.ts",
             content: format!(
-                "import {{ validateContract, type Validator }} from {specifier};\n\n{body}"
+                "import {{ validateContract, type Validator }} from {specifier};\n\
+                 export type {{ ValidationIssue, Validator }} from {specifier};\n\n{body}"
             ),
         })
     }
@@ -196,7 +195,7 @@ mod tests {
         let validators = &files["validators.ts"];
         assert!(
             validators.starts_with(
-                "import { validateContract, type Validator } from \"./runtime.js\";\n\n"
+                "import { validateContract, type Validator } from \"./runtime.js\";\nexport type { ValidationIssue, Validator } from \"./runtime.js\";\n\n"
             ),
             "{validators}"
         );
@@ -246,7 +245,7 @@ mod tests {
         let validators = &files["validators.ts"];
         assert!(
             validators.starts_with(
-                "import { validateContract, type Validator } from \"@pons/runtime\";\n\n"
+                "import { validateContract, type Validator } from \"@pons/runtime\";\nexport type { ValidationIssue, Validator } from \"@pons/runtime\";\n\n"
             ),
             "{validators}"
         );

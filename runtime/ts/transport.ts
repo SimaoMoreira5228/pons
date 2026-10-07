@@ -430,10 +430,11 @@ export async function request<T, E>(
       await captureCredential(client, response, provides, rawValue, true, finalUrl);
     }
     const schema = responseSchema?.schema;
-    const decoded = schema && (jsonResponse || textResponse || hasOpaque(schema));
+    const decoded = responseKind !== "bytes"
+      && Boolean(schema && (jsonResponse || textResponse || hasOpaque(schema)));
     const value = decoded ? decodeWire(rawValue, schema, preserveWideIntegers, client.opaque) : rawValue;
-    if (decoded && responseSchema?.validate) {
-      let violation: ValidationIssue | null;
+    if (responseSchema?.validate && (decoded || responseKind === "bytes")) {
+      let violation: unknown;
       try {
         violation = responseSchema.validate(value);
       } catch (cause) {
@@ -884,11 +885,23 @@ function findError<E extends { status: number | string }>(entries: E[], actual: 
   return findSpecific(entries, actual) ?? findCatchAll(entries);
 }
 
-function contractFailure(violation: ValidationIssue): ClientFailure {
-  const location = violation.path.length === 0 ? "" : `${contractPath(violation.path)}: `;
+function contractFailure(violation: unknown): ClientFailure {
+  if (
+    typeof violation !== "object"
+    || violation === null
+    || !Array.isArray((violation as { path?: unknown }).path)
+    || typeof (violation as { message?: unknown }).message !== "string"
+  ) {
+    return {
+      kind: "protocol",
+      message: "the response does not match the contract: the validator returned an invalid issue",
+    };
+  }
+  const { path, message } = violation as ValidationIssue;
+  const location = path.length === 0 ? "" : `${contractPath(path)}: `;
   return {
     kind: "protocol",
-    message: `the response does not match the contract: ${location}${violation.message}`,
+    message: `the response does not match the contract: ${location}${message}`,
   };
 }
 
