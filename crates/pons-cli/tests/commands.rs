@@ -1624,7 +1624,7 @@ fn a_zod_contract_emits_the_validators_a_consumer_can_use() {
     fs::write(directory.path().join("api.json"), FIXTURE).unwrap();
     fs::write(
         directory.path().join("pons.toml"),
-        "[emit.ts]\nout_dir = \"generated\"\nvalidation = \"zod\"\n",
+        "[emit.ts]\nout_dir = \"generated\"\n\n[emit.ts.validation]\nbackend = \"zod\"\n",
     )
     .unwrap();
 
@@ -1664,7 +1664,7 @@ fn a_builtin_contract_emits_the_validators_the_runtime_walks() {
     fs::write(directory.path().join("api.json"), FIXTURE).unwrap();
     fs::write(
         directory.path().join("pons.toml"),
-        "[emit.ts]\nout_dir = \"generated\"\nvalidation = \"builtin\"\n",
+        "[emit.ts]\nout_dir = \"generated\"\n\n[emit.ts.validation]\nbackend = \"builtin\"\n",
     )
     .unwrap();
 
@@ -1684,6 +1684,155 @@ fn a_builtin_contract_emits_the_validators_the_runtime_walks() {
     );
     let index = fs::read_to_string(directory.path().join("generated/index.ts")).unwrap();
     assert!(index.contains("./validators.js"), "{index}");
+}
+
+#[test]
+fn a_bare_validation_word_is_refused_with_the_table_spelling() {
+    let directory = tempfile::tempdir().unwrap();
+    fs::write(directory.path().join("api.json"), FIXTURE).unwrap();
+    fs::write(
+        directory.path().join("pons.toml"),
+        "[emit.ts]\nout_dir = \"generated\"\nvalidation = \"zod\"\n",
+    )
+    .unwrap();
+
+    let output = pons()
+        .args(["emit", "--target", "ts", "api.json"])
+        .current_dir(directory.path())
+        .output()
+        .unwrap();
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(output.status.code(), Some(4), "{stderr}");
+    assert!(
+        stderr.contains("validation is a string; it is a table")
+            && stderr.contains("[emit.ts.validation]")
+            && stderr.contains("backend = \"zod\""),
+        "{stderr}"
+    );
+    assert!(!directory.path().join("generated").exists());
+}
+
+#[test]
+fn a_present_validation_table_without_a_backend_is_builtin() {
+    let directory = tempfile::tempdir().unwrap();
+    fs::write(directory.path().join("api.json"), FIXTURE).unwrap();
+    fs::write(
+        directory.path().join("pons.toml"),
+        "[emit.ts]\nout_dir = \"generated\"\n\n[emit.ts.validation]\n",
+    )
+    .unwrap();
+
+    let output = pons()
+        .args(["emit", "--target", "ts", "api.json"])
+        .current_dir(directory.path())
+        .output()
+        .unwrap();
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(output.status.success(), "{stderr}");
+    let validators = fs::read_to_string(directory.path().join("generated/validators.ts")).unwrap();
+    assert!(validators.contains("validateContract"), "{validators}");
+}
+
+#[test]
+fn the_validation_flag_beats_the_file() {
+    let directory = tempfile::tempdir().unwrap();
+    fs::write(directory.path().join("api.json"), FIXTURE).unwrap();
+    fs::write(
+        directory.path().join("pons.toml"),
+        "[emit.ts]\nout_dir = \"generated\"\n\n[emit.ts.validation]\nbackend = \"builtin\"\n",
+    )
+    .unwrap();
+
+    let output = pons()
+        .args(["emit", "--target", "ts", "api.json", "--validation", "zod"])
+        .current_dir(directory.path())
+        .output()
+        .unwrap();
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(output.status.success(), "{stderr}");
+    let validators = fs::read_to_string(directory.path().join("generated/validators.ts")).unwrap();
+    assert!(
+        validators.contains("import { z } from \"zod\";"),
+        "{validators}"
+    );
+    assert!(!validators.contains("validateContract"), "{validators}");
+}
+
+#[test]
+fn the_validation_flag_is_the_typescript_targets_own() {
+    for target in ["openapi", "python"] {
+        let directory = tempfile::tempdir().unwrap();
+        fs::write(directory.path().join("api.json"), FIXTURE).unwrap();
+        let output = pons()
+            .args([
+                "emit",
+                "--target",
+                target,
+                "api.json",
+                "--validation",
+                "zod",
+            ])
+            .current_dir(directory.path())
+            .output()
+            .unwrap();
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert_eq!(output.status.code(), Some(4), "{target}: {stderr}");
+        assert!(
+            stderr.contains(&format!(
+                "--validation is only supported by the TypeScript target, not {target}"
+            )),
+            "{target}: {stderr}"
+        );
+    }
+}
+
+#[test]
+fn the_validation_flag_refuses_a_backend_it_does_not_know_and_a_backend_without_a_package() {
+    let directory = tempfile::tempdir().unwrap();
+    fs::write(directory.path().join("api.json"), FIXTURE).unwrap();
+
+    let output = pons()
+        .args([
+            "emit",
+            "--target",
+            "ts",
+            "api.json",
+            "--validation",
+            "pydantic",
+        ])
+        .current_dir(directory.path())
+        .output()
+        .unwrap();
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(output.status.code(), Some(4), "{stderr}");
+    assert!(
+        stderr.contains("--validation expects") && stderr.contains("not \"pydantic\""),
+        "{stderr}"
+    );
+
+    fs::write(
+        directory.path().join("pons.toml"),
+        "[emit.ts]\nout_dir = \"generated\"\n\n[emit.ts.validation]\nbackend = \"zod\"\nimport_from = \"zod/v4\"\n",
+    )
+    .unwrap();
+    let output = pons()
+        .args([
+            "emit",
+            "--target",
+            "ts",
+            "api.json",
+            "--validation",
+            "builtin",
+        ])
+        .current_dir(directory.path())
+        .output()
+        .unwrap();
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(output.status.code(), Some(4), "{stderr}");
+    assert!(
+        stderr.contains("the builtin backend imports no package"),
+        "{stderr}"
+    );
 }
 
 #[test]

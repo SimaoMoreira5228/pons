@@ -32,6 +32,8 @@ const COMPILER_OPTIONS: &str = r#"{
     "strict": true,
     "exactOptionalPropertyTypes": true,
     "noUncheckedIndexedAccess": true,
+    "noUnusedLocals": true,
+    "noUnusedParameters": true,
     "skipLibCheck": true,
     "noEmit": true
   }"#;
@@ -481,7 +483,9 @@ fn a_client_that_checks_its_responses_against_zod_compiles_beside_zod() {
         let files = files_with(
             &document,
             pons_emit_ts::TsOptions {
-                validation: pons_emit_ts::Validation::Zod,
+                validation: pons_emit_ts::ValidationOptions::new(
+                    pons_emit_ts::ValidationBackend::Zod,
+                ),
                 runtime: if packaged {
                     pons_emit_ts::Runtime::Package
                 } else {

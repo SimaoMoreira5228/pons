@@ -7,7 +7,7 @@ use std::{
 
 use pons_emit_ts::{
     DateMode, EmitMode, ErrorStrategy, FieldCase, GeneratedFile, Int64, Newtypes, Runtime,
-    TsOptions, Validation, emit_with_options,
+    TsOptions, ValidationBackend, ValidationOptions, emit_with_options,
 };
 use pons_ir::Document;
 use serde_json::{Value, json};
@@ -55,7 +55,7 @@ fn zod(document: &Document, options: TsOptions) -> Vec<GeneratedFile> {
     emitted(
         document,
         TsOptions {
-            validation: Validation::Zod,
+            validation: ValidationOptions::new(ValidationBackend::Zod),
             errors: ErrorStrategy::Throw,
             ..options
         },
@@ -695,23 +695,17 @@ fn the_carrier_options_reach_the_schema_they_change() {
 }
 
 #[test]
-fn the_direction_split_reaches_the_schema_of_each_side() {
+fn the_direction_split_reaches_the_output_schema_the_validator_uses() {
     let document = kitchen_sink();
     let files = zod(&document, zod_options());
     let schemas = file(&files, "validators.ts");
     assert!(
-        schemas.contains(
-            "const ReadingSchema = z.object({\"in\": z.string(), \"secret\": z.string()}).strict();"
-        ),
-        "an input type keeps the write_only field the caller sends: {schemas}"
+        !schemas.contains("ReadingSchema") && !schemas.contains("validateReading"),
+        "an input-only type needs no response schema or validator: {schemas}"
     );
     assert!(
         schemas.contains("const WrittenSchema = z.object({\"out\": z.string(), \"server\": z.string()}).strict();"),
         "an output type keeps the read_only field the server sends: {schemas}"
-    );
-    assert!(
-        !schemas.contains("const ReadingSchema = z.object({\"in\": z.string()})"),
-        "{schemas}"
     );
     assert!(
         !schemas.contains("const WrittenSchema = z.object({\"out\": z.string()})"),
@@ -860,7 +854,7 @@ if (unexpected.failure.kind !== "unexpected_http" || unexpected.failure.status !
         let files = emitted(
             &document,
             TsOptions {
-                validation: Validation::Zod,
+                validation: ValidationOptions::new(ValidationBackend::Zod),
                 errors,
                 ..TsOptions::default()
             },
@@ -1047,7 +1041,7 @@ fn a_string_enum_with_a_payload_is_refused_before_a_schema_is_written() {
     let refusal = emit_with_options(
         &document,
         TsOptions {
-            validation: Validation::Zod,
+            validation: ValidationOptions::new(ValidationBackend::Zod),
             ..TsOptions::default()
         },
     )

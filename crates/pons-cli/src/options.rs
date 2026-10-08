@@ -3,7 +3,8 @@ use std::ffi::OsString;
 use std::path::PathBuf;
 
 use pons_emit_ts::{
-    DateMode, ErrorStrategy, FieldCase, Int64, Namespaces, Newtypes, Runtime, TsOptions, Validation,
+    DateMode, ErrorStrategy, FieldCase, Int64, Namespaces, Newtypes, Runtime, TsOptions,
+    ValidationBackend, ValidationOptions,
 };
 use pons_plugin::EmitMode;
 use serde_json::Value;
@@ -19,7 +20,17 @@ const NEWTYPES: &[&str] = &["alias", "branded"];
 const INT64: &[&str] = &["bigint", "string", "number"];
 const DATE_MODE: &[&str] = &["string", "date"];
 const RUNTIME: &[&str] = &["vendor", "package"];
-const VALIDATION: &[&str] = &["none", "builtin", "zod"];
+const VALIDATION_BACKENDS: &[&str] = &[
+    "none",
+    "builtin",
+    "zod",
+    "valibot",
+    "arktype",
+    "typebox",
+    "yup",
+    "superstruct",
+];
+const VALIDATION_KEYS: &[&str] = &["backend", "import_from"];
 
 const TS: &[(&str, &[&str])] = &[
     ("mode", MODE),
@@ -30,7 +41,7 @@ const TS: &[(&str, &[&str])] = &[
     ("int64", INT64),
     ("date_mode", DATE_MODE),
     ("runtime", RUNTIME),
-    ("validation", VALIDATION),
+    ("validation", VALIDATION_BACKENDS),
 ];
 
 const OPENAPI: &[(&str, &[&str])] = &[("mode", MODE)];
@@ -45,10 +56,25 @@ pub(crate) fn vocabulary(
     }
 }
 
+pub(crate) fn validation_backend(word: &str) -> Option<ValidationBackend> {
+    match word {
+        "none" => Some(ValidationBackend::None),
+        "builtin" => Some(ValidationBackend::Builtin),
+        "zod" => Some(ValidationBackend::Zod),
+        "valibot" => Some(ValidationBackend::Valibot),
+        "arktype" => Some(ValidationBackend::Arktype),
+        "typebox" => Some(ValidationBackend::Typebox),
+        "yup" => Some(ValidationBackend::Yup),
+        "superstruct" => Some(ValidationBackend::Superstruct),
+        _ => None,
+    }
+}
+
 pub(crate) struct EmitArgs {
     pub(crate) target: String,
     pub(crate) mode: Option<EmitMode>,
     pub(crate) errors: Option<ErrorStrategy>,
+    pub(crate) validation: Option<ValidationBackend>,
     pub(crate) positionals: Vec<OsString>,
 }
 
@@ -133,7 +159,7 @@ pub(crate) fn resolve(args: &EmitArgs, config: Option<&Config>) -> Result<Resolv
         },
     };
     let built = match args.target.as_str() {
-        "ts" => Built::Ts(ts_options(&target, errors, mode)?),
+        "ts" => Built::Ts(ts_options(&target, errors, mode, args.validation)?),
         "openapi" => Built::OpenApi,
         _ => Built::External(wire_options(&target)?),
     };
@@ -180,9 +206,12 @@ pub(crate) fn check_values(target: &Target<'_>) -> Result<(), CliError> {
     match vocabulary(&target.target) {
         Some(vocabulary) => {
             for (key, allowed) in vocabulary {
-                if *key != "mode" {
+                if *key != "mode" && *key != "validation" {
                     word(target, key, target.get(key), allowed)?;
                 }
+            }
+            if target.target == "ts" {
+                validation_options(target, None)?;
             }
         }
         None => {
@@ -200,6 +229,7 @@ fn ts_options(
     target: &Target<'_>,
     errors: Option<ErrorStrategy>,
     mode: EmitMode,
+    backend: Option<ValidationBackend>,
 ) -> Result<TsOptions, CliError> {
     let mut options = TsOptions {
         mode: match mode {
@@ -207,10 +237,11 @@ fn ts_options(
             EmitMode::Lossy => pons_emit_ts::EmitMode::Lossy,
         },
         errors: errors.unwrap_or_default(),
+        validation: validation_options(target, backend)?,
         ..TsOptions::default()
     };
     for (key, allowed) in TS {
-        if *key == "mode" || *key == "errors" {
+        if matches!(*key, "mode" | "errors" | "validation") {
             continue;
         }
         let Some(word) = word(target, key, target.get(key), allowed)? else {
@@ -230,13 +261,79 @@ fn ts_options(
             ("date_mode", _) => options.date_mode = DateMode::String,
             ("runtime", "package") => options.runtime = Runtime::Package,
             ("runtime", _) => options.runtime = Runtime::Vendor,
-            ("validation", "builtin") => options.validation = Validation::Builtin,
-            ("validation", "zod") => options.validation = Validation::Zod,
-            ("validation", "none") => options.validation = Validation::None,
             _ => {}
         }
     }
     Ok(options)
+}
+
+fn validation_options(
+    target: &Target<'_>,
+    backend_flag: Option<ValidationBackend>,
+) -> Result<ValidationOptions, CliError> {
+    let Some(value) = target.get("validation") else {
+        return Ok(ValidationOptions::new(backend_flag.unwrap_or_default()));
+    };
+    let Some(table) = value.as_table() else {
+        return Err(target.error(&format!(
+            "validation is {}; it is a table, for example [emit.ts.validation] with backend = \"zod\"",
+            config::kind(value)
+        )));
+    };
+    for key in table.keys() {
+        if !VALIDATION_KEYS.contains(&key.as_str()) {
+            return Err(target.error(&format!(
+                "validation has no key {key:?}; it is {}",
+                VALIDATION_KEYS.join(", ")
+            )));
+        }
+    }
+    let file_backend = match table.get("backend") {
+        None => ValidationBackend::Builtin,
+        Some(value) => backend_word(target, value)?,
+    };
+    let import_from = match table.get("import_from") {
+        None => None,
+        Some(value) => Some(
+            value
+                .as_str()
+                .ok_or_else(|| {
+                    target.error(&format!(
+                        "validation.import_from is {}; it is a module specifier",
+                        config::kind(value)
+                    ))
+                })?
+                .to_owned(),
+        ),
+    };
+    let backend = backend_flag.unwrap_or(file_backend);
+    if import_from.is_some() && !backend.has_package() {
+        return Err(target.error(&format!(
+            "validation.import_from is {}, but the {} backend imports no package",
+            import_from.as_deref().unwrap_or_default(),
+            backend.name()
+        )));
+    }
+    Ok(ValidationOptions {
+        backend,
+        import_from,
+    })
+}
+
+fn backend_word(target: &Target<'_>, value: &toml::Value) -> Result<ValidationBackend, CliError> {
+    let Some(word) = value.as_str() else {
+        return Err(target.error(&format!(
+            "validation.backend is {}; it is {}",
+            config::kind(value),
+            VALIDATION_BACKENDS.join(" or ")
+        )));
+    };
+    validation_backend(word).ok_or_else(|| {
+        target.error(&format!(
+            "validation.backend is {word:?}; it is {}",
+            VALIDATION_BACKENDS.join(" or ")
+        ))
+    })
 }
 
 fn wire_options(target: &Target<'_>) -> Result<BTreeMap<String, Value>, CliError> {
@@ -250,7 +347,7 @@ fn wire_options(target: &Target<'_>) -> Result<BTreeMap<String, Value>, CliError
 }
 
 fn ts_words(options: &TsOptions) -> BTreeMap<String, Value> {
-    [
+    let mut words = [
         (
             "mode",
             match options.mode {
@@ -308,18 +405,20 @@ fn ts_words(options: &TsOptions) -> BTreeMap<String, Value> {
                 Runtime::Package => "package",
             },
         ),
-        (
-            "validation",
-            match options.validation {
-                Validation::None => "none",
-                Validation::Builtin => "builtin",
-                Validation::Zod => "zod",
-            },
-        ),
     ]
     .into_iter()
     .map(|(key, word)| (key.to_owned(), Value::String(word.to_owned())))
-    .collect()
+    .collect::<BTreeMap<_, _>>();
+    let mut validation = serde_json::Map::new();
+    validation.insert(
+        "backend".into(),
+        Value::String(options.validation.backend.name().into()),
+    );
+    if let Some(specifier) = &options.validation.import_from {
+        validation.insert("import_from".into(), Value::String(specifier.clone()));
+    }
+    words.insert("validation".into(), Value::Object(validation));
+    words
 }
 
 fn out_dir_path(target: &Target<'_>, value: &toml::Value) -> Result<PathBuf, CliError> {
@@ -400,6 +499,7 @@ mod tests {
             target: target.into(),
             mode: None,
             errors: None,
+            validation: None,
             positionals: positionals.iter().map(OsString::from).collect(),
         }
     }
@@ -488,7 +588,7 @@ mod tests {
     #[test]
     fn every_typescript_option_reads_back_to_itself() {
         for (key, allowed) in TS {
-            if matches!(*key, "mode" | "errors") {
+            if matches!(*key, "mode" | "errors" | "validation") {
                 continue;
             }
             for value in *allowed {
@@ -496,7 +596,7 @@ mod tests {
                 let target = table(the_file(), "ts", &source);
                 check_values(&target)
                     .unwrap_or_else(|error| panic!("{source:?}: {}", error.message()));
-                let options = ts_options(&target, None, EmitMode::Strict).unwrap();
+                let options = ts_options(&target, None, EmitMode::Strict, None).unwrap();
                 assert_eq!(
                     ts_words(&options)[*key],
                     Value::String((*value).into()),
@@ -504,6 +604,127 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn the_validation_table_reads_back_to_itself() {
+        for (source, expected) in [
+            ("", serde_json::json!({ "backend": "none" })),
+            (
+                "[validation]\n",
+                serde_json::json!({ "backend": "builtin" }),
+            ),
+            (
+                "[validation]\nbackend = \"zod\"\n",
+                serde_json::json!({ "backend": "zod" }),
+            ),
+            (
+                "[validation]\nbackend = \"zod\"\nimport_from = \"zod/v4\"\n",
+                serde_json::json!({ "backend": "zod", "import_from": "zod/v4" }),
+            ),
+            (
+                "[validation]\nbackend = \"none\"\n",
+                serde_json::json!({ "backend": "none" }),
+            ),
+            (
+                "[validation]\nbackend = \"valibot\"\n",
+                serde_json::json!({ "backend": "valibot" }),
+            ),
+        ] {
+            let target = table(the_file(), "ts", &format!("out_dir = \"out\"\n{source}"));
+            check_values(&target).unwrap_or_else(|error| panic!("{source:?}: {}", error.message()));
+            let options = ts_options(&target, None, EmitMode::Strict, None).unwrap();
+            assert_eq!(ts_words(&options)["validation"], expected, "{source:?}");
+        }
+    }
+
+    #[test]
+    fn the_validation_table_refuses_what_it_does_not_understand() {
+        for (source, expected) in [
+            (
+                "validation = \"zod\"\n",
+                "validation is a string; it is a table",
+            ),
+            (
+                "[validation]\nbackend = \"pydantic\"\n",
+                "validation.backend is \"pydantic\"; it is none or builtin or zod",
+            ),
+            (
+                "[validation]\nformat = \"zod\"\n",
+                "validation has no key \"format\"; it is backend, import_from",
+            ),
+            (
+                "[validation]\nbackend = 4\n",
+                "validation.backend is an integer",
+            ),
+            (
+                "[validation]\nimport_from = 4\n",
+                "validation.import_from is an integer",
+            ),
+            (
+                "[validation]\nimport_from = \"zod/v4\"\n",
+                "the builtin backend imports no package",
+            ),
+            (
+                "[validation]\nbackend = \"none\"\nimport_from = \"zod\"\n",
+                "the none backend imports no package",
+            ),
+        ] {
+            let target = table(the_file(), "ts", source);
+            let error = check_values(&target).unwrap_err();
+            assert!(
+                error.message().contains(expected),
+                "{source:?}: {}",
+                error.message()
+            );
+        }
+    }
+
+    #[test]
+    fn the_validation_flag_beats_the_file_and_keeps_its_import() {
+        let target = table(
+            the_file(),
+            "ts",
+            "out_dir = \"out\"\n[validation]\nbackend = \"builtin\"\n",
+        );
+        let options = ts_options(
+            &target,
+            None,
+            EmitMode::Strict,
+            Some(ValidationBackend::Zod),
+        )
+        .unwrap();
+        assert_eq!(options.validation.backend, ValidationBackend::Zod);
+        assert_eq!(options.validation.import_from, None);
+
+        let target = table(
+            the_file(),
+            "ts",
+            "out_dir = \"out\"\n[validation]\nbackend = \"zod\"\nimport_from = \"zod/v4\"\n",
+        );
+        let options = ts_options(
+            &target,
+            None,
+            EmitMode::Strict,
+            Some(ValidationBackend::Builtin),
+        )
+        .unwrap_err();
+        assert!(
+            options
+                .message()
+                .contains("the builtin backend imports no package"),
+            "{}",
+            options.message()
+        );
+
+        let options = ts_options(
+            &target,
+            None,
+            EmitMode::Strict,
+            Some(ValidationBackend::Zod),
+        )
+        .unwrap();
+        assert_eq!(options.validation.import_from.as_deref(), Some("zod/v4"));
     }
 
     #[test]
@@ -518,6 +739,7 @@ mod tests {
                 target: "ts".into(),
                 mode,
                 errors,
+                validation: None,
                 positionals: vec![OsString::from("api.json")],
             },
             config.as_ref(),
@@ -553,6 +775,7 @@ mod tests {
                     target: "ts".into(),
                     mode: flag,
                     errors: None,
+                    validation: None,
                     positionals: vec![OsString::from("api.json")],
                 },
                 config.as_ref(),

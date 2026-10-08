@@ -2,8 +2,11 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use pons_ir::{Direction, Document, NamedRef, TypeKind, TypeRef};
 
-use super::{Capabilities, Generator as ValidationGenerator, Imports, Rendered, declaration_names};
-use crate::{EmitError, TsOptions, jsdoc, unique_names};
+use super::{
+    Capabilities, Generator as ValidationGenerator, Imports, Rendered, declaration_names,
+    validator_names,
+};
+use crate::{EmitError, TsOptions, jsdoc};
 
 pub(super) struct Generator<'a> {
     document: &'a Document,
@@ -22,7 +25,7 @@ impl<'a> Generator<'a> {
         options: &'a TsOptions,
     ) -> Self {
         let declarations = declaration_names(document, names);
-        let validator_names = validator_names(document, &declarations);
+        let validator_names = validator_names(document, &declarations, &["validateContract"]);
         let exported = validator_names.values().cloned().collect();
         Generator {
             document,
@@ -134,28 +137,6 @@ impl ValidationGenerator for Generator<'_> {
     }
 }
 
-fn validator_names(
-    document: &Document,
-    declarations: &BTreeMap<(String, Option<String>), String>,
-) -> BTreeMap<(String, Option<String>), String> {
-    let mut keys = Vec::new();
-    let mut bases = Vec::new();
-    for (key, name) in declarations {
-        let input_only = document
-            .types
-            .get(&key.0)
-            .is_some_and(|definition| definition.direction == Direction::Input);
-        if input_only {
-            continue;
-        }
-        keys.push(key.clone());
-        bases.push(format!("validate{name}"));
-    }
-    keys.into_iter()
-        .zip(unique_names(bases, &["validateContract"]))
-        .collect()
-}
-
 fn named_json(id: &str, variant: Option<&str>) -> String {
     serde_json::to_string(&TypeRef::Named(NamedRef {
         id: id.to_owned(),
@@ -175,7 +156,7 @@ mod tests {
     use pons_ir::Document;
     use serde_json::{Value, json};
 
-    use crate::{Runtime, TsOptions, Validation, emit_with_options};
+    use crate::{Runtime, TsOptions, ValidationBackend, ValidationOptions, emit_with_options};
 
     fn fixture() -> Value {
         serde_json::from_str(include_str!("../../../../fixtures/login.json")).unwrap()
@@ -192,7 +173,7 @@ mod tests {
 
     fn builtin(options: TsOptions) -> TsOptions {
         TsOptions {
-            validation: Validation::Builtin,
+            validation: ValidationOptions::new(ValidationBackend::Builtin),
             ..options
         }
     }

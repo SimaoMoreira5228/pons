@@ -94,6 +94,9 @@ impl<'a> Generator<'a> {
     pub(crate) fn render_body(&mut self) -> Result<String, EmitError> {
         let mut body = String::new();
         for (id, definition) in &self.0.document.types {
+            if definition.direction == Direction::Input {
+                continue;
+            }
             let comment = jsdoc(definition.doc.as_ref());
             match &definition.definition {
                 TypeKind::Enum { variants, .. } => {

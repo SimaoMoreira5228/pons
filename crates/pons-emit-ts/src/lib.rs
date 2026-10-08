@@ -87,14 +87,61 @@ pub enum Runtime {
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub enum Validation {
+pub enum ValidationBackend {
     #[default]
     None,
     Builtin,
     Zod,
+    Valibot,
+    Arktype,
+    Typebox,
+    Yup,
+    Superstruct,
 }
 
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+impl ValidationBackend {
+    pub fn name(self) -> &'static str {
+        match self {
+            ValidationBackend::None => "none",
+            ValidationBackend::Builtin => "builtin",
+            ValidationBackend::Zod => "zod",
+            ValidationBackend::Valibot => "valibot",
+            ValidationBackend::Arktype => "arktype",
+            ValidationBackend::Typebox => "typebox",
+            ValidationBackend::Yup => "yup",
+            ValidationBackend::Superstruct => "superstruct",
+        }
+    }
+
+    pub fn has_package(self) -> bool {
+        matches!(
+            self,
+            ValidationBackend::Zod
+                | ValidationBackend::Valibot
+                | ValidationBackend::Arktype
+                | ValidationBackend::Typebox
+                | ValidationBackend::Yup
+                | ValidationBackend::Superstruct
+        )
+    }
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ValidationOptions {
+    pub backend: ValidationBackend,
+    pub import_from: Option<String>,
+}
+
+impl ValidationOptions {
+    pub fn new(backend: ValidationBackend) -> Self {
+        ValidationOptions {
+            backend,
+            import_from: None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct TsOptions {
     pub mode: EmitMode,
     pub errors: ErrorStrategy,
@@ -104,7 +151,7 @@ pub struct TsOptions {
     pub int64: Int64,
     pub date_mode: DateMode,
     pub runtime: Runtime,
-    pub validation: Validation,
+    pub validation: ValidationOptions,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -256,7 +303,7 @@ pub fn emit_with_options(document: &Document, options: TsOptions) -> Result<Emit
             content: client::error_types(options.errors),
         },
     ];
-    let mut validation = validation::Backend::new(&document, &names, &options);
+    let mut validation = validation::Backend::new(&document, &names, &options)?;
     let client_files = client::emit(
         &document,
         &names,

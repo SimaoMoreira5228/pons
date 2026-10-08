@@ -1,8 +1,8 @@
 use std::{fs, path::Path, process::Command};
 
 use pons_emit_ts::{
-    DateMode, ErrorStrategy, GeneratedFile, Int64, Runtime, TsOptions, Validation,
-    emit_with_options,
+    DateMode, ErrorStrategy, GeneratedFile, Int64, Runtime, TsOptions, ValidationBackend,
+    ValidationOptions, emit_with_options,
 };
 use pons_ir::Document;
 use serde_json::{Value, json};
@@ -22,7 +22,7 @@ fn files(document: &Document) -> Vec<GeneratedFile> {
         document,
         TsOptions {
             runtime: Runtime::Package,
-            validation: Validation::Builtin,
+            validation: ValidationOptions::new(ValidationBackend::Builtin),
             errors: ErrorStrategy::Throw,
             ..TsOptions::default()
         },
@@ -163,7 +163,7 @@ fn a_builtin_contract_checks_the_decoded_carriers() {
         &document,
         TsOptions {
             runtime: Runtime::Package,
-            validation: Validation::Builtin,
+            validation: ValidationOptions::new(ValidationBackend::Builtin),
             errors: ErrorStrategy::Throw,
             int64: Int64::Bigint,
             date_mode: DateMode::Date,

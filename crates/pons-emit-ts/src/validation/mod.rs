@@ -3,9 +3,9 @@ mod zod;
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use pons_ir::{Document, TypeKind, TypeRef};
+use pons_ir::{Direction, Document, TypeKind, TypeRef};
 
-use crate::{EmitError, GeneratedFile, TsOptions, Validation, pascal, unique_names};
+use crate::{EmitError, GeneratedFile, TsOptions, ValidationBackend, pascal, unique_names};
 
 #[derive(Clone, Copy)]
 pub(crate) struct Capabilities {
@@ -48,15 +48,21 @@ impl<'a> Backend<'a> {
         document: &'a Document,
         names: &'a BTreeMap<String, String>,
         options: &'a TsOptions,
-    ) -> Self {
-        let generator: Option<Box<dyn Generator + 'a>> = match options.validation {
-            Validation::None => None,
-            Validation::Zod => Some(Box::new(zod::Generator::new(document, names, options))),
-            Validation::Builtin => {
+    ) -> Result<Self, EmitError> {
+        let generator: Option<Box<dyn Generator + 'a>> = match options.validation.backend {
+            ValidationBackend::None => None,
+            ValidationBackend::Zod => Some(Box::new(zod::Generator::new(document, names, options))),
+            ValidationBackend::Builtin => {
                 Some(Box::new(builtin::Generator::new(document, names, options)))
             }
+            backend => {
+                return Err(EmitError(format!(
+                    "the {} validation backend is not implemented yet",
+                    backend.name()
+                )));
+            }
         };
-        Backend { generator }
+        Ok(Backend { generator })
     }
 
     pub(crate) fn validate(&mut self, reference: &TypeRef) -> Result<Option<String>, EmitError> {
@@ -109,4 +115,27 @@ pub(crate) fn declaration_names(
         bases.push(name.clone());
     }
     keys.into_iter().zip(unique_names(bases, &[])).collect()
+}
+
+pub(crate) fn validator_names(
+    document: &Document,
+    declarations: &BTreeMap<(String, Option<String>), String>,
+    reserved: &[&str],
+) -> BTreeMap<(String, Option<String>), String> {
+    let mut keys = Vec::new();
+    let mut bases = Vec::new();
+    for (key, name) in declarations {
+        let input_only = document
+            .types
+            .get(&key.0)
+            .is_some_and(|definition| definition.direction == Direction::Input);
+        if input_only {
+            continue;
+        }
+        keys.push(key.clone());
+        bases.push(format!("validate{name}"));
+    }
+    keys.into_iter()
+        .zip(unique_names(bases, reserved))
+        .collect()
 }

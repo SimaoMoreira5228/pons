@@ -13,9 +13,9 @@ use pons_emit_ts::ErrorStrategy;
 use pons_ir::{ChangeLevel, Document, ValidationError};
 use pons_plugin::EmitMode;
 
-use options::EmitArgs;
+use options::{EmitArgs, validation_backend};
 
-const HELP: &str = "Usage: pons <command> <ir.json> [arguments]\n\nCommands:\n  check <ir.json>                              Validate an IR document\n  fmt <ir.json>                                Rewrite an IR document in canonical form\n  diff <old.json> <new.json>                   Classify changes between two IR documents\n  emit --target <name> [ir.json] [output-dir] [--strict|--lossy] [--errors <neverthrow|throw>] [--coverage <relative-file>] [--dump-request <relative-file>]\n                                                Generate files (built-in: ts, openapi)\n      --strict                                 Reject unsupported/lossy coverage; opaque is allowed on ts/openapi, and on a plugin that declares it (default)\n      --lossy                                  Emit non-exact coverage with warnings\n      --errors <neverthrow|throw>              TypeScript target only: neverthrow (default), throw\n      --coverage <relative-file>               Write emitter coverage as JSON\n      --dump-request <relative-file>           Write the emit request as JSON, and run no emitter\n\n  A document and an output directory may come from pons.toml, so \"emit --target ts\" is enough\n  there. A flag beats the file, and the file beats the default.\n\nExit codes:\n  0  success, and a diff that found nothing to report\n  1  diff only: the contract changed, but nothing in it is breaking\n  2  diff only: the new contract has a breaking change\n  3  diff only: the new contract is invalid\n  4  the arguments are wrong, and so is a pons.toml that does not parse or that names a key its\n     table does not hold and a value its option does not take\n  5  the tool could not do its job: an unreadable or malformed document, a\n     check/fmt validation failure, or an emit failure\n";
+const HELP: &str = "Usage: pons <command> <ir.json> [arguments]\n\nCommands:\n  check <ir.json>                              Validate an IR document\n  fmt <ir.json>                                Rewrite an IR document in canonical form\n  diff <old.json> <new.json>                   Classify changes between two IR documents\n  emit --target <name> [ir.json] [output-dir] [--strict|--lossy] [--errors <neverthrow|throw>] [--validation <backend>] [--coverage <relative-file>] [--dump-request <relative-file>]\n                                                Generate files (built-in: ts, openapi)\n      --strict                                 Reject unsupported/lossy coverage; opaque is allowed on ts/openapi, and on a plugin that declares it (default)\n      --lossy                                  Emit non-exact coverage with warnings\n      --errors <neverthrow|throw>              TypeScript target only: neverthrow (default), throw\n      --validation <backend>                   TypeScript target only: none, builtin, zod, valibot, arktype, typebox, yup, superstruct\n      --coverage <relative-file>               Write emitter coverage as JSON\n      --dump-request <relative-file>           Write the emit request as JSON, and run no emitter\n\n  A document and an output directory may come from pons.toml, so \"emit --target ts\" is enough\n  there. A flag beats the file, and the file beats the default.\n\nExit codes:\n  0  success, and a diff that found nothing to report\n  1  diff only: the contract changed, but nothing in it is breaking\n  2  diff only: the new contract has a breaking change\n  3  diff only: the new contract is invalid\n  4  the arguments are wrong, and so is a pons.toml that does not parse or that names a key its\n     table does not hold and a value its option does not take\n  5  the tool could not do its job: an unreadable or malformed document, a\n     check/fmt validation failure, or an emit failure\n";
 
 fn main() -> ExitCode {
     match run(env::args_os().skip(1).collect()) {
@@ -104,6 +104,7 @@ fn run(args: Vec<OsString>) -> Result<(), CliError> {
             target: target.into(),
             mode: None,
             errors: None,
+            validation: None,
             positionals: Vec::new(),
         };
         let mut coverage_path: Option<OsString> = None;
@@ -147,6 +148,24 @@ fn run(args: Vec<OsString>) -> Result<(), CliError> {
                             )));
                         }
                     });
+                }
+                "--validation" if parsed.validation.is_some() => {
+                    return Err(CliError::Usage("--validation given more than once".into()));
+                }
+                "--validation" => {
+                    if target != "ts" {
+                        return Err(CliError::Usage(format!(
+                            "--validation is only supported by the TypeScript target, not {target}"
+                        )));
+                    }
+                    index += 1;
+                    let value = value_for("--validation", args.get(index))?;
+                    parsed.validation = Some(validation_backend(value).ok_or_else(|| {
+                        CliError::Usage(format!(
+                            "--validation expects none, builtin, zod, valibot, arktype, typebox, \
+                             yup, or superstruct, not {value:?}"
+                        ))
+                    })?);
                 }
                 "--coverage" if coverage_path.is_some() => {
                     return Err(CliError::Usage("--coverage given more than once".into()));

@@ -2,7 +2,8 @@ use std::{fs, path::Path, process::Command};
 
 use pons_emit_ts::{
     DateMode, EmitMode, ErrorStrategy, FieldCase, GeneratedFile, Int64, Namespaces, Newtypes,
-    Runtime, TsOptions, Validation, emit_with_options, emit_with_strategy,
+    Runtime, TsOptions, ValidationBackend, ValidationOptions, emit_with_options,
+    emit_with_strategy,
 };
 use pons_ir::Document;
 use serde_json::{Value, json};
@@ -132,7 +133,7 @@ fn the_default_options_emit_the_bytes_the_three_parameters_did() {
                 TsOptions {
                     mode,
                     errors,
-                    ..default
+                    ..default.clone()
                 }
             )
             .unwrap(),
@@ -151,7 +152,7 @@ fn the_default_options_emit_the_bytes_the_three_parameters_did() {
             int64: Int64::Bigint,
             date_mode: DateMode::String,
             runtime: Runtime::Vendor,
-            validation: Validation::None,
+            validation: ValidationOptions::default(),
         },
         "every option has one default and the default is the output of today"
     );
@@ -631,7 +632,7 @@ fn int64_number_refuses_a_wide_integer_in_strict_mode_and_loses_it_in_lossy() {
         int64: Int64::Number,
         ..TsOptions::default()
     };
-    let refused = emit_with_options(&document, number).unwrap_err();
+    let refused = emit_with_options(&document, number.clone()).unwrap_err();
     assert_eq!(
         refused.0,
         "the TypeScript emitter reported lossy coverage in strict mode: \
@@ -696,7 +697,7 @@ fn the_zod_option_writes_the_validators_the_response_is_checked_against() {
     let zod = emitted(
         &document,
         TsOptions {
-            validation: Validation::Zod,
+            validation: ValidationOptions::new(ValidationBackend::Zod),
             ..TsOptions::default()
         },
     );
@@ -756,6 +757,72 @@ fn the_zod_option_writes_the_validators_the_response_is_checked_against() {
     );
 }
 
+#[test]
+fn the_zod_backend_imports_the_specifier_the_option_names() {
+    let document: Document = serde_json::from_value(fixture()).unwrap();
+    let files = emitted(
+        &document,
+        TsOptions {
+            validation: ValidationOptions {
+                backend: ValidationBackend::Zod,
+                import_from: Some("zod/v4".into()),
+            },
+            ..TsOptions::default()
+        },
+    );
+    assert!(
+        file(&files, "validators.ts").contains("import { z } from \"zod/v4\";"),
+        "{}",
+        file(&files, "validators.ts")
+    );
+}
+
+#[test]
+fn the_builtin_backend_ignores_import_from() {
+    let document: Document = serde_json::from_value(fixture()).unwrap();
+    let files = emitted(
+        &document,
+        TsOptions {
+            validation: ValidationOptions {
+                backend: ValidationBackend::Builtin,
+                import_from: Some("zod/v4".into()),
+            },
+            ..TsOptions::default()
+        },
+    );
+    let validators = file(&files, "validators.ts");
+    assert!(validators.contains("validateContract"), "{validators}");
+    assert!(!validators.contains("zod"), "{validators}");
+}
+
+#[test]
+fn a_backend_without_an_implementation_is_refused_by_name() {
+    let document: Document = serde_json::from_value(fixture()).unwrap();
+    for backend in [
+        ValidationBackend::Valibot,
+        ValidationBackend::Arktype,
+        ValidationBackend::Typebox,
+        ValidationBackend::Yup,
+        ValidationBackend::Superstruct,
+    ] {
+        let error = emit_with_options(
+            &document,
+            TsOptions {
+                validation: ValidationOptions::new(backend),
+                ..TsOptions::default()
+            },
+        )
+        .unwrap_err();
+        assert_eq!(
+            error.0,
+            format!(
+                "the {} validation backend is not implemented yet",
+                backend.name()
+            )
+        );
+    }
+}
+
 fn paths(files: &[GeneratedFile]) -> Vec<String> {
     let mut paths = files
         .iter()
@@ -772,7 +839,7 @@ fn runtime_package_writes_no_runtime_and_imports_the_package_instead() {
         errors: ErrorStrategy::Throw,
         ..TsOptions::default()
     };
-    let vendor = emitted(&document, vendored_options);
+    let vendor = emitted(&document, vendored_options.clone());
     let package = emitted(
         &document,
         TsOptions {

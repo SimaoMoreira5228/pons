@@ -1,11 +1,14 @@
 use std::collections::{BTreeMap, BTreeSet};
 
-use pons_ir::{Document, TypeKind, TypeRef};
+use pons_ir::{Direction, Document, TypeKind, TypeRef};
 
 mod schema;
 
-use super::{Capabilities, Generator as ValidationGenerator, Imports, Rendered, declaration_names};
-use crate::{EmitError, TsOptions, unique_names};
+use super::{
+    Capabilities, Generator as ValidationGenerator, Imports, Rendered, declaration_names,
+    validator_names,
+};
+use crate::{EmitError, TsOptions};
 
 const MISMATCH: &str = "function mismatch(schema: z.ZodType): (value: unknown) => ValidationIssue | null {\n  return (value) => {\n    const result = schema.safeParse(value);\n    if (result.success) return null;\n    const issue = result.error.issues[0];\n    if (issue === undefined) return { path: [], message: \"the value does not match the contract\" };\n    return { path: issue.path.map((step) => typeof step === \"number\" ? step : String(step)), message: issue.message };\n  };\n}\n";
 
@@ -32,7 +35,7 @@ impl<'a> Generator<'a> {
         options: &'a TsOptions,
     ) -> Self {
         let declarations = declaration_names(document, names);
-        let validators = validator_names(&declarations);
+        let validators = validator_names(document, &declarations, &[]);
         let exported = validators.values().cloned().collect();
         Generator {
             document,
@@ -106,6 +109,9 @@ impl ValidationGenerator for Generator<'_> {
         let mut body = self.schemas.render_body()?;
         body.push_str(MISMATCH);
         for (id, definition) in self.document.types.iter() {
+            if definition.direction == Direction::Input {
+                continue;
+            }
             match &definition.definition {
                 TypeKind::Enum { variants, .. } => {
                     for variant in variants {
@@ -123,12 +129,19 @@ impl ValidationGenerator for Generator<'_> {
             ));
         }
         let specifier = crate::runtime::specifier(self.options.runtime, "\"./runtime.js\"");
+        let package = self
+            .options
+            .validation
+            .import_from
+            .as_deref()
+            .unwrap_or("zod");
         Ok(Rendered {
             file: "validators.ts",
             content: format!(
-                "import {{ z }} from \"zod\";\n\
+                "import {{ z }} from {};\n\
                  import type {{ ValidationIssue, Validator }} from {specifier};\n\
-                 export type {{ ValidationIssue, Validator }} from {specifier};\n\n{body}"
+                 export type {{ ValidationIssue, Validator }} from {specifier};\n\n{body}",
+                crate::string(package)
             ),
         })
     }
@@ -148,15 +161,4 @@ impl Generator<'_> {
         ));
         Ok(())
     }
-}
-
-fn validator_names(
-    declarations: &BTreeMap<(String, Option<String>), String>,
-) -> BTreeMap<(String, Option<String>), String> {
-    let keys = declarations.keys().cloned().collect::<Vec<_>>();
-    let bases = declarations
-        .values()
-        .map(|name| format!("validate{name}"))
-        .collect::<Vec<_>>();
-    keys.into_iter().zip(unique_names(bases, &[])).collect()
 }

@@ -36,7 +36,7 @@ pub(super) fn run(
 
     let (mut files, coverage, diagnostics, warnings, logs) = match &resolved.built {
         Built::Ts(options) => {
-            let output = pons_emit_ts::emit_with_options(document, *options)
+            let output = pons_emit_ts::emit_with_options(document, options.clone())
                 .map_err(|error| CliError::Failure(error.to_string()))?;
             let files = output
                 .files
