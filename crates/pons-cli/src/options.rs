@@ -307,13 +307,18 @@ fn validation_options(
         ),
     };
     let backend = backend_flag.unwrap_or(file_backend);
-    if import_from.is_some() && !backend.has_package() {
-        return Err(target.error(&format!(
-            "validation.import_from is {}, but the {} backend imports no package",
-            import_from.as_deref().unwrap_or_default(),
-            backend.name()
-        )));
-    }
+    let import_from = if backend.has_package() {
+        import_from
+    } else {
+        if backend_flag.is_none() && import_from.is_some() {
+            return Err(target.error(&format!(
+                "validation.import_from is {}, but the {} backend imports no package",
+                import_from.as_deref().unwrap_or_default(),
+                backend.name()
+            )));
+        }
+        None
+    };
     Ok(ValidationOptions {
         backend,
         import_from,
@@ -708,13 +713,11 @@ mod tests {
             EmitMode::Strict,
             Some(ValidationBackend::Builtin),
         )
-        .unwrap_err();
-        assert!(
-            options
-                .message()
-                .contains("the builtin backend imports no package"),
-            "{}",
-            options.message()
+        .unwrap();
+        assert_eq!(options.validation.backend, ValidationBackend::Builtin);
+        assert_eq!(
+            options.validation.import_from, None,
+            "a flag that selects a backend with no package ignores the file's stale import"
         );
 
         let options = ts_options(
@@ -725,6 +728,20 @@ mod tests {
         )
         .unwrap();
         assert_eq!(options.validation.import_from.as_deref(), Some("zod/v4"));
+
+        let broken = table(
+            the_file(),
+            "ts",
+            "out_dir = \"out\"\n[validation]\nbackend = \"builtin\"\nimport_from = \"zod\"\n",
+        );
+        let error = ts_options(&broken, None, EmitMode::Strict, None).unwrap_err();
+        assert!(
+            error
+                .message()
+                .contains("the builtin backend imports no package"),
+            "{}",
+            error.message()
+        );
     }
 
     #[test]

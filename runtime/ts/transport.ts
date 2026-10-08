@@ -39,7 +39,11 @@ const MAX_TIMER_DELAY = 2_147_483_647;
 const MAX_REDIRECTS = 20;
 const REDIRECT_STATUSES = new Set([301, 302, 303, 307, 308]);
 
-class ResponseHeaderDecodeError extends Error {}
+class ResponseHeaderDecodeError extends Error {
+  constructor(message: string, readonly sourceCause?: unknown) {
+    super(message);
+  }
+}
 
 export type ConfiguredClient = ClientOptions & {
   authRecords: Record<string, CredentialValue[]>;
@@ -54,15 +58,14 @@ type RequestInputDescriptor = {
   headers: Array<{ name: string; required: boolean; schema: unknown }>;
   bodyRequired: boolean;
 };
-type HeaderDescriptor = { name: string; required: boolean; schema: unknown };
+type HeaderDescriptor = { name: string; required: boolean; schema: unknown; validate?: Validator };
 type ResponseDescriptor = {
   status: number | string;
   content: string;
   mediaType?: string;
   schema?: unknown;
   stream?: "sse" | "ndjson";
-  item?: unknown;
-  events?: Array<{ event: string; schema: unknown }>;
+  events?: Array<{ event: string; schema: unknown; validate?: Validator }>;
   headers?: HeaderDescriptor[];
   validate?: Validator;
 };
@@ -72,7 +75,7 @@ type ErrorDescriptor = {
   mediaType?: string;
   schema?: unknown;
   retryable?: boolean;
-  events?: Array<{ event: string; schema: unknown }>;
+  events?: Array<{ event: string; schema: unknown; validate?: Validator }>;
   headers?: HeaderDescriptor[];
   validate?: Validator;
 };
@@ -400,7 +403,7 @@ export async function request<T, E>(
       if (!response.body) return err({ kind: "protocol", message: "the event stream has no response body" });
       await captureCredential(client, response, provides, undefined, false, finalUrl);
       if (declaredSuccess.stream === "ndjson") {
-        return ok(withSuccessStatus(readNdjson(response.body, declaredSuccess.item, preserveWideIntegers, client.opaque), response, declaredSuccess, preserveWideIntegers, client.opaque) as T);
+        return ok(withSuccessStatus(readNdjson(response.body, declaredSuccess.schema, declaredSuccess.validate, preserveWideIntegers, client.opaque), response, declaredSuccess, preserveWideIntegers, client.opaque) as T);
       }
       return ok(withSuccessStatus(readSse(response.body, declaredSuccess.events ?? [], preserveWideIntegers, client.opaque), response, declaredSuccess, preserveWideIntegers, client.opaque) as T);
     }
@@ -466,7 +469,12 @@ export async function request<T, E>(
         ? { kind: "auth", schemes: cause.schemes }
         : { kind: "protocol", message: cause.message });
     }
-    if (cause instanceof ResponseHeaderDecodeError || cause instanceof WirePolicyError) return err({ kind: "protocol", message: cause.message });
+    if (cause instanceof ResponseHeaderDecodeError) {
+      return cause.sourceCause === undefined
+        ? err({ kind: "protocol", message: cause.message })
+        : err({ kind: "protocol", message: cause.message, cause: cause.sourceCause });
+    }
+    if (cause instanceof WirePolicyError) return err({ kind: "protocol", message: cause.message });
     if (cause instanceof CredentialSourceError) return err({ kind: "auth_source", scheme: cause.scheme, cause: cause.sourceCause });
     if (cause instanceof OpaqueCodecError) return err({ kind: "opaque_codec", codec: cause.codec, phase: cause.phase, cause: cause.sourceCause });
     if (typeof DOMException !== "undefined" && cause instanceof DOMException && cause.name === "AbortError") {
@@ -886,23 +894,21 @@ function findError<E extends { status: number | string }>(entries: E[], actual: 
 }
 
 function contractFailure(violation: unknown): ClientFailure {
+  return { kind: "protocol", message: contractMessage(violation) };
+}
+
+function contractMessage(violation: unknown): string {
   if (
     typeof violation !== "object"
     || violation === null
     || !Array.isArray((violation as { path?: unknown }).path)
     || typeof (violation as { message?: unknown }).message !== "string"
   ) {
-    return {
-      kind: "protocol",
-      message: "the response does not match the contract: the validator returned an invalid issue",
-    };
+    return "the response does not match the contract: the validator returned an invalid issue";
   }
   const { path, message } = violation as ValidationIssue;
   const location = path.length === 0 ? "" : `${contractPath(path)}: `;
-  return {
-    kind: "protocol",
-    message: `the response does not match the contract: ${location}${message}`,
-  };
+  return `the response does not match the contract: ${location}${message}`;
 }
 
 function contractPath(path: readonly (string | number)[]): string {
@@ -932,7 +938,7 @@ function matchResponse<T extends { status: number | string }, E extends { status
 function withSuccessStatus(
   value: unknown,
   response: Response,
-  schema: { status: number | string; headers?: Array<{ name: string; required: boolean; schema: unknown }> } | undefined,
+  schema: { status: number | string; headers?: HeaderDescriptor[] } | undefined,
   preserveWideIntegers: boolean,
   opaque: OpaqueContext,
 ): unknown {
@@ -945,7 +951,7 @@ function withSuccessStatus(
 function withResponseHeaders(
   value: unknown,
   response: Response,
-  schema: { headers?: Array<{ name: string; required: boolean; schema: unknown }> } | undefined,
+  schema: { headers?: HeaderDescriptor[] } | undefined,
   preserveWideIntegers: boolean,
   opaque: OpaqueContext,
 ): unknown {
@@ -955,14 +961,25 @@ function withResponseHeaders(
 
 function responseHeaders(
   response: Response,
-  headers: Array<{ name: string; required: boolean; schema: unknown }>,
+  headers: HeaderDescriptor[],
   preserveWideIntegers: boolean,
   opaque: OpaqueContext,
 ): Record<string, unknown> {
   const values: Record<string, unknown> = Object.create(null);
   for (const header of headers) {
     const headerValue = response.headers.get(header.name);
-    if (headerValue !== null) values[header.name] = decodeHeaderValue(headerValue, header.schema, preserveWideIntegers, opaque);
+    if (headerValue === null) continue;
+    const decoded = decodeHeaderValue(headerValue, header.schema, preserveWideIntegers, opaque);
+    if (header.validate) {
+      let violation: unknown;
+      try {
+        violation = header.validate(decoded);
+      } catch (cause) {
+        throw new ResponseHeaderDecodeError("the response does not match the contract: the validator threw", cause);
+      }
+      if (violation !== null) throw new ResponseHeaderDecodeError(contractMessage(violation));
+    }
+    values[header.name] = decoded;
   }
   return values;
 }

@@ -1,5 +1,6 @@
 import { err, ok, type Result } from "../errors.js";
 import { decodeWire, parseJson, type OpaqueContext } from "./codec.js";
+import type { Validator } from "./validate.js";
 import { WirePolicyError } from "./wire.js";
 
 export const MAX_STREAM_BUFFER = 8 * 1024 * 1024;
@@ -21,7 +22,7 @@ function nextLineEnd(buffer: string, done: boolean): number {
 
 export async function* readSse<EventValue>(
   body: ReadableStream<Uint8Array>,
-  events: Array<{ event: string; schema: unknown }>,
+  events: Array<{ event: string; schema: unknown; validate?: Validator }>,
   preserveWideIntegers: boolean,
   opaque: OpaqueContext,
 ): AsyncIterable<Result<EventValue, SseStreamFailure>> {
@@ -54,7 +55,9 @@ export async function* readSse<EventValue>(
               try {
                 const parsed = parseJson(data.join("\n"), preserveWideIntegers);
                 const decoded = decodeWire(parsed, descriptor.schema, preserveWideIntegers, opaque);
-                if (name === "error") yield err({ kind: "server_error", body: decoded });
+                const violation = descriptor.validate === undefined ? null : descriptor.validate(decoded);
+                if (violation !== null) yield err({ kind: "invalid_event", event: name, cause: violation });
+                else if (name === "error") yield err({ kind: "server_error", body: decoded });
                 else yield ok({ event: name, data: decoded } as EventValue);
               } catch (cause) {
                 yield err({ kind: "invalid_event", event: name, cause });
@@ -97,6 +100,7 @@ type NdjsonStreamFailure = { kind: "stream_error"; cause: unknown } | { kind: "i
 export async function* readNdjson<Item>(
   body: ReadableStream<Uint8Array>,
   schema: unknown,
+  validate: Validator | undefined,
   preserveWideIntegers: boolean,
   opaque: OpaqueContext,
 ): AsyncIterable<Result<Item, NdjsonStreamFailure>> {
@@ -118,7 +122,10 @@ export async function* readNdjson<Item>(
         if (line.trim() !== "") {
           try {
             const parsed = parseJson(line, preserveWideIntegers);
-            yield ok(decodeWire(parsed, schema, preserveWideIntegers, opaque) as Item);
+            const decoded = decodeWire(parsed, schema, preserveWideIntegers, opaque) as Item;
+            const violation = validate === undefined ? null : validate(decoded);
+            if (violation !== null) yield err({ kind: "invalid_item", cause: violation });
+            else yield ok(decoded);
           } catch (cause) {
             yield err({ kind: "invalid_item", cause });
           }

@@ -779,13 +779,25 @@ for (const [label, broken] of [
 }
 
 #[test]
-fn a_streamed_response_carries_no_check() {
+fn a_streamed_response_checks_its_items_not_its_setup_body() {
     let document: Document = serde_json::from_value(fixture()).unwrap();
     let files = zod(&document, TsOptions::default());
     let events = file(&files, "operations/events.ts");
     assert!(
-        !events.contains("mismatch") && !events.contains("validate"),
-        "a stream is read item by item as it arrives, so there is no body to check: {events}"
+        events.contains("schema: undefined, stream: \"sse\""),
+        "the setup response has no body to check: {events}"
+    );
+    assert!(
+        events.contains(
+            "events: [{ event: \"user\", schema: {\"ref\":\"User\"}, validate: validateUser }]"
+        ),
+        "each event carries its own check: {events}"
+    );
+    assert!(
+        events.contains(
+            "headers: [{ name: \"X-Trace-ID\", required: true, schema: {\"kind\":\"string\"}, validate: validateInline1 }]"
+        ),
+        "a declared stream header carries one too: {events}"
     );
     let auth = file(&files, "operations/auth.ts");
     assert!(

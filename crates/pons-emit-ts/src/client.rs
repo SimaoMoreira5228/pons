@@ -951,39 +951,47 @@ fn response_descriptors(
     validation: &mut validation::Backend,
 ) -> Result<String, EmitError> {
     let stream_descriptor = match operation.stream.as_ref().map(|stream| &stream.kind) {
-        Some(StreamKind::Sse { events }) => Some(format!(
-            "stream: \"sse\", events: [{}]",
-            events
+        Some(StreamKind::Sse { events }) => {
+            let events = events
                 .iter()
                 .map(|event| {
+                    let validate = validator(Some(&event.data), validation)?;
                     Ok(format!(
-                        "{{ event: {}, schema: {} }}",
+                        "{{ event: {}, schema: {}{validate} }}",
                         string(&event.event),
                         type_ref_json(&event.data, options)?
                     ))
                 })
                 .collect::<Result<Vec<_>, EmitError>>()?
-                .join(", ")
-        )),
-        Some(StreamKind::Ndjson { item }) => Some(format!(
-            "stream: \"ndjson\", item: {}",
-            type_ref_json(item, options)?
-        )),
+                .join(", ");
+            Some(format!("stream: \"sse\", events: [{events}]"))
+        }
+        Some(StreamKind::Ndjson { .. }) => Some("stream: \"ndjson\"".into()),
         _ => None,
     };
     operation
         .responses
         .iter()
         .map(|response| {
-            let validate = if response.content == ContentKind::Stream {
-                String::new()
-            } else {
-                validator(response.body.as_ref(), validation)?
+            let item = match (response.content, operation.stream.as_ref()) {
+                (ContentKind::Stream, Some(stream)) => match &stream.kind {
+                    StreamKind::Ndjson { item } => Some(item),
+                    _ => None,
+                },
+                _ => None,
             };
-            let schema = match &response.body {
-                Some(body) => type_ref_json(body, options),
-                None => Ok("undefined".into()),
-            }?;
+            let validate = match item {
+                Some(item) => validator(Some(item), validation)?,
+                None if response.content == ContentKind::Stream => String::new(),
+                None => validator(response.body.as_ref(), validation)?,
+            };
+            let schema = match item {
+                Some(item) => type_ref_json(item, options)?,
+                None => match &response.body {
+                    Some(body) => type_ref_json(body, options),
+                    None => Ok("undefined".into()),
+                }?,
+            };
             let stream = if response.content == ContentKind::Stream {
                 stream_descriptor
                     .as_ref()
@@ -999,14 +1007,7 @@ fn response_descriptors(
             let headers = response
                 .headers
                 .iter()
-                .map(|header| {
-                    Ok(format!(
-                        "{{ name: {}, required: {}, schema: {} }}",
-                        string(&header.wire),
-                        header.presence == Presence::Required,
-                        type_ref_json(&header.ty, options)?
-                    ))
-                })
+                .map(|header| header_descriptor(header, options, validation))
                 .collect::<Result<Vec<_>, EmitError>>()?
                 .join(", ");
             let headers = if headers.is_empty() {
@@ -1023,6 +1024,20 @@ fn response_descriptors(
         })
         .collect::<Result<Vec<_>, EmitError>>()
         .map(|descriptors| descriptors.join(", "))
+}
+
+fn header_descriptor(
+    header: &ResponseHeader,
+    options: &TsOptions,
+    validation: &mut validation::Backend,
+) -> Result<String, EmitError> {
+    let validate = validator(Some(&header.ty), validation)?;
+    Ok(format!(
+        "{{ name: {}, required: {}, schema: {}{validate} }}",
+        string(&header.wire),
+        header.presence == Presence::Required,
+        type_ref_json(&header.ty, options)?
+    ))
 }
 
 fn validator(
@@ -1061,14 +1076,7 @@ fn error_descriptor(
     let headers = error
         .headers
         .iter()
-        .map(|header| {
-            Ok(format!(
-                "{{ name: {}, required: {}, schema: {} }}",
-                string(&header.wire),
-                header.presence == Presence::Required,
-                type_ref_json(&header.ty, options)?
-            ))
-        })
+        .map(|header| header_descriptor(header, options, validation))
         .collect::<Result<Vec<_>, EmitError>>()?
         .join(", ");
     let headers = if headers.is_empty() {

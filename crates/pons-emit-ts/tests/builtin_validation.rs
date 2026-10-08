@@ -322,3 +322,77 @@ fn a_bytes_response_descriptor_carries_a_validator() {
         auth.content
     );
 }
+
+#[test]
+fn response_and_error_headers_carry_the_validator_beside_the_schema() {
+    let mut raw: Value =
+        serde_json::from_str(include_str!("../../../fixtures/login.json")).unwrap();
+    raw["operations"][0]["responses"][0]["headers"] = json!([
+        {"wire": "X-Trace-ID", "ty": {"ref": "User"}, "presence": "required"}
+    ]);
+    raw["operations"][0]["errors"][0]["headers"] = json!([
+        {"wire": "WWW-Authenticate", "ty": {"ref": "LoginError"}, "presence": "optional"}
+    ]);
+    let document: Document = serde_json::from_value(raw).unwrap();
+    let files = files(&document);
+    let auth = files
+        .iter()
+        .find(|file| file.path == "operations/auth.ts")
+        .expect("the login operation is emitted");
+    assert!(
+        auth.content.contains(
+            "import { validateLoginError, validateLoginErrorInvalid, validateUser } from \"../validators.js\";"
+        ),
+        "{}",
+        auth.content
+    );
+    assert!(
+        auth.content.contains(
+            "headers: [{ name: \"X-Trace-ID\", required: true, schema: {\"ref\":\"User\"}, validate: validateUser }]"
+        ),
+        "{}",
+        auth.content
+    );
+    assert!(
+        auth.content.contains(
+            "headers: [{ name: \"WWW-Authenticate\", required: false, schema: {\"ref\":\"LoginError\"}, validate: validateLoginError }]"
+        ),
+        "{}",
+        auth.content
+    );
+}
+
+#[test]
+fn stream_descriptors_carry_the_validator_of_each_event_and_item() {
+    let document = document();
+    let emitted = files(&document);
+    let events = emitted
+        .iter()
+        .find(|file| file.path == "operations/events.ts")
+        .expect("the watch operation is emitted");
+    assert!(
+        events.content.contains(
+            "events: [{ event: \"user\", schema: {\"ref\":\"User\"}, validate: validateUser }]"
+        ),
+        "{}",
+        events.content
+    );
+
+    let mut raw: Value =
+        serde_json::from_str(include_str!("../../../fixtures/login.json")).unwrap();
+    raw["operations"][1]["stream"] =
+        json!({"kind": "ndjson", "item": {"kind": "string", "format": "uuid"}});
+    let document: Document = serde_json::from_value(raw).unwrap();
+    let emitted = files(&document);
+    let events = emitted
+        .iter()
+        .find(|file| file.path == "operations/events.ts")
+        .expect("the watch operation is emitted");
+    assert!(
+        events.content.contains(
+            "schema: {\"format\":\"uuid\",\"kind\":\"string\"}, validate: validateInline1, stream: \"ndjson\""
+        ),
+        "{}",
+        events.content
+    );
+}

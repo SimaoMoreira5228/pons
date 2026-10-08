@@ -1,6 +1,9 @@
 use std::{collections::BTreeMap, fs, process::Command};
 
-use pons_emit_ts::{EmitMode, ErrorStrategy, GeneratedFile, emit_with_strategy};
+use pons_emit_ts::{
+    EmitMode, ErrorStrategy, GeneratedFile, TsOptions, ValidationBackend, ValidationOptions,
+    emit_with_options, emit_with_strategy,
+};
 use pons_ir::{
     ApiKeyLocation, ByteEncoding, ContentKind, CredentialLocator, Direction, EnumRepr, InlineType,
     IntegerWire, NamedRef, OpaqueWire, PathSegment, Presence, ResponseHeader, TypeKind, TypeRef,
@@ -212,6 +215,19 @@ fn untagged_bytes_document() -> pons_ir::Document {
     };
     fields[0].ty = blob_type;
     document
+}
+
+fn validated_files(document: &pons_ir::Document) -> Vec<GeneratedFile> {
+    emit_with_options(
+        document,
+        TsOptions {
+            validation: ValidationOptions::new(ValidationBackend::Builtin),
+            errors: ErrorStrategy::Throw,
+            ..TsOptions::default()
+        },
+    )
+    .unwrap()
+    .files
 }
 
 fn run_bun(files: &[GeneratedFile], harness: &str) {
@@ -5764,4 +5780,142 @@ fn an_uncompilable_pattern_is_refused_before_any_client_exists() {
         );
         assert!(refusal.0.contains(pattern), "{}", refusal.0);
     }
+}
+
+#[test]
+fn rejects_a_success_header_the_contract_refuses() {
+    let mut raw: serde_json::Value =
+        serde_json::from_str(include_str!("../../../fixtures/login.json")).unwrap();
+    raw["operations"][1]["responses"][0]["headers"][0]["ty"] =
+        serde_json::json!({"kind": "string", "format": "uuid"});
+    let document: pons_ir::Document = serde_json::from_value(raw).unwrap();
+    let files = validated_files(&document);
+    let harness = r#"
+import { createClient } from "./client.ts";
+
+const client = createClient({
+  baseUrl: "https://example.test",
+  auth: { tenant: "tenant" },
+  fetch: async () => new Response(new ReadableStream({ start(controller) { controller.close(); } }), {
+    status: 200,
+    headers: { "content-type": "text/event-stream", "X-Trace-ID": "not-a-uuid" },
+  }),
+});
+let failure: any;
+try {
+  await client.events.watch({ path: { cursor: "cursor" }, query: {}, headers: {} });
+} catch (cause) {
+  failure = cause;
+}
+if (failure?.kind !== "protocol") throw new Error(`unexpected failure ${JSON.stringify(failure)}`);
+if (!String(failure.message).startsWith("the response does not match the contract:")) {
+  throw new Error(`the contract prefix is missing: ${String(failure.message)}`);
+}
+"#;
+    run_bun(&files, harness);
+}
+
+#[test]
+fn rejects_an_error_header_the_contract_refuses() {
+    let mut raw: serde_json::Value =
+        serde_json::from_str(include_str!("../../../fixtures/login.json")).unwrap();
+    raw["operations"][0]["errors"][0]["headers"] = serde_json::json!([{
+        "wire": "X-Reason",
+        "ty": {"kind": "string", "format": "uuid"},
+        "presence": "required"
+    }]);
+    let document: pons_ir::Document = serde_json::from_value(raw).unwrap();
+    let files = validated_files(&document);
+    let harness = r#"
+import { createClient } from "./client.ts";
+
+const client = createClient({
+  baseUrl: "https://example.test",
+  fetch: async () => new Response(JSON.stringify({ code: "invalid" }), {
+    status: 400,
+    headers: { "content-type": "application/json", "X-Reason": "not-a-uuid" },
+  }),
+});
+let failure: any;
+try {
+  await client.auth.login({ body: { email: "person@example.test" } });
+} catch (cause) {
+  failure = cause;
+}
+if (failure?.kind !== "protocol") throw new Error(`unexpected failure ${JSON.stringify(failure)}`);
+if (!String(failure.message).startsWith("the response does not match the contract:")) {
+  throw new Error(`the contract prefix is missing: ${String(failure.message)}`);
+}
+"#;
+    run_bun(&files, harness);
+}
+
+#[test]
+fn rejects_an_sse_event_the_contract_refuses() {
+    let mut raw: serde_json::Value =
+        serde_json::from_str(include_str!("../../../fixtures/login.json")).unwrap();
+    raw["operations"][1]["stream"]["events"][0]["data"] =
+        serde_json::json!({"kind": "string", "format": "uuid"});
+    let document: pons_ir::Document = serde_json::from_value(raw).unwrap();
+    let files = validated_files(&document);
+    let harness = r#"
+import { createClient } from "./client.ts";
+
+const client = createClient({
+  baseUrl: "https://example.test",
+  auth: { tenant: "tenant" },
+  fetch: async () => new Response(
+    new ReadableStream({
+      start(controller) {
+        controller.enqueue(new TextEncoder().encode('event: user\ndata: "not-a-uuid"\n\n'));
+        controller.close();
+      },
+    }),
+    { status: 200, headers: { "content-type": "text/event-stream", "X-Trace-ID": "trace" } },
+  ),
+});
+const stream = await client.events.watch({ path: { cursor: "cursor" }, query: {}, headers: {} });
+let failure: any;
+for await (const item of stream.value) {
+  failure = item;
+  break;
+}
+if (!failure?.isErr()) throw new Error("the invalid event was admitted");
+if (failure.error.kind !== "invalid_event") throw new Error(`unexpected failure ${JSON.stringify(failure.error)}`);
+if (failure.error.event !== "user") throw new Error(`the wrong event was named: ${failure.error.event}`);
+"#;
+    run_bun(&files, harness);
+}
+
+#[test]
+fn rejects_an_ndjson_item_the_contract_refuses() {
+    let mut raw: serde_json::Value =
+        serde_json::from_str(include_str!("../../../fixtures/login.json")).unwrap();
+    raw["operations"][1]["stream"] = serde_json::json!({
+        "kind": "ndjson",
+        "item": {"kind": "string", "format": "uuid"}
+    });
+    let document: pons_ir::Document = serde_json::from_value(raw).unwrap();
+    let files = validated_files(&document);
+    let harness = r#"
+import { createClient } from "./client.ts";
+
+const client = createClient({
+  baseUrl: "https://example.test",
+  auth: { tenant: "tenant" },
+  fetch: async () => new Response('"not-a-uuid"\n', {
+    status: 200,
+    headers: { "content-type": "application/x-ndjson", "X-Trace-ID": "trace" },
+  }),
+});
+const stream = await client.events.watch({ path: { cursor: "cursor" }, query: {}, headers: {} });
+let failure: any;
+for await (const item of stream.value) {
+  failure = item;
+  break;
+}
+if (!failure?.isErr()) throw new Error("the invalid item was admitted");
+if (failure.error.kind !== "invalid_item") throw new Error(`unexpected failure ${JSON.stringify(failure.error)}`);
+"#;
+    run_bun(&files, harness);
 }
