@@ -491,23 +491,23 @@ fn a_client_that_checks_its_responses_against_zod_compiles_beside_zod() {
             },
         );
         assert!(
-            files.iter().any(|file| file.path == "schemas.ts"),
-            "the option writes the schemas: {:?}",
+            files.iter().any(|file| file.path == "validators.ts"),
+            "the option writes the validators: {:?}",
             files.iter().map(|file| &file.path).collect::<Vec<_>>()
         );
         type_checks_beside(
             &files,
             r#"
 import { createClient } from "./client.js";
-import { mismatch, UserSchema, LoginErrorInvalidSchema } from "./schemas.js";
+import { validateLoginErrorInvalid, validateUser } from "./validators.js";
 
 export const client = createClient({ baseUrl: "https://api.example.test" });
 export const loggedIn = await client.auth.login({ body: { email: "person@example.test" } });
 export const id = loggedIn.id;
-export const user = mismatch(UserSchema)({ id: "1" });
-export const invalid = mismatch(LoginErrorInvalidSchema)({ code: "invalid" });
-// @ts-expect-error the schema takes one argument and returns a check
-export const wrong = mismatch(UserSchema, { id: "1" });
+export const user = validateUser({ id: "1" });
+export const invalid = validateLoginErrorInvalid({ code: "invalid" });
+// @ts-expect-error a validator takes one argument and returns a verdict
+export const wrong = validateUser({ id: "1" }, { id: "1" });
 "#,
             packaged,
             true,

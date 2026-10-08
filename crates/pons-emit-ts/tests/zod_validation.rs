@@ -16,6 +16,27 @@ fn fixture() -> Value {
     serde_json::from_str(include_str!("../../../fixtures/login.json")).unwrap()
 }
 
+#[test]
+fn an_inline_body_gets_one_validator_the_operation_imports() {
+    let mut raw = fixture();
+    raw["operations"][0]["responses"][0]["body"] = json!({"kind": "string", "format": "email"});
+    let document: Document = serde_json::from_value(raw).unwrap();
+    let files = zod(&document, TsOptions::default());
+    let validators = file(&files, "validators.ts");
+    assert!(
+        validators.contains("export const validateInline1: Validator = mismatch(z.email());"),
+        "{validators}"
+    );
+    let auth = file(&files, "operations/auth.ts");
+    assert!(
+        auth.contains(
+            "import { validateInline1, validateLoginErrorInvalid } from \"../validators.js\";"
+        ),
+        "{auth}"
+    );
+    assert!(auth.contains("validate: validateInline1"), "{auth}");
+}
+
 fn emitted(document: &Document, options: TsOptions) -> Vec<GeneratedFile> {
     emit_with_options(document, options)
         .expect("the TypeScript emitter must accept the document")
@@ -289,7 +310,7 @@ fn kitchen_sink() -> Document {
 fn every_construct_the_contract_declares_reaches_a_schema() {
     let document = kitchen_sink();
     let files = zod(&document, zod_options());
-    let schemas = file(&files, "schemas.ts");
+    let validators = file(&files, "validators.ts");
     let members: BTreeMap<&str, &str> = [
         (
             "integer widths and their constraints",
@@ -348,92 +369,94 @@ fn every_construct_the_contract_declares_reaches_a_schema() {
     .collect();
     for (construct, expected) in members {
         assert!(
-            schemas.contains(expected),
-            "{construct} reaches a schema: {schemas}"
+            validators.contains(expected),
+            "{construct} reaches a schema: {validators}"
         );
     }
     for (construct, expected) in [
         (
             "a string enum",
-            "export const ChoicesOneSchema = z.literal(\"one\");",
+            "const ChoicesOneSchema = z.literal(\"one\");",
         ),
         (
             "an external enum",
-            "export const SpreadsBareSchema = z.union([z.literal(\"bare\"), oneKey(\"bare\", z.unknown())]);",
+            "const SpreadsBareSchema = z.union([z.literal(\"bare\"), oneKey(\"bare\", z.unknown())]);",
         ),
         (
             "an external payload",
-            "export const SpreadsHeldSchema = oneKey(\"held\", integer(z.int(), 32, false));",
+            "const SpreadsHeldSchema = oneKey(\"held\", integer(z.int(), 32, false));",
         ),
         (
             "an internal enum",
-            "export const MarkedSomeSchema = z.object({\"kind\": z.literal(\"some\"), \"at\": integer(z.int(), 32, false)});",
+            "const MarkedSomeSchema = z.object({\"kind\": z.literal(\"some\"), \"at\": integer(z.int(), 32, false)});",
         ),
         (
             "an adjacent enum",
-            "export const BesideSomeSchema = z.object({\"kind\": z.literal(\"some\"), \"payload\": z.boolean()});",
+            "const BesideSomeSchema = z.object({\"kind\": z.literal(\"some\"), \"payload\": z.boolean()});",
         ),
         (
             "an untagged enum",
-            "export const ShapesSchema = z.union([ShapesCountSchema, ShapesFullSchema, ShapesNamedSchema, ShapesNothingSchema]);",
+            "const ShapesSchema = z.union([ShapesCountSchema, ShapesFullSchema, ShapesNamedSchema, ShapesNothingSchema]);",
         ),
-        (
-            "an untagged unit",
-            "export const ShapesNothingSchema = z.null();",
-        ),
+        ("an untagged unit", "const ShapesNothingSchema = z.null();"),
         (
             "a newtype chain",
-            "export const AliasSchema = z.lazy(() => DeeperSchema);",
+            "const AliasSchema = z.lazy(() => DeeperSchema);",
         ),
         (
             "a flattened member",
-            "export const WholeSchema = z.object({\"a\": z.string(), \"b\": z.boolean()}).strict();",
+            "const WholeSchema = z.object({\"a\": z.string(), \"b\": z.boolean()}).strict();",
         ),
         (
             "an opaque flattened member",
-            "export const SealedOpaqueSchema = z.unknown();",
+            "const SealedOpaqueSchema = z.unknown();",
         ),
         (
             "rejected openness",
-            "export const SealedSchema = z.object({\"a\": z.string()}).strict();",
+            "const SealedSchema = z.object({\"a\": z.string()}).strict();",
         ),
         (
             "typed openness",
-            "export const TypedSchema = z.object({\"a\": integer(z.int(), 32, false)}).catchall(integer(z.int(), 32, false));",
+            "const TypedSchema = z.object({\"a\": integer(z.int(), 32, false)}).catchall(integer(z.int(), 32, false));",
         ),
         (
             "opaque openness",
-            "export const LooseSchema = z.object({\"a\": z.string()});",
+            "const LooseSchema = z.object({\"a\": z.string()});",
         ),
         ("a recursive type", "z.lazy(() => TreeSchema)"),
         (
             "a narrowed variant",
-            "validate: mismatch(ShapesCountSchema)",
+            "export const validateShapesCount: Validator = mismatch(ShapesCountSchema);",
         ),
     ] {
         assert!(
-            schemas.contains(expected) || file(&files, "operations/kitchen.ts").contains(expected),
-            "{construct} reaches a schema: {schemas}"
+            validators.contains(expected)
+                || file(&files, "operations/kitchen.ts").contains(expected),
+            "{construct} reaches a schema: {validators}"
         );
     }
     let operations = file(&files, "operations/kitchen.ts");
     assert!(
-        operations.contains("import { mismatch,")
-            && operations.contains("} from \"../schemas.js\";"),
+        operations
+            .contains("import { validateScalars, validateShapesCount } from \"../validators.js\";"),
         "the operation imports what it calls: {operations}"
     );
     assert!(
-        operations.contains("validate: mismatch(ScalarsSchema)"),
+        operations.contains("validate: validateScalars"),
         "a declared response carries the check: {operations}"
     );
     assert!(
-        operations.contains("validate: mismatch(ShapesCountSchema)"),
+        operations.contains("validate: validateShapesCount"),
         "a narrowed declared error carries the narrowed check: {operations}"
     );
     for name in ["ScalarsSchema", "ShapesCountSchema"] {
         assert!(
-            schemas.contains(&format!("export const {name} =")),
-            "{name} is a schema the client imports: {schemas}"
+            validators.contains(&format!("const {name} =")),
+            "{name} is the private schema its validator wraps: {validators}"
+        );
+        assert!(
+            !validators.contains(&format!("export const {name} =")),
+            "{name} is not part of the public surface: {validators}"
         );
     }
 }
@@ -444,73 +467,73 @@ fn a_schema_admits_what_the_wire_validator_admits_and_refuses_the_rest() {
     let files = zod(&document, zod_options());
     let harness = r#"
 import {
-  AliasSchema, BesideSchema, ChoicesSchema, GatheredSchema, LooseSchema, MarkedSchema, ScalarsSchema,
-  SealedSchema, ShapesSchema, SpreadsSchema, TreeSchema, TypedSchema, WholeSchema, mismatch,
-} from "./schemas.ts";
+  validateAlias, validateBeside, validateChoices, validateGathered, validateLoose, validateMarked, validateScalars,
+  validateSealed, validateShapes, validateSpreads, validateTree, validateTyped, validateWhole,
+} from "./validators.ts";
 
-const admits = (label: string, check: (value: unknown) => object | null, value: unknown) => {
+const admits = (label: string, check: (value: unknown) => unknown, value: unknown) => {
   const found = check(value);
   if (found !== null) throw new Error(`${label} was refused: ${JSON.stringify(found)}`);
 };
-const refuses = (label: string, check: (value: unknown) => object | null, value: unknown) => {
+const refuses = (label: string, check: (value: unknown) => unknown, value: unknown) => {
   if (check(value) === null) throw new Error(`${label} was admitted`);
 };
 
-admits("a string enum", mismatch(ChoicesSchema), "one");
-refuses("an unknown string enum", mismatch(ChoicesSchema), "three");
-refuses("a string enum over a number", mismatch(ChoicesSchema), 1);
+admits("a string enum", validateChoices, "one");
+refuses("an unknown string enum", validateChoices, "three");
+refuses("a string enum over a number", validateChoices, 1);
 
-admits("a bare external variant", mismatch(SpreadsSchema), "bare");
-admits("a bare external variant as an object", mismatch(SpreadsSchema), { bare: null });
-admits("a bare external variant carrying anything", mismatch(SpreadsSchema), { bare: 7 });
-admits("an external payload", mismatch(SpreadsSchema), { held: 3 });
-refuses("two external variants", mismatch(SpreadsSchema), { bare: null, held: 3 });
-refuses("an unknown external variant", mismatch(SpreadsSchema), { ghost: null });
-refuses("an external payload of the wrong type", mismatch(SpreadsSchema), { held: "3" });
+admits("a bare external variant", validateSpreads, "bare");
+admits("a bare external variant as an object", validateSpreads, { bare: null });
+admits("a bare external variant carrying anything", validateSpreads, { bare: 7 });
+admits("an external payload", validateSpreads, { held: 3 });
+refuses("two external variants", validateSpreads, { bare: null, held: 3 });
+refuses("an unknown external variant", validateSpreads, { ghost: null });
+refuses("an external payload of the wrong type", validateSpreads, { held: "3" });
 
-admits("a unit internal variant", mismatch(MarkedSchema), { kind: "none" });
-admits("an internal unit variant carrying an extra key", mismatch(MarkedSchema), { kind: "none", at: 1 });
-admits("an internal payload", mismatch(MarkedSchema), { kind: "some", at: 1 });
-refuses("an internal payload without its field", mismatch(MarkedSchema), { kind: "some" });
-refuses("an unknown internal variant", mismatch(MarkedSchema), { kind: "ghost" });
-refuses("an internal variant without its tag", mismatch(MarkedSchema), { at: 1 });
-refuses("an internal payload out of range", mismatch(MarkedSchema), { kind: "some", at: 2 ** 33 });
+admits("a unit internal variant", validateMarked, { kind: "none" });
+admits("an internal unit variant carrying an extra key", validateMarked, { kind: "none", at: 1 });
+admits("an internal payload", validateMarked, { kind: "some", at: 1 });
+refuses("an internal payload without its field", validateMarked, { kind: "some" });
+refuses("an unknown internal variant", validateMarked, { kind: "ghost" });
+refuses("an internal variant without its tag", validateMarked, { at: 1 });
+refuses("an internal payload out of range", validateMarked, { kind: "some", at: 2 ** 33 });
 
-admits("a unit adjacent variant", mismatch(BesideSchema), { kind: "none" });
-admits("an adjacent unit variant carrying an extra key", mismatch(BesideSchema), { kind: "none", payload: 1 });
-admits("an adjacent payload", mismatch(BesideSchema), { kind: "some", payload: true });
-refuses("an adjacent payload that is missing", mismatch(BesideSchema), { kind: "some" });
-refuses("an adjacent payload of the wrong type", mismatch(BesideSchema), { kind: "some", payload: 1 });
-refuses("an unknown adjacent variant", mismatch(BesideSchema), { kind: "ghost", payload: true });
+admits("a unit adjacent variant", validateBeside, { kind: "none" });
+admits("an adjacent unit variant carrying an extra key", validateBeside, { kind: "none", payload: 1 });
+admits("an adjacent payload", validateBeside, { kind: "some", payload: true });
+refuses("an adjacent payload that is missing", validateBeside, { kind: "some" });
+refuses("an adjacent payload of the wrong type", validateBeside, { kind: "some", payload: 1 });
+refuses("an unknown adjacent variant", validateBeside, { kind: "ghost", payload: true });
 
-admits("an untagged unit", mismatch(ShapesSchema), null);
-admits("an untagged newtype", mismatch(ShapesSchema), 3);
-admits("an untagged struct", mismatch(ShapesSchema), { name: "a" });
-admits("a value two untagged variants fit", mismatch(ShapesSchema), { name: "a", extra: "b" });
-refuses("a value no untagged variant fits", mismatch(ShapesSchema), "a");
-refuses("an untagged struct without its field", mismatch(ShapesSchema), {});
+admits("an untagged unit", validateShapes, null);
+admits("an untagged newtype", validateShapes, 3);
+admits("an untagged struct", validateShapes, { name: "a" });
+admits("a value two untagged variants fit", validateShapes, { name: "a", extra: "b" });
+refuses("a value no untagged variant fits", validateShapes, "a");
+refuses("an untagged struct without its field", validateShapes, {});
 
-admits("a newtype chain", mismatch(AliasSchema), 3);
-refuses("a newtype chain out of range", mismatch(AliasSchema), 2 ** 33);
-refuses("a newtype chain over the wrong type", mismatch(AliasSchema), "3");
+admits("a newtype chain", validateAlias, 3);
+refuses("a newtype chain out of range", validateAlias, 2 ** 33);
+refuses("a newtype chain over the wrong type", validateAlias, "3");
 
-admits("a recursive value", mismatch(TreeSchema), { value: 1, next: { value: 2, next: null } });
-refuses("a recursive value missing a field", mismatch(TreeSchema), { value: 1, next: {} });
-refuses("a recursive value with an unknown key", mismatch(TreeSchema), { value: 1, next: null, other: 1 });
+admits("a recursive value", validateTree, { value: 1, next: { value: 2, next: null } });
+refuses("a recursive value missing a field", validateTree, { value: 1, next: {} });
+refuses("a recursive value with an unknown key", validateTree, { value: 1, next: null, other: 1 });
 
-admits("a flattened member", mismatch(WholeSchema), { a: "x", b: true });
-refuses("a flattened member that is missing", mismatch(WholeSchema), { a: "x" });
-refuses("a flattened member of the wrong type", mismatch(WholeSchema), { a: "x", b: 1 });
+admits("a flattened member", validateWhole, { a: "x", b: true });
+refuses("a flattened member that is missing", validateWhole, { a: "x" });
+refuses("a flattened member of the wrong type", validateWhole, { a: "x", b: 1 });
 
-admits("a read_only member of a flattened output type", mismatch(GatheredSchema), { own: "x", id: "y" });
-refuses("a flattened output member that is missing", mismatch(GatheredSchema), { own: "x" });
+admits("a read_only member of a flattened output type", validateGathered, { own: "x", id: "y" });
+refuses("a flattened output member that is missing", validateGathered, { own: "x" });
 
-admits("rejected openness", mismatch(SealedSchema), { a: "x" });
-refuses("an unknown property", mismatch(SealedSchema), { a: "x", b: 1 });
-admits("opaque openness", mismatch(LooseSchema), { a: "x", b: { anything: true } });
-admits("typed openness", mismatch(TypedSchema), { a: 1, b: 2 });
-refuses("a preserved property of the wrong type", mismatch(TypedSchema), { a: 1, b: "2" });
-refuses("a preserved property the field does not allow", mismatch(TypedSchema), { a: "1" });
+admits("rejected openness", validateSealed, { a: "x" });
+refuses("an unknown property", validateSealed, { a: "x", b: 1 });
+admits("opaque openness", validateLoose, { a: "x", b: { anything: true } });
+admits("typed openness", validateTyped, { a: 1, b: 2 });
+refuses("a preserved property of the wrong type", validateTyped, { a: 1, b: "2" });
+refuses("a preserved property the field does not allow", validateTyped, { a: "1" });
 
 const scalars = {
   blob: new Uint8Array([65]), clock: "12:00:00Z", day: "2024-02-29", double: 1.5,
@@ -519,7 +542,7 @@ const scalars = {
   sized: "abc", small: 5, span: "P1D", table: { a: 1 }, text: "42", uuid: "6ba7b810-9dad-11d1-80b4-00c04fd430c8",
   v4: "1.2.3.4", v6: "::1", whatever: 1, who: "a@b.test", wide: 5,
 };
-admits("every scalar", mismatch(ScalarsSchema), scalars);
+admits("every scalar", validateScalars, scalars);
 const changed = (change: Record<string, unknown>) => ({ ...scalars, ...change });
 for (const [label, change] of [
   ["an integer below its minimum", { small: -10 }],
@@ -554,11 +577,11 @@ for (const [label, change] of [
   ["a required opaque that is absent", { secret: undefined }],
   ["an unknown property", { ghost: 1 }],
 ] as Array<[string, Record<string, unknown>]>) {
-  refuses(label, mismatch(ScalarsSchema), changed(change));
+  refuses(label, validateScalars, changed(change));
 }
 const sized = (value: string) => changed({ sized: value });
-admits("a string of two astral code points", mismatch(ScalarsSchema), sized("😀😀"));
-refuses("a string of one astral code point", mismatch(ScalarsSchema), sized("😀"));
+admits("a string of two astral code points", validateScalars, sized("😀😀"));
+refuses("a string of one astral code point", validateScalars, sized("😀"));
 "#;
     run_bun(&files, harness);
 }
@@ -583,7 +606,7 @@ fn the_carrier_options_reach_the_schema_they_change() {
         "errors": []
     }]);
     let document: Document = serde_json::from_value(raw).unwrap();
-    let schemas = |options: TsOptions| file(&zod(&document, options), "schemas.ts").to_owned();
+    let schemas = |options: TsOptions| file(&zod(&document, options), "validators.ts").to_owned();
     let one_sided = {
         let mut raw = fixture();
         raw["types"]["Wide"] = json!({
@@ -596,7 +619,7 @@ fn the_carrier_options_reach_the_schema_they_change() {
         });
         serde_json::from_value::<Document>(raw).unwrap()
     };
-    let partial = file(&zod(&one_sided, TsOptions::default()), "schemas.ts").to_owned();
+    let partial = file(&zod(&one_sided, TsOptions::default()), "validators.ts").to_owned();
     for (construct, expected) in [
         (
             "a maximum on its own",
@@ -675,25 +698,29 @@ fn the_carrier_options_reach_the_schema_they_change() {
 fn the_direction_split_reaches_the_schema_of_each_side() {
     let document = kitchen_sink();
     let files = zod(&document, zod_options());
-    let schemas = file(&files, "schemas.ts");
+    let schemas = file(&files, "validators.ts");
     assert!(
-        schemas.contains("export const ReadingSchema = z.object({\"in\": z.string(), \"secret\": z.string()}).strict();"),
+        schemas.contains(
+            "const ReadingSchema = z.object({\"in\": z.string(), \"secret\": z.string()}).strict();"
+        ),
         "an input type keeps the write_only field the caller sends: {schemas}"
     );
     assert!(
-        schemas.contains("export const WrittenSchema = z.object({\"out\": z.string(), \"server\": z.string()}).strict();"),
+        schemas.contains("const WrittenSchema = z.object({\"out\": z.string(), \"server\": z.string()}).strict();"),
         "an output type keeps the read_only field the server sends: {schemas}"
     );
     assert!(
-        !schemas.contains("export const ReadingSchema = z.object({\"in\": z.string()})"),
+        !schemas.contains("const ReadingSchema = z.object({\"in\": z.string()})"),
         "{schemas}"
     );
     assert!(
-        !schemas.contains("export const WrittenSchema = z.object({\"out\": z.string()})"),
+        !schemas.contains("const WrittenSchema = z.object({\"out\": z.string()})"),
         "{schemas}"
     );
     assert!(
-        schemas.contains("export const GatheredSchema = z.object({\"own\": z.string(), \"id\": z.string()}).strict();"),
+        schemas.contains(
+            "const GatheredSchema = z.object({\"own\": z.string(), \"id\": z.string()}).strict();"
+        ),
         "a member flattened from an output type answers to that type's direction: {schemas}"
     );
 }
@@ -709,7 +736,7 @@ fn the_four_byte_encodings_reach_one_decoded_schema_and_keep_their_spelling() {
     ]);
     let document: Document = serde_json::from_value(raw).unwrap();
     let files = zod(&document, TsOptions::default());
-    let schemas = file(&files, "schemas.ts");
+    let schemas = file(&files, "validators.ts");
     for encoding in ["array", "base64", "base64url", "hex"] {
         assert!(
             schemas.contains(&format!("\"{encoding}\": z.instanceof(Uint8Array)")),
@@ -768,7 +795,7 @@ fn a_streamed_response_carries_no_check() {
     );
     let auth = file(&files, "operations/auth.ts");
     assert!(
-        auth.contains("validate: mismatch(UserSchema)"),
+        auth.contains("validate: validateUser"),
         "the operation beside it does carry one: {auth}"
     );
 }
@@ -961,16 +988,16 @@ fn an_untagged_enum_takes_the_first_variant_that_fits() {
             ..TsOptions::default()
         },
     );
-    let schemas = file(&files, "schemas.ts");
+    let schemas = file(&files, "validators.ts");
     assert!(
-        schemas.contains("export const ShapesSchema = z.union([ShapesCountSchema, ShapesFullSchema, ShapesNamedSchema, ShapesNothingSchema]);"),
+        schemas.contains("const ShapesSchema = z.union([ShapesCountSchema, ShapesFullSchema, ShapesNamedSchema, ShapesNothingSchema]);"),
         "the union keeps the order the canonical document declares: {schemas}"
     );
     let harness = r#"
 import { createClient } from "./client.ts";
-import { mismatch, ShapesCountSchema, ShapesSchema } from "./schemas.ts";
+import { validateShapes, validateShapesCount } from "./validators.ts";
 
-const check = mismatch(ShapesSchema);
+const check = validateShapes;
 const admits = (label: string, value: unknown) => {
   const found = check(value);
   if (found !== null) throw new Error(`${label} was refused: ${JSON.stringify(found)}`);
@@ -985,7 +1012,7 @@ admits("a unit", null);
 refuses("a struct without its field", {});
 refuses("a value no variant fits", "a");
 refuses("a count out of range", 2 ** 33);
-if (mismatch(ShapesCountSchema)(2 ** 33) === null) throw new Error("the narrowed schema bounds the count");
+if (validateShapesCount(2 ** 33) === null) throw new Error("the narrowed validator bounds the count");
 
 const client = createClient({
   baseUrl: "http://example.test",

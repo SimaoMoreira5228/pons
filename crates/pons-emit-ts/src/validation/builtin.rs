@@ -1,9 +1,9 @@
 use std::collections::{BTreeMap, BTreeSet};
 
-use pons_ir::{Document, NamedRef, TypeKind, TypeRef};
+use pons_ir::{Direction, Document, NamedRef, TypeKind, TypeRef};
 
-use super::{Capabilities, Generator as ValidationGenerator, Imports, Rendered};
-use crate::{EmitError, TsOptions, jsdoc, schemas::declaration_names, unique_names};
+use super::{Capabilities, Generator as ValidationGenerator, Imports, Rendered, declaration_names};
+use crate::{EmitError, TsOptions, jsdoc, unique_names};
 
 pub(super) struct Generator<'a> {
     document: &'a Document,
@@ -22,7 +22,7 @@ impl<'a> Generator<'a> {
         options: &'a TsOptions,
     ) -> Self {
         let declarations = declaration_names(document, names);
-        let validator_names = validator_names(&declarations);
+        let validator_names = validator_names(document, &declarations);
         let exported = validator_names.values().cloned().collect();
         Generator {
             document,
@@ -80,7 +80,6 @@ impl ValidationGenerator for Generator<'_> {
 
     fn take_imports(&mut self) -> Imports {
         Imports {
-            prefix: None,
             names: std::mem::take(&mut self.imports),
         }
     }
@@ -88,6 +87,9 @@ impl ValidationGenerator for Generator<'_> {
     fn render(&mut self) -> Result<Rendered, EmitError> {
         let mut body = String::new();
         for (id, definition) in &self.document.types {
+            if definition.direction == Direction::Input {
+                continue;
+            }
             match &definition.definition {
                 TypeKind::Enum { variants, .. } => {
                     for variant in variants {
@@ -119,9 +121,7 @@ impl ValidationGenerator for Generator<'_> {
             }
         }
         for (reference, name) in &self.inlines {
-            body.push_str(&format!(
-                "export const {name}: Validator = (value) => validateContract(value, {reference});\n"
-            ));
+            body.push_str(&binding(name, reference));
         }
         let specifier = crate::runtime::specifier(self.options.runtime, "\"./runtime.js\"");
         Ok(Rendered {
@@ -135,13 +135,22 @@ impl ValidationGenerator for Generator<'_> {
 }
 
 fn validator_names(
+    document: &Document,
     declarations: &BTreeMap<(String, Option<String>), String>,
 ) -> BTreeMap<(String, Option<String>), String> {
-    let keys = declarations.keys().cloned().collect::<Vec<_>>();
-    let bases = declarations
-        .values()
-        .map(|name| format!("validate{name}"))
-        .collect::<Vec<_>>();
+    let mut keys = Vec::new();
+    let mut bases = Vec::new();
+    for (key, name) in declarations {
+        let input_only = document
+            .types
+            .get(&key.0)
+            .is_some_and(|definition| definition.direction == Direction::Input);
+        if input_only {
+            continue;
+        }
+        keys.push(key.clone());
+        bases.push(format!("validate{name}"));
+    }
     keys.into_iter()
         .zip(unique_names(bases, &["validateContract"]))
         .collect()
@@ -210,7 +219,6 @@ mod tests {
                 "{expected} is missing: {validators}"
             );
         }
-        assert!(!files.contains_key("schemas.ts"));
         assert!(
             files["index.ts"].contains("export * from \"./validators.js\";"),
             "{}",

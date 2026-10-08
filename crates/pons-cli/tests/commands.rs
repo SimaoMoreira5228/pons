@@ -1619,7 +1619,7 @@ fn the_typescript_options_reach_the_built_in_target() {
 }
 
 #[test]
-fn a_zod_contract_emits_the_schemas_a_consumer_can_use() {
+fn a_zod_contract_emits_the_validators_a_consumer_can_use() {
     let directory = tempfile::tempdir().unwrap();
     fs::write(directory.path().join("api.json"), FIXTURE).unwrap();
     fs::write(
@@ -1636,10 +1636,22 @@ fn a_zod_contract_emits_the_schemas_a_consumer_can_use() {
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(output.status.success(), "{stderr}");
 
-    let schemas = fs::read_to_string(directory.path().join("generated/schemas.ts")).unwrap();
-    assert!(schemas.contains("z."), "{schemas}");
+    let validators = fs::read_to_string(directory.path().join("generated/validators.ts")).unwrap();
+    assert!(
+        validators.contains("import { z } from \"zod\";"),
+        "{validators}"
+    );
+    assert!(validators.contains("function mismatch"), "{validators}");
+    assert!(
+        validators.contains("export const validateUser"),
+        "{validators}"
+    );
+    assert!(
+        !directory.path().join("generated/schemas.ts").exists(),
+        "the zod backend writes its validators in one module"
+    );
     let index = fs::read_to_string(directory.path().join("generated/index.ts")).unwrap();
-    assert!(index.contains("./schemas.js"), "{index}");
+    assert!(index.contains("./validators.js"), "{index}");
     assert!(
         directory.path().join("generated/types.ts").exists(),
         "the option adds a file, it does not replace the contract"
@@ -1669,10 +1681,6 @@ fn a_builtin_contract_emits_the_validators_the_runtime_walks() {
     assert!(
         validators.contains("export const validateUser"),
         "{validators}"
-    );
-    assert!(
-        !directory.path().join("generated/schemas.ts").exists(),
-        "the builtin backend writes no library schema"
     );
     let index = fs::read_to_string(directory.path().join("generated/index.ts")).unwrap();
     assert!(index.contains("./validators.js"), "{index}");

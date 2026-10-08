@@ -187,8 +187,12 @@ fn the_default_options_leave_the_vendored_runtime_the_bytes_it_was() {
         "the default options add nothing to the type the caller reads:\n{types}"
     );
     assert!(
-        !types.contains("\"carrier\""),
-        "no schema in the default metadata carries an option's spelling:\n{types}"
+        types.contains("\\\"carrier\\\":\\\"string\\\""),
+        "the default metadata names the carrier the wire already dictates:\n{types}"
+    );
+    assert!(
+        !types.contains("\\\"carrier\\\":\\\"date\\\""),
+        "the default date mode leaves the wire string in place:\n{types}"
     );
 }
 
@@ -687,7 +691,7 @@ if (sent !== '{"count":9007199254740992}') {
 }
 
 #[test]
-fn the_zod_option_writes_the_schemas_the_response_is_checked_against() {
+fn the_zod_option_writes_the_validators_the_response_is_checked_against() {
     let document: Document = serde_json::from_value(fixture()).unwrap();
     let zod = emitted(
         &document,
@@ -696,36 +700,45 @@ fn the_zod_option_writes_the_schemas_the_response_is_checked_against() {
             ..TsOptions::default()
         },
     );
-    let schemas = file(&zod, "schemas.ts");
-    assert!(schemas.contains("import { z } from \"zod\";"), "{schemas}");
+    let validators = file(&zod, "validators.ts");
     assert!(
-        schemas.contains("export const UserSchema"),
-        "a named type carries a schema: {schemas}"
+        validators.contains("import { z } from \"zod\";"),
+        "{validators}"
     );
     assert!(
-        schemas.contains("export function mismatch(schema: z.ZodType)"),
-        "the check the client calls is exported beside the schemas: {schemas}"
+        validators.contains("const UserSchema"),
+        "a named type carries a private schema: {validators}"
+    );
+    assert!(
+        validators.contains("function mismatch(schema: z.ZodType)"),
+        "the check the validators call is private beside them: {validators}"
+    );
+    assert!(
+        validators.contains("export const validateUser: Validator = mismatch(UserSchema);"),
+        "a named type is a validator the client imports: {validators}"
     );
     let operations = file(&zod, "operations/auth.ts");
     assert!(
-        operations.contains("import { mismatch,"),
+        operations.contains(
+            "import { validateLoginErrorInvalid, validateUser } from \"../validators.js\";"
+        ),
         "the operation file imports what it calls: {operations}"
     );
     assert!(
-        operations.contains("validate: mismatch(UserSchema)"),
+        operations.contains("validate: validateUser"),
         "a declared response carries the check: {operations}"
     );
 
     assert!(
-        file(&zod, "index.ts").contains("export * from \"./schemas.js\";"),
-        "the entry point reaches the schemas it checked against: {}",
+        file(&zod, "index.ts").contains("export * from \"./validators.js\";"),
+        "the entry point reaches the validators it checked against: {}",
         file(&zod, "index.ts")
     );
 
     let none = emitted(&document, TsOptions::default());
-    assert!(!paths(&none).contains(&"schemas.ts".to_owned()));
+    assert!(!paths(&none).contains(&"validators.ts".to_owned()));
     assert!(
-        !file(&none, "operations/auth.ts").contains("mismatch"),
+        !file(&none, "operations/auth.ts").contains("validateUser"),
         "the default writes the bytes it wrote before the option did anything"
     );
     assert_eq!(
@@ -737,9 +750,9 @@ fn the_zod_option_writes_the_schemas_the_response_is_checked_against() {
         paths(&none),
         paths(&zod)
             .into_iter()
-            .filter(|path| path != "schemas.ts")
+            .filter(|path| path != "validators.ts")
             .collect::<Vec<_>>(),
-        "the schema file is the only file the option adds"
+        "the validator file is the only file the option adds"
     );
 }
 

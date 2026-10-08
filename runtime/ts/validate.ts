@@ -73,7 +73,18 @@ function issue(path: readonly (string | number)[], message: string): ValidationI
 function validateInteger(value: any, schema: any, path: readonly (string | number)[]): ValidationIssue | null {
   const canonical = schema.signed ? CANONICAL_SIGNED_INTEGER : CANONICAL_INTEGER;
   let integer: bigint;
-  if (schema.wire === "string" || schema.carrier === "string") {
+  if (schema.carrier === "string") {
+    if (typeof value !== "string" || !canonical.test(value)) return issue(path, "expected integer string");
+    integer = BigInt(value);
+  } else if (schema.carrier === "bigint") {
+    if (typeof value !== "bigint") return issue(path, "expected an exact integer");
+    integer = value;
+  } else if (schema.carrier === "number") {
+    if (typeof value !== "number" || !Number.isInteger(value)) {
+      return issue(path, "expected an exact integer");
+    }
+    integer = BigInt(value);
+  } else if (schema.wire === "string") {
     if (typeof value !== "string" || !canonical.test(value)) return issue(path, "expected integer string");
     integer = BigInt(value);
   } else if (typeof value === "bigint") {
@@ -280,7 +291,9 @@ function validateTuple(value: any, schema: any, path: readonly (string | number)
 function validateStruct(value: any, definition: any, path: readonly (string | number)[]): ValidationIssue | null {
   const flattened = definition.flattened ?? [];
   const opaqueFlattened = flattened.some((item: any) => flattenedOpaqueSchema(item) !== undefined);
-  if (!isPlainRecord(value)) return issue(path, "expected object");
+  if (!isPlainRecord(value)) {
+    return opaqueFlattened ? null : issue(path, "expected object");
+  }
   let declared: any[];
   try {
     declared = collectFields(definition, "decode");

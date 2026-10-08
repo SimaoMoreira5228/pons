@@ -98,7 +98,6 @@ fn a_builtin_contract_checks_a_decoded_value_against_the_runtime_walker() {
     let validators = validators_of(&files);
     for expected in [
         "export const validateUser: Validator = (value) => validateContract(value, {\"ref\":\"User\"});",
-        "export const validateLoginRequest: Validator = (value) => validateContract(value, {\"ref\":\"LoginRequest\"});",
         "export const validateLoginErrorInvalid: Validator = (value) => validateContract(value, {\"ref\":\"LoginError\",\"variant\":\"invalid\"});",
     ] {
         assert!(
@@ -107,8 +106,16 @@ fn a_builtin_contract_checks_a_decoded_value_against_the_runtime_walker() {
         );
     }
     assert!(
+        !validators.contains("validateLoginRequest"),
+        "an input-only type needs no response validator: {validators}"
+    );
+    assert!(
         files.iter().all(|file| file.path != "schemas.ts"),
         "the builtin backend writes no library schema"
+    );
+    assert!(
+        files.iter().any(|file| file.path == "validators.ts"),
+        "the builtin backend writes validators"
     );
 
     let harness = r#"
@@ -164,7 +171,7 @@ fn a_builtin_contract_checks_the_decoded_carriers() {
         },
     );
     let harness = r#"
-import { validateUser } from "./validators.ts";
+import { validateLoginErrorLocked, validateUser } from "./validators.ts";
 
 const admits = (label: string, check: (value: unknown) => unknown, value: unknown) => {
   const issue = check(value);
@@ -177,10 +184,65 @@ const refuses = (label: string, check: (value: unknown) => unknown, value: unkno
 const created = new Date("2024-01-02T03:04:05.678Z");
 admits("a decoded wide integer and date", validateUser, { id: 1n, created_at: created });
 refuses("a wide integer as text", validateUser, { id: "1", created_at: created });
+refuses("a wide integer as a plain number", validateUser, { id: 1, created_at: created });
 refuses("a date-time string under the date carrier", validateUser, {
   id: 1n,
   created_at: "2024-01-02T03:04:05.678Z",
 });
+admits("a small integer as a plain number", validateLoginErrorLocked, {
+  code: "locked",
+  retry_after: 1,
+});
+refuses("a small integer as a bigint", validateLoginErrorLocked, {
+  code: "locked",
+  retry_after: 1n,
+});
+"#;
+    run_bun(&files, harness);
+}
+
+#[test]
+fn a_flattened_opaque_carrier_owns_the_value_it_decodes() {
+    let mut raw: Value =
+        serde_json::from_str(include_str!("../../../fixtures/login.json")).unwrap();
+    raw["types"]["Carried"] = json!({
+        "kind": "struct",
+        "name": ["carried"],
+        "direction": "output",
+        "openness": "reject",
+        "fields": [
+            {
+                "wire": "own",
+                "ident": ["own"],
+                "ty": {"kind": "string"},
+                "presence": "required"
+            }
+        ],
+        "flattened": [{"kind": "opaque", "codec": "flatten.codec", "wire": "json"}]
+    });
+    let document: Document = serde_json::from_value(raw).unwrap();
+    let files = files(&document);
+    let harness = r#"
+import { validateCarried } from "./validators.ts";
+
+const admits = (label: string, check: (value: unknown) => unknown, value: unknown) => {
+  const issue = check(value);
+  if (issue !== null) throw new Error(`${label} was refused: ${String(issue)}`);
+};
+const refuses = (label: string, check: (value: unknown) => unknown, value: unknown) => {
+  if (check(value) === null) throw new Error(`${label} was admitted`);
+};
+
+class Carrier {
+  own = "carried";
+}
+
+admits("an opaque carrier string", validateCarried, "carried");
+admits("an opaque carrier instance", validateCarried, new Carrier());
+admits("a plain record with the declared field", validateCarried, { own: "carried" });
+admits("a plain record with a key the carrier owns", validateCarried, { own: "carried", extra: 1 });
+refuses("a plain record without the declared field", validateCarried, { extra: 1 });
+refuses("a plain record with a field of the wrong type", validateCarried, { own: 1 });
 "#;
     run_bun(&files, harness);
 }

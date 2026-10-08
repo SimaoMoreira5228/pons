@@ -61,7 +61,7 @@ export function encodeWire(value: any, schema: any, opaque: OpaqueContext): any 
   }
   if (schema.kind === "opaque") return transformOpaque(value, schema, "encode", opaque);
   if (schema.kind === "bytes") return encodeBytes(value, schema.encoding);
-  if (schema.kind === "int" && schema.carrier === "string") return BigInt(value);
+  if (schema.kind === "int" && schema.wire === "number" && schema.carrier === "string") return BigInt(value);
   if (schema.kind === "string" && schema.carrier === "date") return value.toISOString();
   if (schema.kind === "nullable") return encodeWire(value, schema.inner, opaque);
   if (schema.kind === "array") return value.map((item: unknown) => encodeWire(item, schema.item, opaque));

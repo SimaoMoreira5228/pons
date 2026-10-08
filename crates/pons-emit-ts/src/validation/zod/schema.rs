@@ -5,10 +5,7 @@ use pons_ir::{
     ObjectOpenness, Presence, TypeKind, TypeRef, VariantPayload,
 };
 
-use crate::{
-    DateMode, EmitError, EmitMode, FieldCase, Int64, TsOptions, camel, jsdoc, pascal, string,
-    unique_names,
-};
+use crate::{DateMode, EmitError, EmitMode, FieldCase, Int64, TsOptions, camel, jsdoc, string};
 
 const PRELUDE: &[(&str, &str)] = &[
     (
@@ -61,17 +58,12 @@ const PRELUDE: &[(&str, &str)] = &[
     ),
 ];
 
-const MISMATCH: &str = "export function mismatch(schema: z.ZodType): (value: unknown) => { readonly path: readonly (string | number)[]; readonly message: string } | null {\n  return (value) => {\n    const result = schema.safeParse(value);\n    if (result.success) return null;\n    const issue = result.error.issues[0];\n    if (issue === undefined) return { path: [], message: \"the value does not match the contract\" };\n    return { path: issue.path.map((step) => typeof step === \"number\" ? step : String(step)), message: issue.message };\n  };\n}\n";
-
 struct Schemas<'a> {
     document: &'a pons_ir::Document,
     names: &'a BTreeMap<String, String>,
     options: &'a TsOptions,
     declarations: BTreeMap<(String, Option<String>), String>,
     need: BTreeSet<&'static str>,
-    used: BTreeSet<String>,
-    imports: BTreeSet<String>,
-    bare: bool,
 }
 
 pub(crate) struct Generator<'a>(Schemas<'a>);
@@ -86,28 +78,20 @@ impl<'a> Generator<'a> {
             document,
             names,
             options,
-            declarations: declaration_names(document, names),
+            declarations: super::declaration_names(document, names),
             need: BTreeSet::new(),
-            used: BTreeSet::new(),
-            imports: BTreeSet::new(),
-            bare: false,
         })
     }
 
-    pub(crate) fn validate(&mut self, reference: &TypeRef) -> Result<String, EmitError> {
-        self.0.used.clear();
-        self.0.bare = true;
-        let expression = self.0.reference(reference);
-        self.0.bare = false;
-        self.0.imports.extend(std::mem::take(&mut self.0.used));
-        expression
+    pub(crate) fn expression(&mut self, reference: &TypeRef) -> Result<String, EmitError> {
+        self.0.reference(reference)
     }
 
-    pub(crate) fn take_imports(&mut self) -> BTreeSet<String> {
-        std::mem::take(&mut self.0.imports)
+    pub(crate) fn schema_name(&self, id: &str, variant: Option<&str>) -> Result<String, EmitError> {
+        Ok(format!("{}Schema", self.0.declaration(id, variant)?))
     }
 
-    pub(crate) fn render(&mut self) -> Result<String, EmitError> {
+    pub(crate) fn render_body(&mut self) -> Result<String, EmitError> {
         let mut body = String::new();
         for (id, definition) in &self.0.document.types {
             let comment = jsdoc(definition.doc.as_ref());
@@ -122,7 +106,7 @@ impl<'a> Generator<'a> {
                             body.push('\n');
                         }
                         body.push_str(&format!(
-                            "export const {declaration}Schema = {};\n",
+                            "const {declaration}Schema = {};\n",
                             self.0.variant(id, definition, variant)?
                         ));
                     }
@@ -140,7 +124,7 @@ impl<'a> Generator<'a> {
                         .collect::<Result<Vec<_>, _>>()?
                         .join(", ");
                     body.push_str(&format!(
-                        "export const {}Schema = z.union([{members}]);\n\n",
+                        "const {}Schema = z.union([{members}]);\n\n",
                         self.0.declaration(id, None)?
                     ));
                 }
@@ -150,15 +134,14 @@ impl<'a> Generator<'a> {
                         body.push('\n');
                     }
                     body.push_str(&format!(
-                        "export const {}Schema = {};\n\n",
+                        "const {}Schema = {};\n\n",
                         self.0.declaration(id, None)?,
                         self.0.definition(id, definition)?
                     ))
                 }
             }
         }
-        body.push_str(MISMATCH);
-        let mut output = String::from("import { z } from \"zod\";\n\n");
+        let mut output = String::new();
         for (id, code) in PRELUDE {
             if self.0.need.contains(id) {
                 output.push_str(code);
@@ -168,26 +151,6 @@ impl<'a> Generator<'a> {
         output.push_str(&body);
         Ok(output)
     }
-}
-
-pub(crate) fn declaration_names(
-    document: &pons_ir::Document,
-    names: &BTreeMap<String, String>,
-) -> BTreeMap<(String, Option<String>), String> {
-    let mut keys = Vec::new();
-    let mut bases = Vec::new();
-    for (id, definition) in &document.types {
-        let name = &names[id];
-        if let TypeKind::Enum { variants, .. } = &definition.definition {
-            for variant in variants {
-                keys.push((id.clone(), Some(variant.wire.clone())));
-                bases.push(format!("{name}{}", pascal(&variant.ident)));
-            }
-        }
-        keys.push((id.clone(), None));
-        bases.push(name.clone());
-    }
-    keys.into_iter().zip(unique_names(bases, &[])).collect()
 }
 
 impl<'a> Schemas<'a> {
@@ -206,12 +169,7 @@ impl<'a> Schemas<'a> {
 
     fn lazy(&mut self, id: &str, variant: Option<&str>) -> Result<String, EmitError> {
         let name = format!("{}Schema", self.declaration(id, variant)?);
-        self.used.insert(name.clone());
-        Ok(if self.bare {
-            name
-        } else {
-            format!("z.lazy(() => {name})")
-        })
+        Ok(format!("z.lazy(() => {name})"))
     }
 
     fn reference(&mut self, reference: &TypeRef) -> Result<String, EmitError> {

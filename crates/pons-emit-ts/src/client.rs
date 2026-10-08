@@ -289,10 +289,9 @@ fn namespace_file(
     if let Some(module) = namespace.validation_module {
         let names = namespace
             .imports
-            .prefix
-            .into_iter()
-            .map(str::to_owned)
-            .chain(namespace.imports.names.iter().cloned())
+            .names
+            .iter()
+            .cloned()
             .collect::<Vec<_>>()
             .join(", ");
         output.push_str(&format!("import {{ {names} }} from \"../{module}.js\";\n"));
@@ -1104,15 +1103,24 @@ pub(crate) fn type_ref_json(reference: &TypeRef, options: &TsOptions) -> Result<
 pub(crate) fn tag_carriers(value: &mut serde_json::Value, options: &TsOptions) {
     match value {
         serde_json::Value::Object(fields) => {
-            if options.int64 == Int64::String
-                && fields.get("kind").and_then(serde_json::Value::as_str) == Some("int")
-                && fields.get("wire").and_then(serde_json::Value::as_str) == Some("number")
-                && fields
-                    .get("bits")
-                    .and_then(serde_json::Value::as_u64)
-                    .is_some_and(|bits| bits > 53)
-            {
-                fields.insert("carrier".into(), serde_json::Value::from("string"));
+            if fields.get("kind").and_then(serde_json::Value::as_str) == Some("int") {
+                let carrier =
+                    if fields.get("wire").and_then(serde_json::Value::as_str) == Some("string") {
+                        "string"
+                    } else if fields
+                        .get("bits")
+                        .and_then(serde_json::Value::as_u64)
+                        .is_some_and(|bits| bits > 53)
+                    {
+                        match options.int64 {
+                            Int64::String => "string",
+                            Int64::Bigint if options.mode == EmitMode::Strict => "bigint",
+                            Int64::Bigint | Int64::Number => "number",
+                        }
+                    } else {
+                        "number"
+                    };
+                fields.insert("carrier".into(), serde_json::Value::from(carrier));
             }
             if options.date_mode == DateMode::Date
                 && fields.get("kind").and_then(serde_json::Value::as_str) == Some("string")
