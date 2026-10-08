@@ -24,7 +24,8 @@ pub use operation::{
 };
 pub use query::{QueryRejection, query_fields};
 pub use reported_coverage::{
-    Coverage, coverage_for_document, operation_subject, strict_violation_message, type_subject,
+    Coverage, ValidationCoverage, coverage_for_document, operation_subject,
+    strict_violation_message, type_subject,
 };
 pub use types::{
     Access, ByteEncoding, DecimalWire, Diagnostic, DiagnosticSeverity, Direction, Doc, EnumRepr,

@@ -8,8 +8,8 @@ use std::collections::{BTreeMap, BTreeSet};
 use pons_ir::{
     ApiKeyLocation, AuthScheme, Coverage, DecimalWire, Direction, Doc, Document, Field,
     FieldFormat, InlineType, IntegerWire, ObjectOpenness, PathSegment, StreamKind, TypeDef,
-    TypeKind, TypeRef, VariantPayload, coverage_for_document, operation_subject,
-    strict_violation_message, type_subject,
+    TypeKind, TypeRef, ValidationCoverage, VariantPayload, coverage_for_document,
+    operation_subject, strict_violation_message, type_subject,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -159,6 +159,7 @@ pub struct EmitOutput {
     pub files: Vec<GeneratedFile>,
     pub warnings: Vec<String>,
     pub coverage: Coverage,
+    pub validation_coverage: ValidationCoverage,
 }
 
 pub fn emit(document: &Document) -> Result<Vec<GeneratedFile>, EmitError> {
@@ -311,6 +312,7 @@ pub fn emit_with_options(document: &Document, options: TsOptions) -> Result<Emit
         preserve_wide_integers,
         &mut validation,
     )?;
+    let validation_coverage = validation.coverage(&document);
     if let Some(file) = validation.render()? {
         files.push(file);
     }
@@ -322,6 +324,7 @@ pub fn emit_with_options(document: &Document, options: TsOptions) -> Result<Emit
     files.push(client::index(module));
     let files = files;
     strict_coverage_error(mode, &coverage)?;
+    strict_validation_error(mode, options.validation.backend, &validation_coverage)?;
     let mut warnings = Vec::new();
     if mode == EmitMode::Lossy {
         if !wide_integers.is_empty() {
@@ -342,12 +345,59 @@ pub fn emit_with_options(document: &Document, options: TsOptions) -> Result<Emit
                 opaque_paths.join(", ")
             ));
         }
+        warnings.extend(validation_warnings(
+            options.validation.backend,
+            &validation_coverage,
+        ));
     }
     Ok(EmitOutput {
         files,
         warnings,
         coverage,
+        validation_coverage,
     })
+}
+
+fn strict_validation_error(
+    mode: EmitMode,
+    backend: ValidationBackend,
+    coverage: &ValidationCoverage,
+) -> Result<(), EmitError> {
+    if mode == EmitMode::Lossy {
+        return Ok(());
+    }
+    let violations = coverage.strict_violations();
+    if violations.is_empty() {
+        return Ok(());
+    }
+    let messages = violations
+        .into_iter()
+        .flat_map(|(level, subjects)| {
+            subjects.into_iter().map(move |subject| {
+                format!(
+                    "the {} validation backend cannot check {subject} exactly, because validation \
+                     coverage is {level}; choose another backend, or run the target in lossy mode",
+                    backend.name()
+                )
+            })
+        })
+        .collect::<Vec<_>>();
+    Err(EmitError(messages.join("\n")))
+}
+
+fn validation_warnings(backend: ValidationBackend, coverage: &ValidationCoverage) -> Vec<String> {
+    coverage
+        .strict_violations()
+        .into_iter()
+        .flat_map(|(level, subjects)| {
+            subjects.into_iter().map(move |subject| {
+                format!(
+                    "the {} validation backend emits {level} validation coverage for {subject}",
+                    backend.name()
+                )
+            })
+        })
+        .collect()
 }
 
 fn strict_coverage_error(mode: EmitMode, coverage: &Coverage) -> Result<(), EmitError> {
@@ -1732,6 +1782,46 @@ mod tests {
             .unwrap();
         assert!(warning.contains("operations[0].errors[0].headers[0].ty"));
         assert!(warning.contains("common_errors[0].headers[0].ty"));
+    }
+
+    #[test]
+    fn strict_validation_mode_names_the_backend_subject_and_both_fixes() {
+        let coverage = super::ValidationCoverage {
+            lossy: ["types.User".into()].into_iter().collect(),
+            unsupported: ["operations.auth.login".into()].into_iter().collect(),
+            ..super::ValidationCoverage::default()
+        };
+        let error = super::strict_validation_error(
+            super::EmitMode::Strict,
+            super::ValidationBackend::Yup,
+            &coverage,
+        )
+        .unwrap_err()
+        .0;
+        assert_eq!(
+            error,
+            "the yup validation backend cannot check operations.auth.login exactly, because \
+             validation coverage is unsupported; choose another backend, or run the target in \
+             lossy mode\n\
+             the yup validation backend cannot check types.User exactly, because validation \
+             coverage is lossy; choose another backend, or run the target in lossy mode"
+        );
+        assert!(
+            super::strict_validation_error(
+                super::EmitMode::Lossy,
+                super::ValidationBackend::Yup,
+                &coverage
+            )
+            .is_ok()
+        );
+        assert!(
+            super::strict_validation_error(
+                super::EmitMode::Strict,
+                super::ValidationBackend::Yup,
+                &super::ValidationCoverage::default()
+            )
+            .is_ok()
+        );
     }
 
     #[test]

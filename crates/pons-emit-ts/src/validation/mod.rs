@@ -3,7 +3,7 @@ mod zod;
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use pons_ir::{Direction, Document, TypeKind, TypeRef};
+use pons_ir::{Direction, Document, TypeKind, TypeRef, ValidationCoverage};
 
 use crate::{EmitError, GeneratedFile, TsOptions, ValidationBackend, pascal, unique_names};
 
@@ -34,6 +34,8 @@ impl Imports {
 
 pub(super) trait Generator {
     fn capabilities(&self) -> Capabilities;
+    fn coverage(&self, document: &Document) -> ValidationCoverage;
+    fn has_bindings(&self) -> bool;
     fn validate(&mut self, reference: &TypeRef) -> Result<String, EmitError>;
     fn take_imports(&mut self) -> Imports;
     fn render(&mut self) -> Result<Rendered, EmitError>;
@@ -82,13 +84,25 @@ impl<'a> Backend<'a> {
     pub(crate) fn capabilities(&self) -> Option<Capabilities> {
         self.generator
             .as_ref()
+            .filter(|generator| generator.has_bindings())
             .map(|generator| generator.capabilities())
+    }
+
+    pub(crate) fn coverage(&self, document: &Document) -> ValidationCoverage {
+        self.generator
+            .as_ref()
+            .map_or_else(ValidationCoverage::default, |generator| {
+                generator.coverage(document)
+            })
     }
 
     pub(crate) fn render(&mut self) -> Result<Option<GeneratedFile>, EmitError> {
         let Some(generator) = self.generator.as_mut() else {
             return Ok(None);
         };
+        if !generator.has_bindings() {
+            return Ok(None);
+        }
         let rendered = generator.render()?;
         Ok(Some(GeneratedFile {
             path: rendered.file.into(),

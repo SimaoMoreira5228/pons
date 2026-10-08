@@ -1,6 +1,6 @@
 use std::collections::{BTreeMap, BTreeSet};
 
-use pons_ir::{Direction, Document, TypeKind, TypeRef};
+use pons_ir::{Direction, Document, TypeKind, TypeRef, ValidationCoverage};
 
 mod schema;
 
@@ -88,6 +88,14 @@ impl ValidationGenerator for Generator<'_> {
         Capabilities {
             module: "validators",
         }
+    }
+
+    fn coverage(&self, document: &Document) -> ValidationCoverage {
+        ValidationCoverage::exact_for_document(document)
+    }
+
+    fn has_bindings(&self) -> bool {
+        !self.validators.is_empty() || !self.inlines.is_empty()
     }
 
     fn validate(&mut self, reference: &TypeRef) -> Result<String, EmitError> {

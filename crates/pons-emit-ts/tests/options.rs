@@ -692,6 +692,96 @@ if (sent !== '{"count":9007199254740992}') {
 }
 
 #[test]
+fn validation_coverage_names_the_subjects_the_backend_checks() {
+    let document: Document = serde_json::from_value(fixture()).unwrap();
+    let none = emit_with_options(&document, TsOptions::default()).unwrap();
+    assert_eq!(
+        none.validation_coverage,
+        pons_ir::ValidationCoverage::default(),
+        "the default backend writes no validators and reports nothing"
+    );
+
+    let subjects = pons_ir::coverage_subjects(&document);
+    for backend in [ValidationBackend::Builtin, ValidationBackend::Zod] {
+        let output = emit_with_options(
+            &document,
+            TsOptions {
+                validation: ValidationOptions::new(backend),
+                ..TsOptions::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(output.validation_coverage.exact, subjects, "{backend:?}");
+        assert!(output.validation_coverage.lossy.is_empty(), "{backend:?}");
+        assert!(
+            output.validation_coverage.unsupported.is_empty(),
+            "{backend:?}"
+        );
+        assert_eq!(
+            serde_json::to_value(&output.validation_coverage).unwrap(),
+            json!({
+                "exact": subjects,
+                "lossy": [],
+                "unsupported": []
+            }),
+            "{backend:?}"
+        );
+    }
+}
+
+#[test]
+fn a_document_with_only_input_types_writes_no_validators_file() {
+    let document: Document = serde_json::from_value(json!({
+        "ir_version": "0.2",
+        "info": {"title": "Input", "version": "1"},
+        "types": {
+            "Filter": {
+                "kind": "struct",
+                "name": ["filter"],
+                "direction": "input",
+                "openness": "reject",
+                "fields": [{
+                    "wire": "term",
+                    "ident": ["term"],
+                    "ty": {"kind": "string"},
+                    "presence": "required"
+                }]
+            }
+        },
+        "operations": [{
+            "id": [["search"], ["run"]],
+            "method": "POST",
+            "path": [{"lit": "search"}],
+            "body": {"ty": {"ref": "Filter"}, "content": "json", "required": true},
+            "responses": [{"status": 204, "content": "empty"}],
+            "auth": {"alternatives": [], "optional": false},
+            "semantics": {"safe": false, "idempotent": false}
+        }]
+    }))
+    .unwrap();
+
+    for backend in [ValidationBackend::Builtin, ValidationBackend::Zod] {
+        let output = emit_with_options(
+            &document,
+            TsOptions {
+                validation: ValidationOptions::new(backend),
+                ..TsOptions::default()
+            },
+        )
+        .unwrap();
+        assert!(
+            !output.files.iter().any(|file| file.path == "validators.ts"),
+            "{backend:?} wrote a file with no validator in it"
+        );
+        let index = file(&output.files, "index.ts");
+        assert!(
+            !index.contains("validators.js"),
+            "{backend:?} re-exports a file it did not write: {index}"
+        );
+    }
+}
+
+#[test]
 fn the_zod_option_writes_the_validators_the_response_is_checked_against() {
     let document: Document = serde_json::from_value(fixture()).unwrap();
     let zod = emitted(

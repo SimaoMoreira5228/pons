@@ -425,7 +425,8 @@ fn coverage_in(target: &str, input: &str, lossy: bool) -> Result<Value, String> 
     Ok(serde_json::from_str(&reported).unwrap())
 }
 
-fn coverage_levels(coverage: &Value) -> BTreeMap<String, pons_ir::CoverageLevel> {
+fn coverage_levels(report: &Value) -> BTreeMap<String, pons_ir::CoverageLevel> {
+    let coverage = &report["coverage"];
     let mut levels = BTreeMap::new();
     for (level, subjects) in [
         (pons_ir::CoverageLevel::Exact, &coverage["exact"]),
@@ -449,7 +450,8 @@ fn coverage_levels(coverage: &Value) -> BTreeMap<String, pons_ir::CoverageLevel>
 
 #[test]
 fn emit_writes_requested_coverage() {
-    let coverage = coverage_for("ts", FIXTURE);
+    let report = coverage_for("ts", FIXTURE);
+    let coverage = &report["coverage"];
     assert_eq!(coverage["opaque"], serde_json::json!(PRESERVED_SUBJECTS));
     assert_eq!(
         coverage["exact"],
@@ -457,6 +459,56 @@ fn emit_writes_requested_coverage() {
     );
     assert!(coverage["lossy"].as_array().unwrap().is_empty());
     assert!(coverage["unsupported"].as_array().unwrap().is_empty());
+    assert_eq!(
+        report["validation_coverage"],
+        serde_json::json!({"exact": [], "lossy": [], "unsupported": []}),
+        "the default backend writes no validators and an empty report"
+    );
+}
+
+#[test]
+fn emit_writes_the_coverage_envelope_with_the_validators_report() {
+    let directory = tempfile::tempdir().unwrap();
+    let output_dir = directory.path().join("generated");
+    let input_path = directory.path().join("api.json");
+    fs::write(&input_path, FIXTURE).unwrap();
+    let output = pons()
+        .args(["emit", "--target", "ts"])
+        .arg(&input_path)
+        .arg(&output_dir)
+        .args(["--validation", "builtin"])
+        .args(["--coverage", "coverage.json"])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let report: Value =
+        serde_json::from_str(&fs::read_to_string(output_dir.join("coverage.json")).unwrap())
+            .unwrap();
+    assert_eq!(
+        report.as_object().unwrap().keys().collect::<Vec<_>>(),
+        vec!["coverage", "validation_coverage"],
+        "{report}"
+    );
+    assert_eq!(
+        report["validation_coverage"],
+        serde_json::json!({
+            "exact": [
+                "operations.auth.login",
+                "operations.events.watch",
+                "types.EventQuery",
+                "types.LoginError",
+                "types.LoginRequest",
+                "types.User"
+            ],
+            "lossy": [],
+            "unsupported": []
+        })
+    );
 }
 
 #[test]

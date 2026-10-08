@@ -3,7 +3,7 @@ use std::fs;
 use std::io::Write;
 use std::path::{Component, Path};
 
-use pons_ir::Document;
+use pons_ir::{Coverage, Document, ValidationCoverage};
 use pons_plugin::{DiagnosticSeverity, EmitRequest, PROTOCOL_VERSION, PluginDiagnostic, log_tail};
 
 use crate::CliError;
@@ -12,6 +12,15 @@ use crate::options::{Built, Resolved};
 struct OutputFile {
     path: String,
     content: String,
+}
+
+struct Emitted {
+    files: Vec<OutputFile>,
+    coverage: Option<Coverage>,
+    validation_coverage: Option<ValidationCoverage>,
+    diagnostics: Vec<PluginDiagnostic>,
+    warnings: Vec<String>,
+    logs: Vec<u8>,
 }
 
 pub(super) fn run(
@@ -34,25 +43,32 @@ pub(super) fn run(
         return dump(path, resolved, document);
     }
 
-    let (mut files, coverage, diagnostics, warnings, logs) = match &resolved.built {
+    let Emitted {
+        mut files,
+        coverage,
+        validation_coverage,
+        diagnostics,
+        warnings,
+        logs,
+    } = match &resolved.built {
         Built::Ts(options) => {
             let output = pons_emit_ts::emit_with_options(document, options.clone())
                 .map_err(|error| CliError::Failure(error.to_string()))?;
-            let files = output
-                .files
-                .into_iter()
-                .map(|file| OutputFile {
-                    path: file.path,
-                    content: file.content,
-                })
-                .collect();
-            (
-                files,
-                Some(output.coverage),
-                Vec::new(),
-                output.warnings,
-                Vec::new(),
-            )
+            Emitted {
+                files: output
+                    .files
+                    .into_iter()
+                    .map(|file| OutputFile {
+                        path: file.path,
+                        content: file.content,
+                    })
+                    .collect(),
+                coverage: Some(output.coverage),
+                validation_coverage: Some(output.validation_coverage),
+                diagnostics: Vec::new(),
+                warnings: output.warnings,
+                logs: Vec::new(),
+            }
         }
         Built::OpenApi => {
             let output = pons_emit_openapi::emit_with_mode(
@@ -64,16 +80,17 @@ pub(super) fn run(
                 },
             )
             .map_err(|error| CliError::Failure(error.to_string()))?;
-            (
-                vec![OutputFile {
+            Emitted {
+                files: vec![OutputFile {
                     path: "openapi.json".into(),
                     content: output.content,
                 }],
-                Some(output.coverage),
-                Vec::new(),
-                output.warnings,
-                Vec::new(),
-            )
+                coverage: Some(output.coverage),
+                validation_coverage: None,
+                diagnostics: Vec::new(),
+                warnings: output.warnings,
+                logs: Vec::new(),
+            }
         }
         Built::External(options) => {
             let mut executable = OsString::from("pons-emit-");
@@ -101,13 +118,14 @@ pub(super) fn run(
             if !resolved.strict() {
                 warnings.extend(coverage_warnings(target, coverage.as_ref()));
             }
-            (
+            Emitted {
                 files,
                 coverage,
-                result.response.diagnostics,
+                validation_coverage: None,
+                diagnostics: result.response.diagnostics,
                 warnings,
-                result.logs,
-            )
+                logs: result.logs,
+            }
         }
     };
 
@@ -141,7 +159,11 @@ pub(super) fn run(
                 "coverage output conflicts with emitter output {relative}"
             )));
         }
-        let mut content = serde_json::to_string_pretty(&coverage)
+        let report = serde_json::json!({
+            "coverage": coverage,
+            "validation_coverage": validation_coverage.unwrap_or_default(),
+        });
+        let mut content = serde_json::to_string_pretty(&report)
             .map_err(|error| CliError::Failure(format!("cannot serialize coverage: {error}")))?;
         content.push('\n');
         files.push(OutputFile {
