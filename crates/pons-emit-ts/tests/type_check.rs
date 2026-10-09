@@ -520,6 +520,54 @@ export const wrong = validateUser({ id: "1" }, { id: "1" });
 }
 
 #[test]
+fn a_validator_over_every_format_compiles_beside_zod() {
+    let mut raw = fixture();
+    raw["types"]["User"] = serde_json::json!({
+        "kind": "struct", "name": ["user"], "direction": "output", "openness": "reject",
+        "fields": [
+            {"wire": "moment", "ident": ["moment"], "ty": {"kind": "string", "format": "date-time"}, "presence": "required"},
+            {"wire": "day", "ident": ["day"], "ty": {"kind": "string", "format": "date"}, "presence": "required"},
+            {"wire": "clock", "ident": ["clock"], "ty": {"kind": "string", "format": "time"}, "presence": "required"},
+            {"wire": "span", "ident": ["span"], "ty": {"kind": "string", "format": "duration"}, "presence": "required"},
+            {"wire": "uuid", "ident": ["uuid"], "ty": {"kind": "string", "format": "uuid"}, "presence": "required"},
+            {"wire": "link", "ident": ["link"], "ty": {"kind": "string", "format": "uri"}, "presence": "required"},
+            {"wire": "who", "ident": ["who"], "ty": {"kind": "string", "format": "email"}, "presence": "required"},
+            {"wire": "v4", "ident": ["v4"], "ty": {"kind": "string", "format": "ipv4"}, "presence": "required"},
+            {"wire": "v6", "ident": ["v6"], "ty": {"kind": "string", "format": "ipv6"}, "presence": "required"}
+        ]
+    });
+    raw["operations"][0]["provides"] = serde_json::Value::Null;
+    let document: Document = serde_json::from_value(raw).unwrap();
+    let files = files_with(
+        &document,
+        pons_emit_ts::TsOptions {
+            validation: pons_emit_ts::ValidationOptions::new(pons_emit_ts::ValidationBackend::Zod),
+            ..pons_emit_ts::TsOptions::default()
+        },
+    );
+    type_checks_beside(
+        &files,
+        r#"
+import { validateUser } from "./validators.js";
+
+export const issue = validateUser({
+  moment: "2024-01-01T00:00:00Z",
+  day: "2024-01-01",
+  clock: "00:00:00Z",
+  span: "P1D",
+  uuid: "6ba7b810-9dad-11d1-80b4-00c04fd430c8",
+  link: "https://example.test",
+  who: "a@b.co",
+  v4: "1.2.3.4",
+  v6: "::1",
+});
+"#,
+        false,
+        true,
+    );
+}
+
+#[test]
 fn a_headers_bag_of_optional_headers_is_itself_optional() {
     let document: Document = serde_json::from_value(fixture()).unwrap();
     let files = files(&document);

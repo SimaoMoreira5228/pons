@@ -22,20 +22,107 @@ const PRELUDE: &[(&str, &str)] = &[
         "const DECIMAL = /^-?(?:\\d+(?:\\.\\d*)?|\\.\\d+)(?:[eE][+-]?\\d+)?$/;\n",
     ),
     (
-        "date-time",
-        "const DATE_TIME = /^\\d{4}-\\d{2}-\\d{2}[Tt]\\d{2}:\\d{2}:\\d{2}(?:\\.\\d{1,3})?(?:[Zz]|[+-]\\d{2}:\\d{2})$/;\n",
-    ),
-    (
-        "instant",
-        "const instant = () => z.string().regex(DATE_TIME, \"the date-time is not a full-date and a full-time\").refine((value) => !Number.isNaN(Date.parse(value)), \"date-time is not an instant a Date can hold\");\n",
+        "date",
+        r"const DATE = /^(\d{4})-(\d{2})-(\d{2})$/;
+",
     ),
     (
         "time",
-        "const TIME = /^\\d{2}:\\d{2}:\\d{2}(?:\\.\\d+)?(?:[Zz]|[+-]\\d{2}:\\d{2})$/;\n",
+        r"const TIME = /^(\d{2}):(\d{2}):(\d{2})(?:\.\d+)?(?:[Zz]|([+-])(\d{2}):(\d{2}))$/;
+",
+    ),
+    (
+        "date-time",
+        r"const DATE_TIME = /^(\d{4})-(\d{2})-(\d{2})[Tt](\d{2}):(\d{2}):(\d{2})(?:\.\d{1,3})?(?:[Zz]|([+-])(\d{2}):(\d{2}))$/;
+",
+    ),
+    (
+        "uuid",
+        r"const UUID = /^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/;
+",
+    ),
+    (
+        "email",
+        r"const EMAIL = /^(?:[A-Za-z0-9_'+\-]+\.)*[A-Za-z0-9_'+\-]*[A-Za-z0-9_+-]@(?:[A-Za-z0-9][A-Za-z0-9\-]*\.)+[A-Za-z]{2,}$/;
+",
+    ),
+    (
+        "duration",
+        r"const DURATION = /^P(?:(\d+W)|(?!.*W)(?=\d|T\d)(\d+Y)?(\d+M)?(\d+D)?(T(?=\d)(\d+H)?(\d+M)?(\d+([.,]\d+)?S)?)?)$/;
+",
+    ),
+    (
+        "ipv4",
+        r"const IPV4 = /^(?:(?:25[0-5]|2[0-4][0-9]|1[0-9][0-9]|[1-9]?[0-9])\.){3}(?:25[0-5]|2[0-4][0-9]|1[0-9][0-9]|[1-9]?[0-9])$/;
+",
+    ),
+    (
+        "ipv6",
+        r"const IPV6 = /^(([0-9a-fA-F]{1,4}:){7}[0-9a-fA-F]{1,4}|([0-9a-fA-F]{1,4}:){1,7}:|([0-9a-fA-F]{1,4}:){1,6}:[0-9a-fA-F]{1,4}|([0-9a-fA-F]{1,4}:){1,5}(:[0-9a-fA-F]{1,4}){1,2}|([0-9a-fA-F]{1,4}:){1,4}(:[0-9a-fA-F]{1,4}){1,3}|([0-9a-fA-F]{1,4}:){1,3}(:[0-9a-fA-F]{1,4}){1,4}|([0-9a-fA-F]{1,4}:){1,2}(:[0-9a-fA-F]{1,4}){1,5}|[0-9a-fA-F]{1,4}:((:[0-9a-fA-F]{1,4}){1,6})|:((:[0-9a-fA-F]{1,4}){1,7}|:))$/;
+",
+    ),
+    (
+        "calendar-day",
+        r#"function isCalendarDay(year: string | undefined, month: string | undefined, day: string | undefined): boolean {
+  const value = Number(year);
+  const monthIndex = Number(month);
+  const dayOfMonth = Number(day);
+  if (monthIndex < 1 || monthIndex > 12 || dayOfMonth < 1) return false;
+  return dayOfMonth <= daysInMonth(value, monthIndex);
+}
+function daysInMonth(year: number, month: number): number {
+  if (month === 2) {
+    return year % 4 === 0 && (year % 100 !== 0 || year % 400 === 0) ? 29 : 28;
+  }
+  return [4, 6, 9, 11].includes(month) ? 30 : 31;
+}
+"#,
+    ),
+    (
+        "clock-bounds",
+        r#"function isClock(hour: string | undefined, minute: string | undefined, second: string | undefined): boolean {
+  return Number(hour) <= 23 && Number(minute) <= 59 && Number(second) <= 59;
+}
+function isOffset(hour: string | undefined, minute: string | undefined): boolean {
+  return hour === undefined || (Number(hour) <= 23 && Number(minute) <= 59);
+}
+"#,
+    ),
+    (
+        "instant",
+        r#"const instant = () => z.string().regex(DATE_TIME, "the date-time is not a full-date and a full-time").refine((value) => {
+  const match = DATE_TIME.exec(value);
+  return match !== null && isCalendarDay(match[1], match[2], match[3]) && isClock(match[4], match[5], match[6]) && isOffset(match[8], match[9]) && !Number.isNaN(Date.parse(value));
+}, "date-time is not an instant a Date can hold");
+"#,
+    ),
+    (
+        "day",
+        r#"const day = () => z.string().regex(DATE, "the date is not a full-date").refine((value) => {
+  const match = DATE.exec(value);
+  return match !== null && isCalendarDay(match[1], match[2], match[3]);
+}, "date is not a day the calendar has");
+"#,
     ),
     (
         "clock",
-        "const clock = () => z.string().regex(TIME, \"the time is not a full-time\");\n",
+        r#"const clock = () => z.string().regex(TIME, "the time is not a full-time").refine((value) => {
+  const match = TIME.exec(value);
+  return match !== null && isClock(match[1], match[2], match[3]) && isOffset(match[5], match[6]);
+}, "the time is not a clock the contract accepts");
+"#,
+    ),
+    (
+        "uri",
+        r#"const uri = () => z.string().refine((value) => {
+  if (/\s/.test(value)) return false;
+  try {
+    return new URL(value).protocol.length > 1;
+  } catch {
+    return false;
+  }
+}, "expected a uri");
+"#,
     ),
     (
         "binary32",
@@ -135,21 +222,47 @@ impl Backend for Generator {
             None => "z.string()".to_owned(),
             Some(FieldFormat::DateTime) => {
                 self.need.insert("date-time");
+                self.need.insert("calendar-day");
+                self.need.insert("clock-bounds");
                 self.need.insert("instant");
                 "instant()".into()
             }
-            Some(FieldFormat::Date) => "z.iso.date()".into(),
+            Some(FieldFormat::Date) => {
+                self.need.insert("date");
+                self.need.insert("calendar-day");
+                self.need.insert("day");
+                "day()".into()
+            }
             Some(FieldFormat::Time) => {
                 self.need.insert("time");
+                self.need.insert("clock-bounds");
                 self.need.insert("clock");
                 "clock()".into()
             }
-            Some(FieldFormat::Duration) => "z.iso.duration()".into(),
-            Some(FieldFormat::Uuid) => "z.uuid()".into(),
-            Some(FieldFormat::Uri) => "z.url()".into(),
-            Some(FieldFormat::Email) => "z.email()".into(),
-            Some(FieldFormat::Ipv4) => "z.ipv4()".into(),
-            Some(FieldFormat::Ipv6) => "z.ipv6()".into(),
+            Some(FieldFormat::Duration) => {
+                self.need.insert("duration");
+                "z.string().regex(DURATION, \"expected a duration\")".into()
+            }
+            Some(FieldFormat::Uuid) => {
+                self.need.insert("uuid");
+                "z.string().regex(UUID, \"expected a uuid\")".into()
+            }
+            Some(FieldFormat::Uri) => {
+                self.need.insert("uri");
+                "uri()".into()
+            }
+            Some(FieldFormat::Email) => {
+                self.need.insert("email");
+                "z.string().regex(EMAIL, \"expected an email\")".into()
+            }
+            Some(FieldFormat::Ipv4) => {
+                self.need.insert("ipv4");
+                "z.string().regex(IPV4, \"expected an ipv4 address\")".into()
+            }
+            Some(FieldFormat::Ipv6) => {
+                self.need.insert("ipv6");
+                "z.string().regex(IPV6, \"expected an ipv6 address\")".into()
+            }
         };
         if let Some(pattern) = shape.pattern {
             schema.push_str(&format!(".regex(new RegExp({}))", string(pattern)));

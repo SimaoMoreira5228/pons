@@ -24,7 +24,9 @@ fn an_inline_body_gets_one_validator_the_operation_imports() {
     let files = zod(&document, TsOptions::default());
     let validators = file(&files, "validators.ts");
     assert!(
-        validators.contains("export const validateInline1: Validator = mismatch(z.email());"),
+        validators.contains(
+            "export const validateInline1: Validator = mismatch(z.string().regex(EMAIL, \"expected an email\"));"
+        ),
         "{validators}"
     );
     let auth = file(&files, "operations/auth.ts");
@@ -331,14 +333,29 @@ fn every_construct_the_contract_declares_reaches_a_schema() {
             "a decimal on the string wire",
             "\"exact\": z.string().regex(DECIMAL)",
         ),
-        ("a uuid", "\"uuid\": z.uuid()"),
-        ("a day", "\"day\": z.iso.date()"),
+        (
+            "a uuid",
+            "\"uuid\": z.string().regex(UUID, \"expected a uuid\")",
+        ),
+        ("a day", "\"day\": day()"),
         ("a clock", "\"clock\": clock()"),
-        ("a duration", "\"span\": z.iso.duration()"),
-        ("a uri", "\"link\": z.url()"),
-        ("an email", "\"who\": z.email()"),
-        ("an ipv4", "\"v4\": z.ipv4()"),
-        ("an ipv6", "\"v6\": z.ipv6()"),
+        (
+            "a duration",
+            "\"span\": z.string().regex(DURATION, \"expected a duration\")",
+        ),
+        ("a uri", "\"link\": uri()"),
+        (
+            "an email",
+            "\"who\": z.string().regex(EMAIL, \"expected an email\")",
+        ),
+        (
+            "an ipv4",
+            "\"v4\": z.string().regex(IPV4, \"expected an ipv4 address\")",
+        ),
+        (
+            "an ipv6",
+            "\"v6\": z.string().regex(IPV6, \"expected an ipv6 address\")",
+        ),
         ("an instant", "\"moment\": instant()"),
         ("a minimum length", "[...value].length >= 2"),
         ("a maximum length", "[...value].length <= 4"),
@@ -931,6 +948,119 @@ if (!refused.message.includes("the response does not match the contract")) {
   throw new Error(`the failure names the schema: ${refused.message}`);
 }
 if (!refused.message.includes("id")) throw new Error(`the failure names the path: ${refused.message}`);
+"#;
+    run_bun(&files, harness);
+}
+
+#[test]
+fn the_format_corpus_accepts_and_refuses_what_the_builtin_does() {
+    let mut raw = fixture();
+    raw["types"] = json!({
+        "Formats": {
+            "kind": "struct", "name": ["formats"], "direction": "output", "openness": "reject",
+            "fields": [
+                {"wire": "moment", "ident": ["moment"], "ty": {"kind": "string", "format": "date-time"}, "presence": "required"},
+                {"wire": "day", "ident": ["day"], "ty": {"kind": "string", "format": "date"}, "presence": "required"},
+                {"wire": "clock", "ident": ["clock"], "ty": {"kind": "string", "format": "time"}, "presence": "required"},
+                {"wire": "span", "ident": ["span"], "ty": {"kind": "string", "format": "duration"}, "presence": "required"},
+                {"wire": "uuid", "ident": ["uuid"], "ty": {"kind": "string", "format": "uuid"}, "presence": "required"},
+                {"wire": "link", "ident": ["link"], "ty": {"kind": "string", "format": "uri"}, "presence": "required"},
+                {"wire": "who", "ident": ["who"], "ty": {"kind": "string", "format": "email"}, "presence": "required"},
+                {"wire": "v4", "ident": ["v4"], "ty": {"kind": "string", "format": "ipv4"}, "presence": "required"},
+                {"wire": "v6", "ident": ["v6"], "ty": {"kind": "string", "format": "ipv6"}, "presence": "required"}
+            ]
+        }
+    });
+    raw["operations"] = json!([{
+        "id": [["formats"], ["read"]],
+        "method": "GET",
+        "path": [{"lit": "formats"}],
+        "auth": {"alternatives": [], "optional": false},
+        "semantics": {"safe": true, "idempotent": true},
+        "responses": [{"status": 200, "content": "json", "body": {"ref": "Formats"}}],
+        "errors": []
+    }]);
+    let document: Document = serde_json::from_value(raw).unwrap();
+    let files = zod(&document, TsOptions::default());
+    let schemas = file(&files, "validators.ts");
+    for expected in [
+        "const DATE = /^(\\d{4})-(\\d{2})-(\\d{2})$/;",
+        "const TIME = /^(\\d{2}):(\\d{2}):(\\d{2})(?:\\.\\d+)?(?:[Zz]|([+-])(\\d{2}):(\\d{2}))$/;",
+        "const DATE_TIME = /^(\\d{4})-(\\d{2})-(\\d{2})[Tt](\\d{2}):(\\d{2}):(\\d{2})(?:\\.\\d{1,3})?(?:[Zz]|([+-])(\\d{2}):(\\d{2}))$/;",
+        "const UUID = /^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/;",
+        "const EMAIL = ",
+        "const DURATION = ",
+        "const IPV4 = ",
+        "const IPV6 = ",
+        "const instant = () =>",
+        "const day = () =>",
+        "const clock = () =>",
+        "const uri = () =>",
+    ] {
+        assert!(
+            schemas.contains(expected),
+            "the format corpus emits {expected}: {schemas}"
+        );
+    }
+    let harness = r#"
+import { validateContract } from "./runtime.ts";
+import { validateFormats } from "./validators.ts";
+
+const base = {
+  moment: "2024-02-29T23:59:59Z",
+  day: "2024-02-29",
+  clock: "23:59:59.999+05:30",
+  span: "P1Y2M3DT4H5M6.789S",
+  uuid: "12345678-1234-0234-0234-123456789abc",
+  link: "https://example.test/a",
+  who: "first.last+tag@sub.example.test",
+  v4: "255.255.255.255",
+  v6: "2001:db8::8a2e:370:7334",
+};
+const builtin = (value: unknown) => validateContract(value, { ref: "Formats" });
+const zod = (value: unknown) => validateFormats(value);
+
+const accepts: Record<string, string[]> = {
+  moment: ["2024-02-29T23:59:59Z", "2024-01-01T00:00:00.123+02:00", "2024-01-01t00:00:00z", "2000-02-29T12:00:00-05:00"],
+  day: ["2024-02-29", "2000-02-29", "2023-12-31"],
+  clock: ["00:00:00Z", "23:59:59.999+05:30", "12:00:00z"],
+  span: ["P1D", "P1W", "PT1H", "P1Y2M3DT4H5M6.789S", "P1Y", "PT0S"],
+  uuid: ["6ba7b810-9dad-11d1-80b4-00c04fd430c8", "12345678-1234-0234-0234-123456789abc", "6BA7B810-9DAD-11D1-80B4-00C04FD430C8"],
+  link: ["https://example.test/a", "mailto:a@b.co", "urn:isbn:0451450523", "http://example.test"],
+  who: ["a@b.co", "first.last+tag@sub.example.test", "o'hara@example.com"],
+  v4: ["0.0.0.0", "255.255.255.255", "1.2.3.4", "99.99.99.99"],
+  v6: ["::1", "::", "2001:db8::8a2e:370:7334", "fe80::1", "1:2:3:4:5:6:7:8"],
+};
+const refuses: Record<string, string[]> = {
+  moment: ["2024-02-30T00:00:00Z", "2024-01-01T24:00:00Z", "2024-01-01T00:00:00", "2024-01-01T00:00:00.1234Z", "2024-13-01T00:00:00Z", "2024-01-01 00:00:00Z"],
+  day: ["2024-02-30", "2023-02-29", "2024-13-01", "2024-1-01", "2024-01-01T00:00:00Z"],
+  clock: ["24:00:00Z", "12:60:00Z", "12:00:60Z", "12:00:00", "12:00:00+24:00", "12:00:00+00:60"],
+  span: ["P", "P1W2D", "P1Y2W", "1D", "P1H", "PT", "P1DT"],
+  uuid: ["not-a-uuid", "6ba7b810-9dad-11d1-80b4-00c04fd430c", "6ba7b8109dad11d180b400c04fd430c8"],
+  link: ["not a uri", "/relative", "example.test", "https://exa mple.test", ""],
+  who: ["nope", "a@b", "a@b.c", "a b@c.co", "@b.co", "a@.co"],
+  v4: ["256.1.1.1", "999.1.1.1", "1.2.3", "1.2.3.4.5", "01.2.3.4"],
+  v6: ["::x", "2001:db8:::1", "1:2:3:4:5:6:7:8:9", "1:2:3:4:5:6:7", ":::"],
+};
+
+for (const [key, values] of Object.entries(accepts)) {
+  for (const value of values) {
+    const candidate = { ...base, [key]: value };
+    const reference = builtin(candidate);
+    if (reference !== null) throw new Error(`the builtin refuses ${key} ${JSON.stringify(value)}: ${JSON.stringify(reference)}`);
+    const issue = zod(candidate);
+    if (issue !== null) throw new Error(`zod refuses ${key} ${JSON.stringify(value)}: ${JSON.stringify(issue)}`);
+  }
+}
+for (const [key, values] of Object.entries(refuses)) {
+  for (const value of values) {
+    const candidate = { ...base, [key]: value };
+    const reference = builtin(candidate);
+    if (reference === null) throw new Error(`the builtin admits ${key} ${JSON.stringify(value)}`);
+    const issue = zod(candidate);
+    if (issue === null) throw new Error(`zod admits ${key} ${JSON.stringify(value)}`);
+  }
+}
 "#;
     run_bun(&files, harness);
 }
