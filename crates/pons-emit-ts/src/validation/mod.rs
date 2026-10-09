@@ -1,11 +1,13 @@
+mod backend;
 mod builtin;
+mod walk;
 mod zod;
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use pons_ir::{Direction, Document, TypeKind, TypeRef, ValidationCoverage};
+use pons_ir::{Document, TypeRef, ValidationCoverage};
 
-use crate::{EmitError, GeneratedFile, TsOptions, ValidationBackend, pascal, unique_names};
+use crate::{EmitError, GeneratedFile, TsOptions, ValidationBackend};
 
 #[derive(Clone, Copy)]
 pub(crate) struct Capabilities {
@@ -34,9 +36,9 @@ impl Imports {
 
 pub(super) trait Generator {
     fn capabilities(&self) -> Capabilities;
-    fn coverage(&self, document: &Document) -> ValidationCoverage;
+    fn coverage(&mut self, document: &Document) -> Result<ValidationCoverage, EmitError>;
     fn has_bindings(&self) -> bool;
-    fn validate(&mut self, reference: &TypeRef) -> Result<String, EmitError>;
+    fn validate(&mut self, reference: &TypeRef, subject: &str) -> Result<String, EmitError>;
     fn take_imports(&mut self) -> Imports;
     fn render(&mut self) -> Result<Rendered, EmitError>;
 }
@@ -67,9 +69,13 @@ impl<'a> Backend<'a> {
         Ok(Backend { generator })
     }
 
-    pub(crate) fn validate(&mut self, reference: &TypeRef) -> Result<Option<String>, EmitError> {
+    pub(crate) fn validate(
+        &mut self,
+        reference: &TypeRef,
+        subject: &str,
+    ) -> Result<Option<String>, EmitError> {
         match self.generator.as_mut() {
-            Some(generator) => generator.validate(reference).map(Some),
+            Some(generator) => generator.validate(reference, subject).map(Some),
             None => Ok(None),
         }
     }
@@ -88,12 +94,14 @@ impl<'a> Backend<'a> {
             .map(|generator| generator.capabilities())
     }
 
-    pub(crate) fn coverage(&self, document: &Document) -> ValidationCoverage {
-        self.generator
-            .as_ref()
-            .map_or_else(ValidationCoverage::default, |generator| {
-                generator.coverage(document)
-            })
+    pub(crate) fn coverage(
+        &mut self,
+        document: &Document,
+    ) -> Result<ValidationCoverage, EmitError> {
+        match self.generator.as_mut() {
+            Some(generator) => generator.coverage(document),
+            None => Ok(ValidationCoverage::default()),
+        }
     }
 
     pub(crate) fn render(&mut self) -> Result<Option<GeneratedFile>, EmitError> {
@@ -109,47 +117,4 @@ impl<'a> Backend<'a> {
             content: rendered.content,
         }))
     }
-}
-
-pub(crate) fn declaration_names(
-    document: &Document,
-    names: &BTreeMap<String, String>,
-) -> BTreeMap<(String, Option<String>), String> {
-    let mut keys = Vec::new();
-    let mut bases = Vec::new();
-    for (id, definition) in &document.types {
-        let name = &names[id];
-        if let TypeKind::Enum { variants, .. } = &definition.definition {
-            for variant in variants {
-                keys.push((id.clone(), Some(variant.wire.clone())));
-                bases.push(format!("{name}{}", pascal(&variant.ident)));
-            }
-        }
-        keys.push((id.clone(), None));
-        bases.push(name.clone());
-    }
-    keys.into_iter().zip(unique_names(bases, &[])).collect()
-}
-
-pub(crate) fn validator_names(
-    document: &Document,
-    declarations: &BTreeMap<(String, Option<String>), String>,
-    reserved: &[&str],
-) -> BTreeMap<(String, Option<String>), String> {
-    let mut keys = Vec::new();
-    let mut bases = Vec::new();
-    for (key, name) in declarations {
-        let input_only = document
-            .types
-            .get(&key.0)
-            .is_some_and(|definition| definition.direction == Direction::Input);
-        if input_only {
-            continue;
-        }
-        keys.push(key.clone());
-        bases.push(format!("validate{name}"));
-    }
-    keys.into_iter()
-        .zip(unique_names(bases, reserved))
-        .collect()
 }

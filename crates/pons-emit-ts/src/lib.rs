@@ -312,7 +312,7 @@ pub fn emit_with_options(document: &Document, options: TsOptions) -> Result<Emit
         preserve_wide_integers,
         &mut validation,
     )?;
-    let validation_coverage = validation.coverage(&document);
+    let validation_coverage = validation.coverage(&document)?;
     if let Some(file) = validation.render()? {
         files.push(file);
     }

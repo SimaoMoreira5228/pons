@@ -2,10 +2,8 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use pons_ir::{Direction, Document, NamedRef, TypeKind, TypeRef, ValidationCoverage};
 
-use super::{
-    Capabilities, Generator as ValidationGenerator, Imports, Rendered, declaration_names,
-    validator_names,
-};
+use super::walk::{declaration_names, validator_names};
+use super::{Capabilities, Generator as ValidationGenerator, Imports, Rendered};
 use crate::{EmitError, TsOptions, jsdoc};
 
 pub(super) struct Generator<'a> {
@@ -72,15 +70,15 @@ impl ValidationGenerator for Generator<'_> {
         }
     }
 
-    fn coverage(&self, document: &Document) -> ValidationCoverage {
-        ValidationCoverage::exact_for_document(document)
+    fn coverage(&mut self, document: &Document) -> Result<ValidationCoverage, EmitError> {
+        Ok(ValidationCoverage::exact_for_document(document))
     }
 
     fn has_bindings(&self) -> bool {
         !self.validators.is_empty() || !self.inlines.is_empty()
     }
 
-    fn validate(&mut self, reference: &TypeRef) -> Result<String, EmitError> {
+    fn validate(&mut self, reference: &TypeRef, _subject: &str) -> Result<String, EmitError> {
         let name = match reference {
             TypeRef::Named(named) => self.validator(&named.id, named.variant.as_deref())?,
             TypeRef::Inline(_) => self.inline_validator(reference)?,

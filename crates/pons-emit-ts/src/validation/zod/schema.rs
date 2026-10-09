@@ -1,11 +1,12 @@
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeSet;
 
-use pons_ir::{
-    Access, DecimalWire, Direction, EnumRepr, Field, FieldFormat, InlineType, IntegerWire,
-    ObjectOpenness, Presence, TypeKind, TypeRef, VariantPayload,
+use pons_ir::{DecimalWire, FieldFormat, Presence};
+
+use super::super::backend::{
+    Backend, Declaration, DeclarationKind, IntCarrier, IntegerShape, Member, ObjectShape, Rendered,
+    StringCarrier, StringShape,
 };
-
-use crate::{DateMode, EmitError, EmitMode, FieldCase, Int64, TsOptions, camel, jsdoc, string};
+use crate::{EmitError, jsdoc, string};
 
 const PRELUDE: &[(&str, &str)] = &[
     (
@@ -58,260 +59,79 @@ const PRELUDE: &[(&str, &str)] = &[
     ),
 ];
 
-struct Schemas<'a> {
-    document: &'a pons_ir::Document,
-    names: &'a BTreeMap<String, String>,
-    options: &'a TsOptions,
-    declarations: BTreeMap<(String, Option<String>), String>,
+pub(crate) struct Generator {
     need: BTreeSet<&'static str>,
 }
 
-pub(crate) struct Generator<'a>(Schemas<'a>);
-
-impl<'a> Generator<'a> {
-    pub(crate) fn new(
-        document: &'a pons_ir::Document,
-        names: &'a BTreeMap<String, String>,
-        options: &'a TsOptions,
-    ) -> Self {
-        Generator(Schemas {
-            document,
-            names,
-            options,
-            declarations: super::declaration_names(document, names),
+impl Generator {
+    pub(crate) fn new() -> Self {
+        Generator {
             need: BTreeSet::new(),
-        })
-    }
-
-    pub(crate) fn expression(&mut self, reference: &TypeRef) -> Result<String, EmitError> {
-        self.0.reference(reference)
-    }
-
-    pub(crate) fn schema_name(&self, id: &str, variant: Option<&str>) -> Result<String, EmitError> {
-        Ok(format!("{}Schema", self.0.declaration(id, variant)?))
-    }
-
-    pub(crate) fn render_body(&mut self) -> Result<String, EmitError> {
-        let mut body = String::new();
-        for (id, definition) in &self.0.document.types {
-            if definition.direction == Direction::Input {
-                continue;
-            }
-            let comment = jsdoc(definition.doc.as_ref());
-            match &definition.definition {
-                TypeKind::Enum { variants, .. } => {
-                    for variant in variants {
-                        let wire = variant.wire.clone();
-                        let declaration = self.0.declaration(id, Some(&wire))?;
-                        let doc = jsdoc(variant.doc.as_ref());
-                        if !doc.is_empty() {
-                            body.push_str(&doc);
-                            body.push('\n');
-                        }
-                        body.push_str(&format!(
-                            "const {declaration}Schema = {};\n",
-                            self.0.variant(id, definition, variant)?
-                        ));
-                    }
-                    if !comment.is_empty() {
-                        body.push_str(&comment);
-                        body.push('\n');
-                    }
-                    let members = variants
-                        .iter()
-                        .map(|variant| {
-                            self.0
-                                .declaration(id, Some(&variant.wire))
-                                .map(|declaration| format!("{declaration}Schema"))
-                        })
-                        .collect::<Result<Vec<_>, _>>()?
-                        .join(", ");
-                    body.push_str(&format!(
-                        "const {}Schema = z.union([{members}]);\n\n",
-                        self.0.declaration(id, None)?
-                    ));
-                }
-                _ => {
-                    if !comment.is_empty() {
-                        body.push_str(&comment);
-                        body.push('\n');
-                    }
-                    body.push_str(&format!(
-                        "const {}Schema = {};\n\n",
-                        self.0.declaration(id, None)?,
-                        self.0.definition(id, definition)?
-                    ))
-                }
-            }
         }
-        let mut output = String::new();
-        for (id, code) in PRELUDE {
-            if self.0.need.contains(id) {
-                output.push_str(code);
-                output.push('\n');
-            }
-        }
-        output.push_str(&body);
-        Ok(output)
     }
 }
 
-impl<'a> Schemas<'a> {
-    fn declaration(&self, id: &str, variant: Option<&str>) -> Result<String, EmitError> {
-        let name = &self.names[id];
-        match variant {
-            None => Ok(name.clone()),
-            Some(wire) => {
-                let key = (id.to_owned(), Some(wire.to_owned()));
-                self.declarations.get(&key).cloned().ok_or_else(|| {
-                    EmitError(format!("unknown enum variant {wire} of the type {id}"))
-                })
-            }
-        }
+impl Backend for Generator {
+    fn name(&self) -> &'static str {
+        "zod"
     }
 
-    fn lazy(&mut self, id: &str, variant: Option<&str>) -> Result<String, EmitError> {
-        let name = format!("{}Schema", self.declaration(id, variant)?);
-        Ok(format!("z.lazy(() => {name})"))
+    fn reference(&mut self, name: &str, _variant: Option<&str>) -> Rendered {
+        Rendered::exact(format!("z.lazy(() => {name}Schema)"))
     }
 
-    fn reference(&mut self, reference: &TypeRef) -> Result<String, EmitError> {
-        if let TypeRef::Named(named) = reference {
-            return self.lazy(&named.id, named.variant.as_deref());
-        }
-        self.inline(reference)
+    fn schema(&self, name: &str) -> String {
+        format!("{name}Schema")
     }
 
-    fn inline(&mut self, reference: &TypeRef) -> Result<String, EmitError> {
-        let TypeRef::Inline(inline) = reference else {
-            unreachable!("a reference that is not inline is named")
-        };
-        Ok(match inline {
-            InlineType::Bool => "z.boolean()".into(),
-            InlineType::Null => "z.null()".into(),
-            InlineType::Any => "z.any()".into(),
-            InlineType::Opaque { .. } => "z.unknown()".into(),
-            InlineType::Nullable { inner } => {
-                let inner = self.reference(inner)?;
-                format!("{inner}.nullable()")
-            }
-            InlineType::Int {
-                bits,
-                signed,
-                wire,
-                minimum,
-                maximum,
-                multiple_of,
-            } => {
-                self.need.insert("integer");
-                let base = match self.int_carrier(*wire, *bits) {
-                    Carrier::Text => {
-                        self.need.insert(if *signed {
-                            "canonical-signed-integer"
-                        } else {
-                            "canonical-integer"
-                        });
-                        format!(
-                            "z.string().regex({})",
-                            if *signed {
-                                "CANONICAL_SIGNED_INTEGER"
-                            } else {
-                                "CANONICAL_INTEGER"
-                            }
-                        )
-                    }
-                    Carrier::Bigint => "z.bigint()".into(),
-                    Carrier::Number if *bits <= 53 => "z.int()".into(),
-                    Carrier::Number => "z.number().int()".into(),
-                };
-                let mut arguments = vec![base, bits.to_string(), signed.to_string()];
-                for value in [minimum, maximum, multiple_of] {
-                    arguments.push(match value {
-                        Some(value) => string(&value.to_string()),
-                        None => String::from("undefined"),
-                    });
-                }
-                while arguments.last().map(String::as_str) == Some("undefined") {
-                    arguments.pop();
-                }
-                format!("integer({})", arguments.join(", "))
-            }
-            InlineType::Float { bits } => {
-                if *bits == 32 {
-                    self.need.insert("binary32");
-                    "binary32()".into()
-                } else {
-                    "z.number()".into()
-                }
-            }
-            InlineType::Decimal { wire } => match wire {
-                DecimalWire::Number => "z.number()".into(),
-                DecimalWire::String => {
-                    self.need.insert("decimal");
-                    "z.string().regex(DECIMAL)".into()
-                }
-            },
-            InlineType::String {
-                format,
-                min_length,
-                max_length,
-                pattern,
-            } => self.string(*format, *min_length, *max_length, pattern.as_deref()),
-            InlineType::Bytes { .. } => "z.instanceof(Uint8Array)".into(),
-            InlineType::Array { item, unique } => {
-                let item = self.reference(item)?;
-                match unique {
-                    Some(true) => {
-                        self.need.insert("unique");
-                        format!("uniqueItems({item})")
-                    }
-                    _ => format!("z.array({item})"),
-                }
-            }
-            InlineType::Map { key, value } => {
-                let key = self.reference(key)?;
-                let value = self.reference(value)?;
-                format!("z.record({key}, {value})")
-            }
-            InlineType::Tuple { items } => {
-                let items = self.items(items)?.join(", ");
-                format!("z.tuple([{items}])")
-            }
-        })
-    }
-
-    fn items(&mut self, items: &[TypeRef]) -> Result<Vec<String>, EmitError> {
-        items
+    fn object(&mut self, members: &[Member], openness: &ObjectShape) -> Rendered {
+        let members = members
             .iter()
-            .map(|item| self.reference(item))
-            .collect::<Result<Vec<_>, _>>()
+            .map(|member| {
+                let mut schema = member.schema.clone();
+                if member.presence == Presence::Required && member.accepts_undefined {
+                    self.need.insert("required");
+                    schema = format!("required({schema})");
+                } else if member.presence == Presence::Optional {
+                    schema.push_str(".optional()");
+                }
+                format!("{}: {schema}", string(&member.key))
+            })
+            .collect::<Vec<_>>()
+            .join(", ");
+        let mut schema = format!("z.object({{{members}}})");
+        match openness {
+            ObjectShape::Reject => schema.push_str(".strict()"),
+            ObjectShape::PreserveTyped(value) => schema.push_str(&format!(".catchall({value})")),
+            ObjectShape::PreserveOpaque => {}
+        }
+        Rendered::exact(schema)
     }
 
-    fn int_carrier(&self, wire: IntegerWire, bits: u16) -> Carrier {
-        if wire == IntegerWire::String {
-            return Carrier::Text;
-        }
-        if bits > 53 {
-            return match self.options.int64 {
-                Int64::String => Carrier::Text,
-                Int64::Bigint if self.options.mode == EmitMode::Strict => Carrier::Bigint,
-                Int64::Bigint | Int64::Number => Carrier::Number,
-            };
-        }
-        Carrier::Number
+    fn union(&mut self, members: &[String]) -> Rendered {
+        Rendered::exact(format!("z.union([{}])", members.join(", ")))
     }
 
-    fn string(
-        &mut self,
-        format: Option<FieldFormat>,
-        min_length: Option<u64>,
-        max_length: Option<u64>,
-        pattern: Option<&str>,
-    ) -> String {
-        if format == Some(FieldFormat::DateTime) && self.options.date_mode == DateMode::Date {
-            return "z.date()".into();
+    fn literal(&mut self, value: &str) -> Rendered {
+        Rendered::exact(format!("z.literal({})", string(value)))
+    }
+
+    fn external(&mut self, wire: &str, payload: Option<&str>) -> Rendered {
+        self.need.insert("one-key");
+        match payload {
+            Some(payload) => Rendered::exact(format!("oneKey({}, {payload})", string(wire))),
+            None => Rendered::exact(format!(
+                "z.union([z.literal({wire}), oneKey({wire}, z.unknown())])",
+                wire = string(wire)
+            )),
         }
-        let mut schema = match format {
+    }
+
+    fn string(&mut self, shape: &StringShape) -> Rendered {
+        if shape.carrier == StringCarrier::Date {
+            return Rendered::exact("z.date()");
+        }
+        let mut schema = match shape.format {
             None => "z.string()".to_owned(),
             Some(FieldFormat::DateTime) => {
                 self.need.insert("date-time");
@@ -331,307 +151,228 @@ impl<'a> Schemas<'a> {
             Some(FieldFormat::Ipv4) => "z.ipv4()".into(),
             Some(FieldFormat::Ipv6) => "z.ipv6()".into(),
         };
-        if let Some(pattern) = pattern {
+        if let Some(pattern) = shape.pattern {
             schema.push_str(&format!(".regex(new RegExp({}))", string(pattern)));
         }
-        if let Some(minimum) = min_length {
+        if let Some(minimum) = shape.min_length {
             schema.push_str(&format!(
                 ".refine((value) => [...value].length >= {minimum}, \"string is shorter than the contract\")"
             ));
         }
-        if let Some(maximum) = max_length {
+        if let Some(maximum) = shape.max_length {
             schema.push_str(&format!(
                 ".refine((value) => [...value].length <= {maximum}, \"string is longer than the contract\")"
             ));
         }
-        schema
+        Rendered::exact(schema)
     }
 
-    fn definition(&mut self, id: &str, definition: &pons_ir::TypeDef) -> Result<String, EmitError> {
-        match &definition.definition {
-            TypeKind::Struct {
-                fields,
-                flattened,
-                openness,
-            } => self.structure(fields, flattened, openness, definition.direction),
-            TypeKind::Enum { .. } => self.lazy(id, None),
-            TypeKind::Newtype { inner } => self.reference(inner),
+    fn integer(&mut self, shape: &IntegerShape) -> Rendered {
+        self.need.insert("integer");
+        let base = match shape.carrier {
+            IntCarrier::Text => {
+                self.need.insert(if shape.signed {
+                    "canonical-signed-integer"
+                } else {
+                    "canonical-integer"
+                });
+                format!(
+                    "z.string().regex({})",
+                    if shape.signed {
+                        "CANONICAL_SIGNED_INTEGER"
+                    } else {
+                        "CANONICAL_INTEGER"
+                    }
+                )
+            }
+            IntCarrier::Bigint => "z.bigint()".into(),
+            IntCarrier::Number if shape.bits <= 53 => "z.int()".into(),
+            IntCarrier::Number => "z.number().int()".into(),
+        };
+        let mut arguments = vec![base, shape.bits.to_string(), shape.signed.to_string()];
+        for value in [shape.minimum, shape.maximum, shape.multiple_of] {
+            arguments.push(match value {
+                Some(value) => string(&value.to_string()),
+                None => String::from("undefined"),
+            });
+        }
+        while arguments.last().map(String::as_str) == Some("undefined") {
+            arguments.pop();
+        }
+        Rendered::exact(format!("integer({})", arguments.join(", ")))
+    }
+
+    fn float(&mut self, bits: u8) -> Rendered {
+        if bits == 32 {
+            self.need.insert("binary32");
+            Rendered::exact("binary32()")
+        } else {
+            Rendered::exact("z.number()")
         }
     }
 
-    fn variant(
-        &mut self,
-        id: &str,
-        definition: &pons_ir::TypeDef,
-        variant: &pons_ir::Variant,
-    ) -> Result<String, EmitError> {
-        let TypeKind::Enum { repr, .. } = &definition.definition else {
-            unreachable!("a variant belongs to an enum")
-        };
-        let direction = definition.direction;
-        let wire = string(&variant.wire);
-        let payload = &variant.payload;
-        Ok(match repr {
-            EnumRepr::String => match payload {
-                VariantPayload::Unit => format!("z.literal({wire})"),
-                _ => {
+    fn decimal(&mut self, wire: DecimalWire) -> Rendered {
+        match wire {
+            DecimalWire::Number => Rendered::exact("z.number()"),
+            DecimalWire::String => {
+                self.need.insert("decimal");
+                Rendered::exact("z.string().regex(DECIMAL)")
+            }
+        }
+    }
+
+    fn bytes(&mut self) -> Rendered {
+        Rendered::exact("z.instanceof(Uint8Array)")
+    }
+
+    fn boolean(&mut self) -> Rendered {
+        Rendered::exact("z.boolean()")
+    }
+
+    fn array(&mut self, item: &str, unique: bool) -> Rendered {
+        if unique {
+            self.need.insert("unique");
+            Rendered::exact(format!("uniqueItems({item})"))
+        } else {
+            Rendered::exact(format!("z.array({item})"))
+        }
+    }
+
+    fn tuple(&mut self, items: &[String]) -> Rendered {
+        Rendered::exact(format!("z.tuple([{}])", items.join(", ")))
+    }
+
+    fn map(&mut self, key: &str, value: &str) -> Rendered {
+        Rendered::exact(format!("z.record({key}, {value})"))
+    }
+
+    fn nullable(&mut self, inner: &str) -> Rendered {
+        Rendered::exact(format!("{inner}.nullable()"))
+    }
+
+    fn any(&mut self) -> Rendered {
+        Rendered::exact("z.any()")
+    }
+
+    fn unknown(&mut self) -> Rendered {
+        Rendered::exact("z.unknown()")
+    }
+
+    fn null(&mut self) -> Rendered {
+        Rendered::exact("z.null()")
+    }
+
+    fn unit(&mut self) -> Rendered {
+        Rendered::exact("z.null()")
+    }
+
+    fn validator(&mut self, schema: &str) -> String {
+        format!("mismatch({schema})")
+    }
+
+    fn module(&mut self, declarations: &[Declaration<'_>]) -> Result<String, EmitError> {
+        let names = declarations
+            .iter()
+            .map(|declaration| declaration.name)
+            .collect::<BTreeSet<_>>();
+        for declaration in declarations {
+            for dependency in declaration.dependencies {
+                if !names.contains(dependency.as_str()) {
                     return Err(EmitError(format!(
-                        "the type {id} spells the variant {} as a string but gives it a payload, which a zod string cannot hold",
-                        variant.wire
+                        "the zod backend cannot declare {} without {dependency}",
+                        declaration.name
                     )));
                 }
-            },
-            EnumRepr::External => {
-                self.need.insert("one-key");
-                match payload {
-                    VariantPayload::Unit => {
-                        format!("z.union([z.literal({wire}), oneKey({wire}, z.unknown())])")
-                    }
-                    _ => {
-                        let payload = self.payload(payload, direction)?;
-                        format!("oneKey({wire}, {payload})")
-                    }
-                }
-            }
-            EnumRepr::Internal { tag } => {
-                let tag = string(tag);
-                let mut members = vec![format!("{tag}: z.literal({wire})")];
-                match payload {
-                    VariantPayload::Unit => {}
-                    VariantPayload::Struct { fields } => {
-                        members.extend(self.members(fields, direction)?)
-                    }
-                    VariantPayload::Newtype { ty } => {
-                        match self.inlined(ty) {
-                            Some(definition) => {
-                                let members_of_definition =
-                                    self.members_of(definition)?;
-                                members.extend(members_of_definition)
-                            }
-                            None => {
-                                return Err(EmitError(
-                                    "TypeScript cannot represent internally tagged newtype or tuple payloads"
-                                        .into(),
-                                ))
-                            }
-                        }
-                    }
-                    VariantPayload::Tuple { .. } => {
-                        return Err(EmitError(
-                            "TypeScript cannot represent internally tagged newtype or tuple payloads"
-                                .into(),
-                        ))
-                    }
-                }
-                format!("z.object({{{}}})", members.join(", "))
-            }
-            EnumRepr::Adjacent { tag, content } => {
-                let tag = string(tag);
-                let content = string(content);
-                match payload {
-                    VariantPayload::Unit => format!("z.object({{{tag}: z.literal({wire})}})"),
-                    _ => {
-                        let payload = self.payload(payload, direction)?;
-                        format!("z.object({{{tag}: z.literal({wire}), {content}: {payload}}})")
-                    }
-                }
-            }
-            EnumRepr::Untagged => self.payload(payload, direction)?,
-        })
-    }
-
-    fn payload(
-        &mut self,
-        payload: &VariantPayload,
-        direction: Direction,
-    ) -> Result<String, EmitError> {
-        Ok(match payload {
-            VariantPayload::Unit => "z.null()".into(),
-            VariantPayload::Newtype { ty } => self.reference(ty)?,
-            VariantPayload::Tuple { items } => {
-                let items = self.items(items)?.join(", ");
-                format!("z.tuple([{items}])")
-            }
-            VariantPayload::Struct { fields } => {
-                let members = self.members(fields, direction)?;
-                format!("z.object({{{}}})", members.join(", "))
-            }
-        })
-    }
-
-    fn structure(
-        &mut self,
-        fields: &[Field],
-        flattened: &[TypeRef],
-        openness: &ObjectOpenness,
-        direction: Direction,
-    ) -> Result<String, EmitError> {
-        let flattened = self.flattened(flattened);
-        if flattened
-            .iter()
-            .any(|member| matches!(member, Flattened::Opaque))
-        {
-            return Ok("z.unknown()".into());
-        }
-        let mut members = self.members(fields, direction)?;
-        for member in flattened {
-            let Flattened::Struct(definition) = member else {
-                continue;
-            };
-            members.extend(self.members_of(definition)?);
-        }
-        let mut schema = format!("z.object({{{}}})", members.join(", "));
-        match openness {
-            ObjectOpenness::Reject => schema.push_str(".strict()"),
-            ObjectOpenness::PreserveTyped { value } => {
-                let value = openness_value(value, self.document);
-                let value = self.reference(value)?;
-                schema.push_str(&format!(".catchall({value})"));
-            }
-            ObjectOpenness::PreserveOpaque => {}
-        }
-        Ok(schema)
-    }
-
-    fn members(
-        &mut self,
-        fields: &[Field],
-        direction: Direction,
-    ) -> Result<Vec<String>, EmitError> {
-        let mut members = Vec::new();
-        for field in fields {
-            if !field_applies(field, direction) {
-                continue;
-            }
-            let key = string(&match self.options.field_case {
-                FieldCase::Wire => field.wire.clone(),
-                FieldCase::Camel => camel(&field.ident),
-            });
-            let mut member = self.reference(&field.ty)?;
-            if field.presence == Presence::Required && self.accepts_undefined(&field.ty) {
-                self.need.insert("required");
-                member = format!("required({member})");
-            }
-            if field.presence == Presence::Optional {
-                member.push_str(".optional()");
-            }
-            members.push(format!("{key}: {member}"));
-        }
-        Ok(members)
-    }
-
-    fn members_of(&mut self, definition: &pons_ir::TypeDef) -> Result<Vec<String>, EmitError> {
-        let TypeKind::Struct { fields, .. } = &definition.definition else {
-            return Ok(Vec::new());
-        };
-        let fields = fields.clone();
-        let direction = definition.direction;
-        self.members(&fields, direction)
-    }
-
-    fn flattened(&self, members: &[TypeRef]) -> Vec<Flattened<'a>> {
-        let mut found = Vec::new();
-        let mut seen = BTreeSet::new();
-        for member in members {
-            let key = match member {
-                TypeRef::Named(named) => named.id.clone(),
-                TypeRef::Inline(_) => String::new(),
-            };
-            if seen.insert(key) {
-                found.push(self.flattened_member(member));
             }
         }
-        found
-    }
-
-    fn inlined(&self, reference: &TypeRef) -> Option<&'a pons_ir::TypeDef> {
-        match self.flattened_member(reference) {
-            Flattened::Struct(definition) => Some(definition),
-            _ => None,
-        }
-    }
-
-    fn flattened_member(&self, reference: &TypeRef) -> Flattened<'a> {
-        let mut current = reference;
-        let mut seen = BTreeSet::new();
-        loop {
-            match current {
-                TypeRef::Inline(InlineType::Opaque { .. }) => return Flattened::Opaque,
-                TypeRef::Inline(_) => return Flattened::Other,
-                TypeRef::Named(named) => {
-                    if named.variant.is_some() || !seen.insert(named.id.clone()) {
-                        return Flattened::Other;
-                    }
-                    let Some(definition) = self.document.types.get(&named.id) else {
-                        return Flattened::Other;
-                    };
-                    match &definition.definition {
-                        TypeKind::Newtype { inner } => current = inner,
-                        TypeKind::Struct { .. } => return Flattened::Struct(definition),
-                        TypeKind::Enum { .. } => return Flattened::Other,
-                    }
-                }
+        let mut output = String::new();
+        for (id, code) in PRELUDE {
+            if self.need.contains(id) {
+                output.push_str(code);
+                output.push('\n');
             }
         }
-    }
-
-    fn accepts_undefined(&self, reference: &TypeRef) -> bool {
-        match reference {
-            TypeRef::Inline(InlineType::Any | InlineType::Opaque { .. }) => true,
-            TypeRef::Inline(InlineType::Nullable { inner }) => self.accepts_undefined(inner),
-            TypeRef::Inline(_) => false,
-            TypeRef::Named(named) => {
-                let Some(definition) = self.document.types.get(&named.id) else {
-                    return false;
-                };
-                match &definition.definition {
-                    TypeKind::Newtype { inner } => self.accepts_undefined(inner),
-                    _ => false,
-                }
+        for declaration in declarations {
+            let comment = jsdoc(declaration.doc);
+            if !comment.is_empty() {
+                output.push_str(&comment);
+                output.push('\n');
+            }
+            output.push_str(&format!(
+                "const {}Schema = {};\n",
+                declaration.name, declaration.schema
+            ));
+            if declaration.kind == DeclarationKind::Type {
+                output.push('\n');
             }
         }
+        Ok(output)
     }
 }
 
-enum Flattened<'a> {
-    Struct(&'a pons_ir::TypeDef),
-    Opaque,
-    Other,
-}
+#[cfg(test)]
+mod tests {
+    use pons_ir::FieldFormat;
 
-enum Carrier {
-    Text,
-    Bigint,
-    Number,
-}
+    use super::*;
 
-fn field_applies(field: &Field, direction: Direction) -> bool {
-    if matches!(
-        (direction, field.access),
-        (Direction::Input, Some(Access::ReadOnly)) | (Direction::Output, Some(Access::WriteOnly))
-    ) {
-        return false;
-    }
-    direction == Direction::Input || field.access != Some(Access::WriteOnly)
-}
-
-fn openness_value<'a>(ty: &'a TypeRef, document: &'a pons_ir::Document) -> &'a TypeRef {
-    let mut current = ty;
-    let mut visited = BTreeSet::new();
-    loop {
-        match current {
-            TypeRef::Inline(InlineType::Map { value, .. }) => return value,
-            TypeRef::Named(named) if visited.insert(named.id.clone()) => {
-                let Some(TypeKind::Newtype { inner }) = document
-                    .types
-                    .get(&named.id)
-                    .map(|definition| &definition.definition)
-                else {
-                    return current;
-                };
-                current = inner;
-            }
-            _ => return current,
+    fn rendered(rendered: Rendered) -> String {
+        match rendered {
+            Rendered::Exact(schema) => schema,
+            Rendered::Widened(schema, _) => schema,
+            Rendered::Unsupported(_) => panic!("zod supports every shape"),
         }
+    }
+
+    #[test]
+    fn a_string_shape_keeps_the_regex_and_the_code_point_bounds_in_order() {
+        let mut generator = Generator::new();
+        let schema = rendered(generator.string(&StringShape {
+            format: None,
+            carrier: StringCarrier::Text,
+            min_length: Some(2),
+            max_length: Some(4),
+            pattern: Some("^[a-z]+$"),
+        }));
+        assert_eq!(
+            schema,
+            "z.string().regex(new RegExp(\"^[a-z]+$\")).refine((value) => [...value].length >= 2, \"string is shorter than the contract\").refine((value) => [...value].length <= 4, \"string is longer than the contract\")"
+        );
+    }
+
+    #[test]
+    fn an_instant_becomes_a_date_only_under_the_date_carrier() {
+        let mut generator = Generator::new();
+        let text = rendered(generator.string(&StringShape {
+            format: Some(FieldFormat::DateTime),
+            carrier: StringCarrier::Text,
+            min_length: None,
+            max_length: None,
+            pattern: None,
+        }));
+        assert_eq!(text, "instant()");
+        let date = rendered(generator.string(&StringShape {
+            format: Some(FieldFormat::DateTime),
+            carrier: StringCarrier::Date,
+            min_length: None,
+            max_length: None,
+            pattern: None,
+        }));
+        assert_eq!(date, "z.date()");
+    }
+
+    #[test]
+    fn trailing_undefined_constraints_are_dropped_from_the_integer_call() {
+        let mut generator = Generator::new();
+        let minimum = serde_json::json!(3);
+        let schema = rendered(generator.integer(&IntegerShape {
+            carrier: IntCarrier::Number,
+            bits: 16,
+            signed: false,
+            minimum: Some(&minimum),
+            maximum: None,
+            multiple_of: None,
+        }));
+        assert_eq!(schema, "integer(z.int(), 16, false, \"3\")");
     }
 }

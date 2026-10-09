@@ -4,6 +4,7 @@ use pons_ir::{
     ApiKeyLocation, AuthRequirement, AuthScheme, ContentKind, CredentialLocator,
     CredentialProvision, Doc, Document, ErrorContent, ErrorResponse, ErrorStatus, Operation,
     PathSegment, Presence, Response, ResponseHeader, ResponseStatus, StreamKind, TypeRef,
+    operation_subject,
 };
 
 use crate::{
@@ -451,6 +452,7 @@ fn operation_function(
         operation.errors.iter().collect()
     };
     let failure = error_type(&errors, document, names, options)?;
+    let subject = format!("operations.{}", operation_subject(operation));
     let method = operation.method.as_str();
     let (args_type, call_options) = if args.is_empty() {
         ("(_options?: CallOptions) =>".to_owned(), "_options")
@@ -503,7 +505,7 @@ fn operation_function(
         "errors: [{}]",
         errors
             .iter()
-            .map(|error| error_descriptor(error, options, validation))
+            .map(|error| error_descriptor(error, options, validation, &subject))
             .collect::<Result<Vec<_>, _>>()?
             .join(", ")
     ));
@@ -950,12 +952,13 @@ fn response_descriptors(
     options: &TsOptions,
     validation: &mut validation::Backend,
 ) -> Result<String, EmitError> {
+    let subject = format!("operations.{}", operation_subject(operation));
     let stream_descriptor = match operation.stream.as_ref().map(|stream| &stream.kind) {
         Some(StreamKind::Sse { events }) => {
             let events = events
                 .iter()
                 .map(|event| {
-                    let validate = validator(Some(&event.data), validation)?;
+                    let validate = validator(Some(&event.data), validation, &subject)?;
                     Ok(format!(
                         "{{ event: {}, schema: {}{validate} }}",
                         string(&event.event),
@@ -981,9 +984,9 @@ fn response_descriptors(
                 _ => None,
             };
             let validate = match item {
-                Some(item) => validator(Some(item), validation)?,
+                Some(item) => validator(Some(item), validation, &subject)?,
                 None if response.content == ContentKind::Stream => String::new(),
-                None => validator(response.body.as_ref(), validation)?,
+                None => validator(response.body.as_ref(), validation, &subject)?,
             };
             let schema = match item {
                 Some(item) => type_ref_json(item, options)?,
@@ -1007,7 +1010,7 @@ fn response_descriptors(
             let headers = response
                 .headers
                 .iter()
-                .map(|header| header_descriptor(header, options, validation))
+                .map(|header| header_descriptor(header, options, validation, &subject))
                 .collect::<Result<Vec<_>, EmitError>>()?
                 .join(", ");
             let headers = if headers.is_empty() {
@@ -1030,8 +1033,9 @@ fn header_descriptor(
     header: &ResponseHeader,
     options: &TsOptions,
     validation: &mut validation::Backend,
+    subject: &str,
 ) -> Result<String, EmitError> {
-    let validate = validator(Some(&header.ty), validation)?;
+    let validate = validator(Some(&header.ty), validation, subject)?;
     Ok(format!(
         "{{ name: {}, required: {}, schema: {}{validate} }}",
         string(&header.wire),
@@ -1043,11 +1047,12 @@ fn header_descriptor(
 fn validator(
     body: Option<&TypeRef>,
     validation: &mut validation::Backend,
+    subject: &str,
 ) -> Result<String, EmitError> {
     let Some(body) = body else {
         return Ok(String::new());
     };
-    let Some(expression) = validation.validate(body)? else {
+    let Some(expression) = validation.validate(body, subject)? else {
         return Ok(String::new());
     };
     Ok(format!(", validate: {expression}"))
@@ -1057,8 +1062,9 @@ fn error_descriptor(
     error: &ErrorResponse,
     options: &TsOptions,
     validation: &mut validation::Backend,
+    subject: &str,
 ) -> Result<String, EmitError> {
-    let validate = validator(error.body.as_ref(), validation)?;
+    let validate = validator(error.body.as_ref(), validation, subject)?;
     let status = serde_json::to_string(&error.status)
         .map_err(|error| EmitError(format!("cannot encode error status: {error}")))?;
     let content = match error.content {
@@ -1076,7 +1082,7 @@ fn error_descriptor(
     let headers = error
         .headers
         .iter()
-        .map(|header| header_descriptor(header, options, validation))
+        .map(|header| header_descriptor(header, options, validation, subject))
         .collect::<Result<Vec<_>, EmitError>>()?
         .join(", ");
     let headers = if headers.is_empty() {

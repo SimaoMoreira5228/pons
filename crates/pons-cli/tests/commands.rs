@@ -1839,7 +1839,7 @@ fn the_validation_flag_is_the_typescript_targets_own() {
 }
 
 #[test]
-fn the_validation_flag_refuses_a_backend_it_does_not_know_and_a_backend_without_a_package() {
+fn the_validation_flag_refuses_an_unknown_backend_and_ignores_a_stale_import() {
     let directory = tempfile::tempdir().unwrap();
     fs::write(directory.path().join("api.json"), FIXTURE).unwrap();
 
@@ -1876,6 +1876,25 @@ fn the_validation_flag_refuses_a_backend_it_does_not_know_and_a_backend_without_
             "--validation",
             "builtin",
         ])
+        .current_dir(directory.path())
+        .output()
+        .unwrap();
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        output.status.success(),
+        "a flag that selects a backend with no package ignores the file's stale import: {stderr}"
+    );
+    let validators = fs::read_to_string(directory.path().join("generated/validators.ts")).unwrap();
+    assert!(validators.contains("validateContract"), "{validators}");
+    assert!(!validators.contains("from \"zod\""), "{validators}");
+
+    fs::write(
+        directory.path().join("pons.toml"),
+        "[emit.ts]\nout_dir = \"generated\"\n\n[emit.ts.validation]\nbackend = \"builtin\"\nimport_from = \"zod\"\n",
+    )
+    .unwrap();
+    let output = pons()
+        .args(["emit", "--target", "ts", "api.json"])
         .current_dir(directory.path())
         .output()
         .unwrap();
