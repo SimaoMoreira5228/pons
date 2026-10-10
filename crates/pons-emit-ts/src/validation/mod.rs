@@ -1,5 +1,6 @@
 mod backend;
 mod builtin;
+mod typebox;
 mod valibot;
 mod walk;
 mod zod;
@@ -62,6 +63,9 @@ impl<'a> Backend<'a> {
             }
             ValidationBackend::Builtin => {
                 Some(Box::new(builtin::Generator::new(document, names, options)))
+            }
+            ValidationBackend::Typebox => {
+                Some(Box::new(typebox::Generator::new(document, names, options)))
             }
             backend => {
                 return Err(EmitError(format!(
