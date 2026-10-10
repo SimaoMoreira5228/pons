@@ -888,11 +888,7 @@ fn the_builtin_backend_ignores_import_from() {
 #[test]
 fn a_backend_without_an_implementation_is_refused_by_name() {
     let document: Document = serde_json::from_value(fixture()).unwrap();
-    for backend in [
-        ValidationBackend::Arktype,
-        ValidationBackend::Yup,
-        ValidationBackend::Superstruct,
-    ] {
+    for backend in [ValidationBackend::Arktype, ValidationBackend::Superstruct] {
         let error = emit_with_options(
             &document,
             TsOptions {

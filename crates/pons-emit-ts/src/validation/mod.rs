@@ -3,6 +3,7 @@ mod builtin;
 mod typebox;
 mod valibot;
 mod walk;
+mod yup;
 mod zod;
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -67,6 +68,7 @@ impl<'a> Backend<'a> {
             ValidationBackend::Typebox => {
                 Some(Box::new(typebox::Generator::new(document, names, options)))
             }
+            ValidationBackend::Yup => Some(Box::new(yup::Generator::new(document, names, options))),
             backend => {
                 return Err(EmitError(format!(
                     "the {} validation backend is not implemented yet",
