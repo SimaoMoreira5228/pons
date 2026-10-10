@@ -1,5 +1,6 @@
 mod backend;
 mod builtin;
+mod valibot;
 mod walk;
 mod zod;
 
@@ -56,6 +57,9 @@ impl<'a> Backend<'a> {
         let generator: Option<Box<dyn Generator + 'a>> = match options.validation.backend {
             ValidationBackend::None => None,
             ValidationBackend::Zod => Some(Box::new(zod::Generator::new(document, names, options))),
+            ValidationBackend::Valibot => {
+                Some(Box::new(valibot::Generator::new(document, names, options)))
+            }
             ValidationBackend::Builtin => {
                 Some(Box::new(builtin::Generator::new(document, names, options)))
             }
