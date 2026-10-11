@@ -143,6 +143,10 @@ impl<'a> Walk<'a> {
         !self.validators.is_empty() || !self.inlines.is_empty()
     }
 
+    pub(crate) fn declares(&self, name: &str) -> bool {
+        self.declarations.values().any(|declared| declared == name)
+    }
+
     pub(crate) fn coverage(&self) -> ValidationCoverage {
         let mut coverage = ValidationCoverage::exact_for_document(self.document);
         for (subject, recorded) in &self.capabilities {

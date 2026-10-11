@@ -1,3 +1,4 @@
+mod arktype;
 mod backend;
 mod builtin;
 mod typebox;
@@ -61,6 +62,9 @@ impl<'a> Backend<'a> {
             ValidationBackend::Zod => Some(Box::new(zod::Generator::new(document, names, options))),
             ValidationBackend::Valibot => {
                 Some(Box::new(valibot::Generator::new(document, names, options)))
+            }
+            ValidationBackend::Arktype => {
+                Some(Box::new(arktype::Generator::new(document, names, options)))
             }
             ValidationBackend::Builtin => {
                 Some(Box::new(builtin::Generator::new(document, names, options)))
