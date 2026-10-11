@@ -5,7 +5,7 @@ use std::{
 };
 
 use pons_emit_ts::{
-    DateMode, ErrorStrategy, GeneratedFile, Int64, Runtime, TsOptions, ValidationBackend,
+    DateMode, EmitMode, ErrorStrategy, GeneratedFile, Int64, Runtime, TsOptions, ValidationBackend,
     ValidationOptions, emit_with_options,
 };
 use pons_ir::Document;
@@ -357,6 +357,129 @@ fn the_carrier_options_reach_the_schema_they_change() {
         dates.contains("\"moment\": dateCarrier()"),
         "date_mode = date reads an instant as a Date: {dates}"
     );
+}
+
+#[test]
+fn a_map_with_a_key_that_is_not_plain_text_is_lossy() {
+    let mut raw = fixture();
+    raw["types"] = json!({
+        "Keyed": {
+            "kind": "struct", "name": ["keyed"], "direction": "output", "openness": "reject",
+            "fields": [{
+                "wire": "table",
+                "ident": ["table"],
+                "ty": {"kind": "map", "key": {"kind": "string", "format": "uuid"}, "value": {"kind": "string"}},
+                "presence": "required"
+            }]
+        }
+    });
+    raw["operations"] = json!([{
+        "id": [["keyed"], ["read"]],
+        "method": "GET",
+        "path": [{"lit": "keyed"}],
+        "auth": {"alternatives": [], "optional": false},
+        "semantics": {"safe": true, "idempotent": true},
+        "responses": [{"status": 200, "content": "json", "body": {"ref": "Keyed"}}],
+        "errors": []
+    }]);
+    let document: Document = serde_json::from_value(raw).unwrap();
+    let refusal = emit_with_options(
+        &document,
+        TsOptions {
+            validation: ValidationOptions::new(ValidationBackend::Typebox),
+            errors: ErrorStrategy::Throw,
+            ..TsOptions::default()
+        },
+    )
+    .unwrap_err();
+    for expected in ["typebox", "types.Keyed", "lossy"] {
+        assert!(
+            refusal.0.contains(expected),
+            "the refusal names {expected}: {}",
+            refusal.0
+        );
+    }
+    let output = emit_with_options(
+        &document,
+        TsOptions {
+            mode: EmitMode::Lossy,
+            validation: ValidationOptions::new(ValidationBackend::Typebox),
+            errors: ErrorStrategy::Throw,
+            ..TsOptions::default()
+        },
+    )
+    .unwrap();
+    for subject in ["types.Keyed", "operations.keyed.read"] {
+        assert!(
+            output.validation_coverage.lossy.contains(subject),
+            "{subject} is lossy: {:?}",
+            output.validation_coverage
+        );
+    }
+    let validators = file(&output.files, "validators.ts");
+    assert!(
+        validators.contains("\"table\": Type.Record(Type.String(), Type.String())"),
+        "the record widens its key rather than dropping the check: {validators}"
+    );
+    let harness = r#"
+import { validateKeyed } from "./validators.ts";
+
+const admits = (label: string, value: unknown) => {
+  const found = validateKeyed(value);
+  if (found !== null) throw new Error(`${label} was refused: ${JSON.stringify(found)}`);
+};
+const refuses = (label: string, value: unknown) => {
+  if (validateKeyed(value) === null) throw new Error(`${label} was admitted`);
+};
+
+admits("a key the contract would refuse", { table: { "not-a-uuid": "x" } });
+refuses("a value of the wrong type", { table: { "not-a-uuid": 1 } });
+"#;
+    run_bun(&output.files, harness);
+}
+
+#[test]
+fn a_string_length_is_counted_in_code_points() {
+    let mut raw = fixture();
+    raw["types"] = json!({
+        "Text": {
+            "kind": "struct", "name": ["text"], "direction": "output", "openness": "reject",
+            "fields": [{
+                "wire": "label",
+                "ident": ["label"],
+                "ty": {"kind": "string", "min_length": 2, "max_length": 4},
+                "presence": "required"
+            }]
+        }
+    });
+    raw["operations"] = json!([{
+        "id": [["text"], ["read"]],
+        "method": "GET",
+        "path": [{"lit": "text"}],
+        "auth": {"alternatives": [], "optional": false},
+        "semantics": {"safe": true, "idempotent": true},
+        "responses": [{"status": 200, "content": "json", "body": {"ref": "Text"}}],
+        "errors": []
+    }]);
+    let document: Document = serde_json::from_value(raw).unwrap();
+    let files = typebox(&document, TsOptions::default());
+    let harness = r#"
+import { validateText } from "./validators.ts";
+
+const admits = (label: string, value: unknown) => {
+  const found = validateText(value);
+  if (found !== null) throw new Error(`${label} was refused: ${JSON.stringify(found)}`);
+};
+const refuses = (label: string, value: unknown) => {
+  if (validateText(value) === null) throw new Error(`${label} was admitted`);
+};
+
+admits("two astral code points", { label: "😀😀" });
+admits("three astral code points", { label: "😀😀😀" });
+refuses("one astral code point", { label: "😀" });
+refuses("five astral code points", { label: "😀😀😀😀😀" });
+"#;
+    run_bun(&files, harness);
 }
 
 #[test]

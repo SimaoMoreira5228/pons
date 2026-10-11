@@ -1,8 +1,8 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use pons_ir::{
-    Access, Direction, Doc, Document, EnumRepr, Field, FieldFormat, InlineType, IntegerWire,
-    ObjectOpenness, Presence, TypeDef, TypeKind, TypeRef, ValidationCoverage, Variant,
+    Access, CoverageLevel, Direction, Doc, Document, EnumRepr, Field, FieldFormat, InlineType,
+    IntegerWire, ObjectOpenness, Presence, TypeDef, TypeKind, TypeRef, ValidationCoverage, Variant,
     VariantPayload, type_subject,
 };
 
@@ -148,18 +148,21 @@ impl<'a> Walk<'a> {
     }
 
     pub(crate) fn coverage(&self) -> ValidationCoverage {
-        let mut coverage = ValidationCoverage::exact_for_document(self.document);
-        for (subject, recorded) in &self.capabilities {
-            if !recorded.unsupported.is_empty() {
-                coverage.exact.remove(subject);
-                coverage.lossy.remove(subject);
-                coverage.unsupported.insert(subject.clone());
-            } else if !recorded.widened.is_empty() {
-                coverage.exact.remove(subject);
-                coverage.lossy.insert(subject.clone());
-            }
-        }
-        coverage
+        let seeds = self
+            .capabilities
+            .iter()
+            .filter_map(|(subject, recorded)| {
+                let level = if !recorded.unsupported.is_empty() {
+                    CoverageLevel::Unsupported
+                } else if !recorded.widened.is_empty() {
+                    CoverageLevel::Lossy
+                } else {
+                    return None;
+                };
+                Some((subject.clone(), level))
+            })
+            .collect();
+        super::coverage::propagate(self.document, &seeds)
     }
 
     fn in_subject<T>(
@@ -567,7 +570,7 @@ impl<'a> Walk<'a> {
                 minimum: minimum.as_ref(),
                 maximum: maximum.as_ref(),
                 multiple_of: multiple_of.as_ref(),
-            }),
+            })?,
             InlineType::Float { bits } => backend.float(*bits),
             InlineType::Decimal { wire } => backend.decimal(*wire),
             InlineType::String {

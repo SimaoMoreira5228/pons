@@ -7,7 +7,7 @@ use pons_ir::{DecimalWire, Document, FieldFormat, Presence, TypeRef, ValidationC
 
 use super::backend::{
     Backend as BackendTrait, Declaration, DeclarationKind, IntCarrier, IntegerShape, Member,
-    ObjectShape, Rendered, StringCarrier, StringShape,
+    ObjectShape, Rendered, StringCarrier, StringShape, integral_constraint,
 };
 use super::walk::Walk;
 use super::{Capabilities, Generator as ValidationGenerator, Imports, Rendered as RenderedFile};
@@ -327,7 +327,7 @@ impl Backend {
         }
     }
 
-    fn integer_schema(&mut self, shape: &IntegerShape) -> String {
+    fn integer_schema(&mut self, shape: &IntegerShape) -> Result<String, EmitError> {
         self.need(&["integer"]);
         let base = match shape.carrier {
             IntCarrier::Text => {
@@ -351,14 +351,14 @@ impl Backend {
         let mut arguments = vec![base, shape.bits.to_string(), shape.signed.to_string()];
         for value in [shape.minimum, shape.maximum, shape.multiple_of] {
             arguments.push(match value {
-                Some(value) => string(&value.to_string()),
+                Some(value) => string(&integral_constraint(value)?),
                 None => String::from("undefined"),
             });
         }
         while arguments.last().map(String::as_str) == Some("undefined") {
             arguments.pop();
         }
-        format!("integer({})", arguments.join(", "))
+        Ok(format!("integer({})", arguments.join(", ")))
     }
 }
 
@@ -442,8 +442,8 @@ impl BackendTrait for Backend {
         Rendered::exact(self.string_schema(shape))
     }
 
-    fn integer(&mut self, shape: &IntegerShape) -> Rendered {
-        Rendered::exact(self.integer_schema(shape))
+    fn integer(&mut self, shape: &IntegerShape) -> Result<Rendered, EmitError> {
+        Ok(Rendered::exact(self.integer_schema(shape)?))
     }
 
     fn float(&mut self, bits: u8) -> Rendered {
@@ -613,14 +613,18 @@ mod tests {
     fn trailing_undefined_constraints_are_dropped_from_the_integer_call() {
         let mut backend = Backend::new();
         let minimum = serde_json::json!(3);
-        let schema = rendered(backend.integer(&IntegerShape {
-            carrier: IntCarrier::Number,
-            bits: 16,
-            signed: false,
-            minimum: Some(&minimum),
-            maximum: None,
-            multiple_of: None,
-        }));
+        let schema = rendered(
+            backend
+                .integer(&IntegerShape {
+                    carrier: IntCarrier::Number,
+                    bits: 16,
+                    signed: false,
+                    minimum: Some(&minimum),
+                    maximum: None,
+                    multiple_of: None,
+                })
+                .unwrap(),
+        );
         assert_eq!(
             schema,
             "integer(v.pipe(v.number(), v.integer()), 16, false, \"3\")"

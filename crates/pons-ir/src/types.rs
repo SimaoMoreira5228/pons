@@ -56,7 +56,7 @@ pub enum TypeKind {
 }
 
 impl TypeKind {
-    pub(crate) fn visit_refs(&self, visit: &mut impl FnMut(&TypeRef)) {
+    pub fn visit_refs(&self, visit: &mut impl FnMut(&TypeRef)) {
         match self {
             Self::Struct {
                 fields,
@@ -256,7 +256,7 @@ pub struct NamedRef {
 }
 
 impl TypeRef {
-    pub(crate) fn visit_refs(&self, visit: &mut impl FnMut(&TypeRef)) {
+    pub fn visit_refs(&self, visit: &mut impl FnMut(&TypeRef)) {
         visit(self);
         match self {
             Self::Named(_) => {}

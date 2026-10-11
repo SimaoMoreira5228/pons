@@ -70,7 +70,7 @@ fn inherit_errors() -> bool {
 }
 
 impl Operation {
-    pub(crate) fn visit_refs(&self, visit: &mut impl FnMut(&TypeRef)) {
+    pub fn visit_refs(&self, visit: &mut impl FnMut(&TypeRef)) {
         self.path.iter().for_each(|segment| {
             if let PathSegment::Param { ty, .. } = segment {
                 ty.visit_refs(visit);

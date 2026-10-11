@@ -4,7 +4,7 @@ use pons_ir::{DecimalWire, FieldFormat, Presence};
 
 use super::super::backend::{
     Backend, Declaration, DeclarationKind, IntCarrier, IntegerShape, Member, ObjectShape, Rendered,
-    StringCarrier, StringShape,
+    StringCarrier, StringShape, integral_constraint,
 };
 use crate::{EmitError, jsdoc, string};
 
@@ -280,7 +280,7 @@ impl Backend for Generator {
         Rendered::exact(schema)
     }
 
-    fn integer(&mut self, shape: &IntegerShape) -> Rendered {
+    fn integer(&mut self, shape: &IntegerShape) -> Result<Rendered, EmitError> {
         self.need.insert("integer");
         let base = match shape.carrier {
             IntCarrier::Text => {
@@ -305,14 +305,17 @@ impl Backend for Generator {
         let mut arguments = vec![base, shape.bits.to_string(), shape.signed.to_string()];
         for value in [shape.minimum, shape.maximum, shape.multiple_of] {
             arguments.push(match value {
-                Some(value) => string(&value.to_string()),
+                Some(value) => string(&integral_constraint(value)?),
                 None => String::from("undefined"),
             });
         }
         while arguments.last().map(String::as_str) == Some("undefined") {
             arguments.pop();
         }
-        Rendered::exact(format!("integer({})", arguments.join(", ")))
+        Ok(Rendered::exact(format!(
+            "integer({})",
+            arguments.join(", ")
+        )))
     }
 
     fn float(&mut self, bits: u8) -> Rendered {
@@ -478,14 +481,56 @@ mod tests {
     fn trailing_undefined_constraints_are_dropped_from_the_integer_call() {
         let mut generator = Generator::new();
         let minimum = serde_json::json!(3);
-        let schema = rendered(generator.integer(&IntegerShape {
-            carrier: IntCarrier::Number,
-            bits: 16,
-            signed: false,
-            minimum: Some(&minimum),
-            maximum: None,
-            multiple_of: None,
-        }));
+        let schema = rendered(
+            generator
+                .integer(&IntegerShape {
+                    carrier: IntCarrier::Number,
+                    bits: 16,
+                    signed: false,
+                    minimum: Some(&minimum),
+                    maximum: None,
+                    multiple_of: None,
+                })
+                .unwrap(),
+        );
         assert_eq!(schema, "integer(z.int(), 16, false, \"3\")");
+    }
+
+    #[test]
+    fn integral_decimal_constraints_are_canonicalised() {
+        let mut generator = Generator::new();
+        let minimum = serde_json::json!(5.0);
+        let maximum = serde_json::json!(1e3);
+        let schema = rendered(
+            generator
+                .integer(&IntegerShape {
+                    carrier: IntCarrier::Number,
+                    bits: 32,
+                    signed: true,
+                    minimum: Some(&minimum),
+                    maximum: Some(&maximum),
+                    multiple_of: None,
+                })
+                .unwrap(),
+        );
+        assert_eq!(schema, "integer(z.int(), 32, true, \"5\", \"1000\")");
+    }
+
+    #[test]
+    fn a_fractional_constraint_is_rejected() {
+        let mut generator = Generator::new();
+        let minimum = serde_json::json!(1.5);
+        let error = generator
+            .integer(&IntegerShape {
+                carrier: IntCarrier::Number,
+                bits: 32,
+                signed: true,
+                minimum: Some(&minimum),
+                maximum: None,
+                multiple_of: None,
+            })
+            .map(|_| ())
+            .unwrap_err();
+        assert!(error.0.contains("not an integral value"));
     }
 }

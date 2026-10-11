@@ -1066,6 +1066,62 @@ for (const [key, values] of Object.entries(refuses)) {
 }
 
 #[test]
+fn a_decimal_bound_reaches_the_integer_call_as_an_integer() {
+    let mut raw = fixture();
+    raw["types"] = json!({
+        "Bounded": {
+            "kind": "struct", "name": ["bounded"], "direction": "output", "openness": "reject",
+            "fields": [{
+                "wire": "count",
+                "ident": ["count"],
+                "ty": {
+                    "kind": "int",
+                    "bits": 32,
+                    "signed": true,
+                    "wire": "number",
+                    "minimum": 5.0,
+                    "maximum": 1e3
+                },
+                "presence": "required"
+            }]
+        }
+    });
+    raw["operations"] = json!([{
+        "id": [["bounded"], ["read"]],
+        "method": "GET",
+        "path": [{"lit": "bounded"}],
+        "auth": {"alternatives": [], "optional": false},
+        "semantics": {"safe": true, "idempotent": true},
+        "responses": [{"status": 200, "content": "json", "body": {"ref": "Bounded"}}],
+        "errors": []
+    }]);
+    let document: Document = serde_json::from_value(raw).unwrap();
+    let files = zod(&document, TsOptions::default());
+    let validators = file(&files, "validators.ts");
+    assert!(
+        validators.contains("\"count\": integer(z.int(), 32, true, \"5\", \"1000\")"),
+        "a decimal bound is written as the integer it names: {validators}"
+    );
+    let harness = r#"
+import { validateBounded } from "./validators.ts";
+
+const admits = (label: string, value: unknown) => {
+  const found = validateBounded(value);
+  if (found !== null) throw new Error(`${label} was refused: ${JSON.stringify(found)}`);
+};
+const refuses = (label: string, value: unknown) => {
+  if (validateBounded(value) === null) throw new Error(`${label} was admitted`);
+};
+
+admits("the minimum", { count: 5 });
+admits("the maximum", { count: 1000 });
+refuses("below the minimum", { count: 4 });
+refuses("above the maximum", { count: 1001 });
+"#;
+    run_bun(&files, harness);
+}
+
+#[test]
 fn the_wire_validator_still_answers_a_request_it_refuses() {
     let mut raw = fixture();
     raw["types"]["LoginRequest"] = json!({

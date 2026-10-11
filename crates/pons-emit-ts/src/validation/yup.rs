@@ -6,7 +6,7 @@ use pons_ir::{
 
 use super::backend::{
     Backend as BackendTrait, Capability, Declaration, DeclarationKind, IntCarrier, IntegerShape,
-    Member, ObjectShape, Rendered, StringCarrier, StringShape,
+    Member, ObjectShape, Rendered, StringCarrier, StringShape, integral_constraint,
 };
 use super::walk::{Walk, declaration_names};
 use super::{Capabilities, Generator as ValidationGenerator, Imports, Rendered as RenderedFile};
@@ -35,7 +35,21 @@ const PRELUDE: &[(&str, &str)] = &[
     ("date", "const DATE = /^(\\d{4})-(\\d{2})-(\\d{2})$/;\n"),
     (
         "calendar",
-        "function isCalendarDay(value: string): boolean {\n  const match = DATE.exec(value);\n  if (match === null) return false;\n  const year = Number(match[1]);\n  const month = Number(match[2]);\n  const day = Number(match[3]);\n  const date = new Date(Date.UTC(year, month - 1, day));\n  return date.getUTCFullYear() === year && date.getUTCMonth() === month - 1 && date.getUTCDate() === day;\n}\nconst day = () => yup.string().matches(DATE, \"the date is not a full-date\").test(\"calendar\", \"the date is not a day the calendar has\", (value) => value === undefined || isCalendarDay(value as string));\n",
+        r#"function isCalendarDay(value: string): boolean {
+  const match = DATE.exec(value);
+  if (match === null) return false;
+  const year = Number(match[1]);
+  const month = Number(match[2]);
+  const day = Number(match[3]);
+  if (month < 1 || month > 12 || day < 1) return false;
+  return day <= daysInMonth(year, month);
+}
+function daysInMonth(year: number, month: number): number {
+  if (month === 2) return year % 4 === 0 && (year % 100 !== 0 || year % 400 === 0) ? 29 : 28;
+  return [4, 6, 9, 11].includes(month) ? 30 : 31;
+}
+const day = () => yup.string().matches(DATE, "the date is not a full-date").test("calendar", "the date is not a day the calendar has", (value) => value === undefined || isCalendarDay(value as string));
+"#,
     ),
     (
         "date-time",
@@ -59,25 +73,28 @@ const PRELUDE: &[(&str, &str)] = &[
     ),
     (
         "duration",
-        "const DURATION = /^-?P(?=\\d|T\\d)(?:\\d+Y)?(?:\\d+M)?(?:\\d+W)?(?:\\d+D)?(?:T(?=\\d)(?:\\d+H)?(?:\\d+M)?(?:\\d+(?:\\.\\d+)?S)?)?$/;\n",
+        "const DURATION = /^P(?:(\\d+W)|(?!.*W)(?=\\d|T\\d)(\\d+Y)?(\\d+M)?(\\d+D)?(T(?=\\d)(\\d+H)?(\\d+M)?(\\d+([.,]\\d+)?S)?)?)$/;\n",
     ),
     (
         "uuid",
         "const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;\n",
     ),
-    ("email", "const EMAIL = /^[^\\s@]+@[^\\s@]+\\.[^\\s@]+$/;\n"),
+    (
+        "email",
+        "const EMAIL = /^(?:[A-Za-z0-9_'+\\-]+\\.)*[A-Za-z0-9_'+\\-]*[A-Za-z0-9_+-]@(?:[A-Za-z0-9][A-Za-z0-9\\-]*\\.)+[A-Za-z]{2,}$/;\n",
+    ),
     (
         "ipv4",
         "const IPV4 = /^(?:(?:25[0-5]|2[0-4]\\d|1\\d\\d|[1-9]?\\d)\\.){3}(?:25[0-5]|2[0-4]\\d|1\\d\\d|[1-9]?\\d)$/;\n",
     ),
     (
         "ipv6",
-        r#"const IPV6 = /^(?:(?:[0-9a-f]{1,4}:){7}[0-9a-f]{1,4}|(?:[0-9a-f]{1,4}:){1,7}:|(?:[0-9a-f]{1,4}:){1,6}:[0-9a-f]{1,4}|(?:[0-9a-f]{1,4}:){1,5}(?::[0-9a-f]{1,4}){1,2}|(?:[0-9a-f]{1,4}:){1,4}(?::[0-9a-f]{1,4}){1,3}|(?:[0-9a-f]{1,4}:){1,3}(?::[0-9a-f]{1,4}){1,4}|(?:[0-9a-f]{1,4}:){1,2}(?::[0-9a-f]{1,4}){1,5}|[0-9a-f]{1,4}:(?::[0-9a-f]{1,4}){1,6}|:(?:(?::[0-9a-f]{1,4}){1,7}|:))$/i;
+        r#"const IPV6 = /^(([0-9a-fA-F]{1,4}:){7}[0-9a-fA-F]{1,4}|([0-9a-fA-F]{1,4}:){1,7}:|([0-9a-fA-F]{1,4}:){1,6}:[0-9a-fA-F]{1,4}|([0-9a-fA-F]{1,4}:){1,5}(:[0-9a-fA-F]{1,4}){1,2}|([0-9a-fA-F]{1,4}:){1,4}(:[0-9a-fA-F]{1,4}){1,3}|([0-9a-fA-F]{1,4}:){1,3}(:[0-9a-fA-F]{1,4}){1,4}|([0-9a-fA-F]{1,4}:){1,2}(:[0-9a-fA-F]{1,4}){1,5}|[0-9a-fA-F]{1,4}:((:[0-9a-fA-F]{1,4}){1,6})|:((:[0-9a-fA-F]{1,4}){1,7}|:))$/;
 "#,
     ),
     (
         "uri",
-        "const isUri = (value: string): boolean => {\n  try {\n    new URL(value);\n    return true;\n  } catch {\n    return false;\n  }\n};\n",
+        "const isUri = (value: string): boolean => {\n  if (/\\s/.test(value)) return false;\n  try {\n    return new URL(value).protocol.length > 1;\n  } catch {\n    return false;\n  }\n};\n",
     ),
     (
         "schema-of",
@@ -101,7 +118,7 @@ const PRELUDE: &[(&str, &str)] = &[
     ),
     (
         "unique",
-        "function stableKey(value: unknown): string {\n  if (typeof value === \"bigint\") return `bigint:${value}`;\n  if (Array.isArray(value)) return `[${value.map(stableKey).join(\",\")}]`;\n  if (value !== null && typeof value === \"object\") {\n    const record = value as Record<string, unknown>;\n    return `{${Object.keys(record).sort().map((key) => `${JSON.stringify(key)}:${stableKey(record[key])}`).join(\",\")}}`;\n  }\n  return JSON.stringify(value);\n}\nconst uniqueItems = (item: yup.ISchema) => yup.array().of(present(item)).test(\"unique\", \"array values must be unique\", (values) => values === undefined || new Set((values as unknown[]).map(stableKey)).size === (values as unknown[]).length);\n",
+        "function stableKey(value: unknown): string {\n  if (typeof value === \"bigint\") return `bigint:${value}`;\n  if (value instanceof Date) return `date:${value.getTime()}`;\n  if (value instanceof Uint8Array) return `bytes:${Array.from(value).join(\",\")}`;\n  if (Array.isArray(value)) return `[${value.map(stableKey).join(\",\")}]`;\n  if (value !== null && typeof value === \"object\") {\n    const record = value as Record<string, unknown>;\n    return `{${Object.keys(record).sort().map((key) => `${JSON.stringify(key)}:${stableKey(record[key])}`).join(\",\")}}`;\n  }\n  return JSON.stringify(value);\n}\nconst uniqueItems = (item: yup.ISchema) => yup.array().of(present(item)).test(\"unique\", \"array values must be unique\", (values) => values === undefined || new Set((values as unknown[]).map(stableKey)).size === (values as unknown[]).length);\n",
     ),
 ];
 
@@ -431,7 +448,7 @@ impl BackendTrait for Backend {
         Rendered::exact(schema)
     }
 
-    fn integer(&mut self, shape: &IntegerShape) -> Rendered {
+    fn integer(&mut self, shape: &IntegerShape) -> Result<Rendered, EmitError> {
         self.require("integer");
         let base = match shape.carrier {
             IntCarrier::Text => {
@@ -458,14 +475,17 @@ impl BackendTrait for Backend {
         let mut arguments = vec![base, shape.bits.to_string(), shape.signed.to_string()];
         for value in [shape.minimum, shape.maximum, shape.multiple_of] {
             arguments.push(match value {
-                Some(value) => string(&value.to_string()),
+                Some(value) => string(&integral_constraint(value)?),
                 None => String::from("undefined"),
             });
         }
         while arguments.last().map(String::as_str) == Some("undefined") {
             arguments.pop();
         }
-        Rendered::exact(format!("integer({})", arguments.join(", ")))
+        Ok(Rendered::exact(format!(
+            "integer({})",
+            arguments.join(", ")
+        )))
     }
 
     fn float(&mut self, bits: u8) -> Rendered {

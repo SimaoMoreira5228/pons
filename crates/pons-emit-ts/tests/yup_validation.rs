@@ -5,7 +5,8 @@ use std::{
 };
 
 use pons_emit_ts::{
-    EmitMode, GeneratedFile, TsOptions, ValidationBackend, ValidationOptions, emit_with_options,
+    DateMode, EmitMode, GeneratedFile, TsOptions, ValidationBackend, ValidationOptions,
+    emit_with_options,
 };
 use pons_ir::Document;
 use serde_json::{Value, json};
@@ -151,6 +152,29 @@ fn counts() -> Document {
     serde_json::from_value(raw).unwrap()
 }
 
+fn single(fields: Value) -> Document {
+    let mut raw = fixture();
+    raw["types"] = json!({
+        "Subject": {
+            "kind": "struct",
+            "name": ["subject"],
+            "direction": "output",
+            "openness": "reject",
+            "fields": fields
+        }
+    });
+    raw["operations"] = json!([{
+        "id": [["subject"], ["read"]],
+        "method": "GET",
+        "path": [{"lit": "subject"}],
+        "auth": {"alternatives": [], "optional": false},
+        "semantics": {"safe": true, "idempotent": true},
+        "responses": [{"status": 200, "content": "json", "body": {"ref": "Subject"}}],
+        "errors": []
+    }]);
+    serde_json::from_value(raw).unwrap()
+}
+
 #[test]
 fn a_lossy_internal_enum_is_reported_while_the_bodies_it_can_check_stay_checked() {
     let document: Document = serde_json::from_value(fixture()).unwrap();
@@ -283,6 +307,132 @@ refuses("an unknown property", { balance: 1, extra: true });
 }
 
 #[test]
+fn the_format_corpus_agrees_with_the_contract() {
+    let document = single(json!([
+        {"wire": "day", "ident": ["day"], "ty": {"kind": "string", "format": "date"}, "presence": "required"},
+        {"wire": "moment", "ident": ["moment"], "ty": {"kind": "string", "format": "date-time"}, "presence": "required"},
+        {"wire": "clock", "ident": ["clock"], "ty": {"kind": "string", "format": "time"}, "presence": "required"},
+        {"wire": "span", "ident": ["span"], "ty": {"kind": "string", "format": "duration"}, "presence": "required"},
+        {"wire": "who", "ident": ["who"], "ty": {"kind": "string", "format": "email"}, "presence": "required"},
+        {"wire": "link", "ident": ["link"], "ty": {"kind": "string", "format": "uri"}, "presence": "required"}
+    ]));
+    let output = emit_with_options(
+        &document,
+        TsOptions {
+            validation: ValidationOptions::new(ValidationBackend::Yup),
+            ..TsOptions::default()
+        },
+    )
+    .unwrap();
+    let harness = r#"
+import { validateSubject } from "./validators.ts";
+
+const base = {
+  day: "2024-02-29",
+  moment: "2024-02-29T23:59:59Z",
+  clock: "23:59:59Z",
+  span: "P1Y2M3DT4H5M6.789S",
+  who: "a@b.co",
+  link: "https://example.test/a",
+};
+const admits = (label: string, value: unknown) => {
+  const found = validateSubject(value);
+  if (found !== null) throw new Error(`${label} was refused: ${JSON.stringify(found)}`);
+};
+const refuses = (label: string, value: unknown) => {
+  if (validateSubject(value) === null) throw new Error(`${label} was admitted`);
+};
+
+admits("a leap day in a single-digit year", { ...base, day: "0004-02-29" });
+refuses("a day the calendar does not have", { ...base, moment: "2024-02-30T00:00:00Z" });
+refuses("an hour the clock does not have", { ...base, clock: "24:00:00Z" });
+refuses("a negative duration", { ...base, span: "-P1D" });
+refuses("a duration mixing weeks and years", { ...base, span: "P1Y2W" });
+refuses("a fraction outside the seconds position", { ...base, span: "P1.5S" });
+refuses("an email with a one-letter top-level domain", { ...base, who: "a@b.c" });
+refuses("a uri with whitespace", { ...base, link: "https://exa mple.test" });
+"#;
+    run_bun(&output.files, harness);
+}
+
+#[test]
+fn a_unique_array_of_distinct_dates_is_not_a_duplicate() {
+    let document = single(json!([
+        {
+            "wire": "days",
+            "ident": ["days"],
+            "ty": {
+                "kind": "array",
+                "unique": true,
+                "item": {"kind": "string", "format": "date-time"}
+            },
+            "presence": "required"
+        }
+    ]));
+    let output = emit_with_options(
+        &document,
+        TsOptions {
+            date_mode: DateMode::Date,
+            validation: ValidationOptions::new(ValidationBackend::Yup),
+            ..TsOptions::default()
+        },
+    )
+    .unwrap();
+    let harness = r#"
+import { validateSubject } from "./validators.ts";
+
+const admits = (label: string, value: unknown) => {
+  const found = validateSubject(value);
+  if (found !== null) throw new Error(`${label} was refused: ${JSON.stringify(found)}`);
+};
+const refuses = (label: string, value: unknown) => {
+  if (validateSubject(value) === null) throw new Error(`${label} was admitted`);
+};
+
+admits("two distinct dates", { days: [new Date("2024-01-01T00:00:00Z"), new Date("2024-01-02T00:00:00Z")] });
+refuses("the same instant twice", { days: [new Date("2024-01-01T00:00:00Z"), new Date("2024-01-01T00:00:00Z")] });
+"#;
+    run_bun(&output.files, harness);
+}
+
+#[test]
+fn a_string_length_is_counted_in_code_points() {
+    let document = single(json!([
+        {
+            "wire": "label",
+            "ident": ["label"],
+            "ty": {"kind": "string", "min_length": 2, "max_length": 4},
+            "presence": "required"
+        }
+    ]));
+    let output = emit_with_options(
+        &document,
+        TsOptions {
+            validation: ValidationOptions::new(ValidationBackend::Yup),
+            ..TsOptions::default()
+        },
+    )
+    .unwrap();
+    let harness = r#"
+import { validateSubject } from "./validators.ts";
+
+const admits = (label: string, value: unknown) => {
+  const found = validateSubject(value);
+  if (found !== null) throw new Error(`${label} was refused: ${JSON.stringify(found)}`);
+};
+const refuses = (label: string, value: unknown) => {
+  if (validateSubject(value) === null) throw new Error(`${label} was admitted`);
+};
+
+admits("two astral code points", { label: "😀😀" });
+admits("three astral code points", { label: "😀😀😀" });
+refuses("one astral code point", { label: "😀" });
+refuses("five astral code points", { label: "😀😀😀😀😀" });
+"#;
+    run_bun(&output.files, harness);
+}
+
+#[test]
 fn a_map_is_lossy_so_strict_mode_refuses_it_and_lossy_mode_names_it() {
     let document = counts();
     let refusal = emit_with_options(
@@ -312,6 +462,14 @@ fn a_map_is_lossy_so_strict_mode_refuses_it_and_lossy_mode_names_it() {
     assert!(
         output.validation_coverage.lossy.contains("types.Counts"),
         "the map is reported: {:?}",
+        output.validation_coverage
+    );
+    assert!(
+        output
+            .validation_coverage
+            .lossy
+            .contains("operations.counts.read"),
+        "the operation that reaches the map is reported too: {:?}",
         output.validation_coverage
     );
     let validators = file(&output.files, "validators.ts");

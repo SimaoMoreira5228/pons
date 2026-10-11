@@ -181,6 +181,50 @@ if (validateLoginErrorInvalid({ code: "locked", retry_after: 1 }) === null) {
 }
 
 #[test]
+fn a_string_length_is_counted_in_code_points() {
+    let mut raw = fixture();
+    raw["types"] = json!({
+        "Text": {
+            "kind": "struct", "name": ["text"], "direction": "output", "openness": "reject",
+            "fields": [{
+                "wire": "label",
+                "ident": ["label"],
+                "ty": {"kind": "string", "min_length": 2, "max_length": 4},
+                "presence": "required"
+            }]
+        }
+    });
+    raw["operations"] = json!([{
+        "id": [["text"], ["read"]],
+        "method": "GET",
+        "path": [{"lit": "text"}],
+        "auth": {"alternatives": [], "optional": false},
+        "semantics": {"safe": true, "idempotent": true},
+        "responses": [{"status": 200, "content": "json", "body": {"ref": "Text"}}],
+        "errors": []
+    }]);
+    let document: Document = serde_json::from_value(raw).unwrap();
+    let files = valibot(&document);
+    let harness = r#"
+import { validateText } from "./validators.ts";
+
+const admits = (label: string, value: unknown) => {
+  const found = validateText(value);
+  if (found !== null) throw new Error(`${label} was refused: ${JSON.stringify(found)}`);
+};
+const refuses = (label: string, value: unknown) => {
+  if (validateText(value) === null) throw new Error(`${label} was admitted`);
+};
+
+admits("two astral code points", { label: "😀😀" });
+admits("three astral code points", { label: "😀😀😀" });
+refuses("one astral code point", { label: "😀" });
+refuses("five astral code points", { label: "😀😀😀😀😀" });
+"#;
+    run_bun(&files, harness);
+}
+
+#[test]
 fn an_inline_body_gets_one_validator_the_operation_imports() {
     let mut raw = fixture();
     raw["operations"][0]["responses"][0]["body"] = json!({"kind": "string", "format": "email"});

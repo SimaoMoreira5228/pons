@@ -256,11 +256,13 @@ mod schema {
     use pons_ir::{DecimalWire, FieldFormat, Presence};
 
     use super::super::backend::{
-        Backend, Declaration, IntCarrier, IntegerShape, Member, ObjectShape, Rendered,
-        StringCarrier, StringShape,
+        Backend, Capability, Declaration, IntCarrier, IntegerShape, Member, ObjectShape, Rendered,
+        StringCarrier, StringShape, integral_constraint,
     };
     use super::{CANONICAL_INTEGER, CANONICAL_SIGNED_INTEGER, DECIMAL, PRELUDE, REFERENCE};
     use crate::{EmitError, jsdoc, string};
+
+    const MAP: Capability = Capability::new("validation.map");
 
     pub(super) struct Generator {
         need: BTreeSet<&'static str>,
@@ -385,7 +387,7 @@ mod schema {
             Rendered::exact(schema)
         }
 
-        fn integer(&mut self, shape: &IntegerShape) -> Rendered {
+        fn integer(&mut self, shape: &IntegerShape) -> Result<Rendered, EmitError> {
             self.need.insert("integer");
             let base = match shape.carrier {
                 IntCarrier::Text => format!(
@@ -402,14 +404,17 @@ mod schema {
             let mut arguments = vec![base, shape.bits.to_string(), shape.signed.to_string()];
             for value in [shape.minimum, shape.maximum, shape.multiple_of] {
                 arguments.push(match value {
-                    Some(value) => string(&value.to_string()),
+                    Some(value) => string(&integral_constraint(value)?),
                     None => String::from("undefined"),
                 });
             }
             while arguments.last().map(String::as_str) == Some("undefined") {
                 arguments.pop();
             }
-            Rendered::exact(format!("integer({})", arguments.join(", ")))
+            Ok(Rendered::exact(format!(
+                "integer({})",
+                arguments.join(", ")
+            )))
         }
 
         fn float(&mut self, bits: u8) -> Rendered {
@@ -453,7 +458,11 @@ mod schema {
         }
 
         fn map(&mut self, key: &str, value: &str) -> Rendered {
-            Rendered::exact(format!("Type.Record({key}, {value})"))
+            if record_key(key) {
+                Rendered::exact(format!("Type.Record({key}, {value})"))
+            } else {
+                Rendered::Widened(format!("Type.Record(Type.String(), {value})"), MAP)
+            }
         }
 
         fn nullable(&mut self, inner: &str) -> Rendered {
@@ -562,6 +571,11 @@ mod schema {
             FieldFormat::Ipv6 => "ipv6",
         }
     }
+
+    fn record_key(key: &str) -> bool {
+        key == "Type.String()"
+            || (key.starts_with("Type.String({ pattern: ") && key.ends_with(" })"))
+    }
 }
 
 #[cfg(test)]
@@ -610,6 +624,26 @@ mod tests {
     }
 
     #[test]
+    fn a_record_key_that_is_not_plain_text_is_widened_under_validation_map() {
+        let mut generator = Generator::new();
+        match generator.map("format(Type.String(), \"uuid\")", "Type.String()") {
+            Rendered::Widened(schema, capability) => {
+                assert_eq!(schema, "Type.Record(Type.String(), Type.String())");
+                assert_eq!(capability.id(), "validation.map");
+            }
+            _ => panic!("a formatted record key has no plain-text record form"),
+        }
+        assert_eq!(
+            rendered(generator.map("Type.String()", "Type.String()")),
+            "Type.Record(Type.String(), Type.String())"
+        );
+        assert_eq!(
+            rendered(generator.map("Type.String({ pattern: \"^[a-z]+$\" })", "Type.String()")),
+            "Type.Record(Type.String({ pattern: \"^[a-z]+$\" }), Type.String())"
+        );
+    }
+
+    #[test]
     fn a_string_shape_keeps_the_format_before_the_code_point_bounds() {
         let mut generator = Generator::new();
         let schema = rendered(generator.string(&StringShape {
@@ -629,14 +663,18 @@ mod tests {
     fn a_wide_integer_names_its_carrier_and_bounds() {
         let mut generator = Generator::new();
         let minimum = serde_json::json!(3);
-        let schema = rendered(generator.integer(&IntegerShape {
-            carrier: IntCarrier::Bigint,
-            bits: 64,
-            signed: false,
-            minimum: Some(&minimum),
-            maximum: None,
-            multiple_of: None,
-        }));
+        let schema = rendered(
+            generator
+                .integer(&IntegerShape {
+                    carrier: IntCarrier::Bigint,
+                    bits: 64,
+                    signed: false,
+                    minimum: Some(&minimum),
+                    maximum: None,
+                    multiple_of: None,
+                })
+                .unwrap(),
+        );
         assert_eq!(schema, "integer(Type.BigInt(), 64, false, \"3\")");
     }
 

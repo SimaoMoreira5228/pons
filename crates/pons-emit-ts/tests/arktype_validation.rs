@@ -5,8 +5,8 @@ use std::{
 };
 
 use pons_emit_ts::{
-    EmitMode, ErrorStrategy, GeneratedFile, Int64, TsOptions, ValidationBackend, ValidationOptions,
-    emit_with_options,
+    DateMode, EmitMode, ErrorStrategy, GeneratedFile, Int64, TsOptions, ValidationBackend,
+    ValidationOptions, emit_with_options,
 };
 use pons_ir::Document;
 use serde_json::{Value, json};
@@ -465,6 +465,115 @@ admits("a record with a key the contract would refuse", validateKeyed, {
 refuses("a record value of the wrong type", validateKeyed, { table: { "not-a-uuid": 1 } });
 "#;
     run_bun(&output.files, harness);
+}
+
+#[test]
+fn an_invalid_date_and_a_hostile_value_are_issues_not_throws() {
+    let mut raw = fixture();
+    raw["types"] = json!({
+        "Stamped": {
+            "kind": "struct", "name": ["stamped"], "direction": "output", "openness": "reject",
+            "fields": [{
+                "wire": "at",
+                "ident": ["at"],
+                "ty": {"kind": "string", "format": "date-time"},
+                "presence": "required"
+            }]
+        }
+    });
+    raw["operations"] = json!([{
+        "id": [["stamped"], ["read"]],
+        "method": "GET",
+        "path": [{"lit": "stamped"}],
+        "auth": {"alternatives": [], "optional": false},
+        "semantics": {"safe": true, "idempotent": true},
+        "responses": [{"status": 200, "content": "json", "body": {"ref": "Stamped"}}],
+        "errors": []
+    }]);
+    let document: Document = serde_json::from_value(raw).unwrap();
+    let files = arktype(
+        &document,
+        TsOptions {
+            date_mode: DateMode::Date,
+            ..TsOptions::default()
+        },
+    );
+    let harness = r#"
+import { validateStamped } from "./validators.ts";
+
+const admits = (label: string, value: unknown) => {
+  const found = validateStamped(value);
+  if (found !== null) throw new Error(`${label} was refused: ${JSON.stringify(found)}`);
+};
+const refuses = (label: string, value: unknown) => {
+  const found = validateStamped(value);
+  if (found === null) throw new Error(`${label} was admitted`);
+  return found;
+};
+
+admits("a real date", { at: new Date("2024-01-01T00:00:00Z") });
+const invalid = refuses("an invalid date", { at: new Date(Number.NaN) });
+if (!Array.isArray(invalid.path)) throw new Error(`the issue has no path: ${JSON.stringify(invalid)}`);
+
+const hostile = new Proxy({}, {
+  get(target, property) {
+    if (property === "at") throw new Error("the proxy refused the read");
+    return Reflect.get(target, property);
+  },
+  ownKeys() {
+    throw new Error("the proxy refused the keys");
+  },
+});
+const trapped = refuses("a hostile proxy", hostile);
+if (typeof trapped.message !== "string" || trapped.message.length === 0) {
+  throw new Error(`the issue does not name the throw: ${JSON.stringify(trapped)}`);
+}
+"#;
+    run_bun(&files, harness);
+}
+
+#[test]
+fn a_string_length_is_counted_in_code_points() {
+    let mut raw = fixture();
+    raw["types"] = json!({
+        "Text": {
+            "kind": "struct", "name": ["text"], "direction": "output", "openness": "reject",
+            "fields": [{
+                "wire": "label",
+                "ident": ["label"],
+                "ty": {"kind": "string", "min_length": 2, "max_length": 4},
+                "presence": "required"
+            }]
+        }
+    });
+    raw["operations"] = json!([{
+        "id": [["text"], ["read"]],
+        "method": "GET",
+        "path": [{"lit": "text"}],
+        "auth": {"alternatives": [], "optional": false},
+        "semantics": {"safe": true, "idempotent": true},
+        "responses": [{"status": 200, "content": "json", "body": {"ref": "Text"}}],
+        "errors": []
+    }]);
+    let document: Document = serde_json::from_value(raw).unwrap();
+    let files = arktype(&document, TsOptions::default());
+    let harness = r#"
+import { validateText } from "./validators.ts";
+
+const admits = (label: string, value: unknown) => {
+  const found = validateText(value);
+  if (found !== null) throw new Error(`${label} was refused: ${JSON.stringify(found)}`);
+};
+const refuses = (label: string, value: unknown) => {
+  if (validateText(value) === null) throw new Error(`${label} was admitted`);
+};
+
+admits("two astral code points", { label: "😀😀" });
+admits("three astral code points", { label: "😀😀😀" });
+refuses("one astral code point", { label: "😀" });
+refuses("five astral code points", { label: "😀😀😀😀😀" });
+"#;
+    run_bun(&files, harness);
 }
 
 #[test]

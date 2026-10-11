@@ -3,6 +3,8 @@ use serde_json::Value;
 
 use crate::EmitError;
 
+const INTEGER_DIGITS: usize = 39;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub(crate) struct Capability(&'static str);
 
@@ -44,6 +46,77 @@ pub(crate) struct IntegerShape<'a> {
     pub(crate) minimum: Option<&'a Value>,
     pub(crate) maximum: Option<&'a Value>,
     pub(crate) multiple_of: Option<&'a Value>,
+}
+
+pub(crate) fn integral_constraint(value: &Value) -> Result<String, EmitError> {
+    let Some(number) = value.as_number() else {
+        return Err(EmitError(format!(
+            "integer constraint {value} is not a number"
+        )));
+    };
+    let text = number.to_string();
+    let (negative, unsigned) = match text.strip_prefix('-') {
+        Some(unsigned) => (true, unsigned),
+        None => (false, text.as_str()),
+    };
+    let (mantissa, exponent) = match unsigned.split_once(['e', 'E']) {
+        Some((mantissa, exponent)) => (
+            mantissa,
+            exponent.parse::<i64>().map_err(|_| integral_error(value))?,
+        ),
+        None => (unsigned, 0),
+    };
+    let (whole, fraction) = match mantissa.split_once('.') {
+        Some((whole, fraction)) => (whole, fraction),
+        None => (mantissa, ""),
+    };
+    if (whole.is_empty() && fraction.is_empty())
+        || !whole.bytes().all(|byte| byte.is_ascii_digit())
+        || !fraction.bytes().all(|byte| byte.is_ascii_digit())
+    {
+        return Err(integral_error(value));
+    }
+    let mut digits = String::with_capacity(whole.len() + fraction.len());
+    digits.push_str(whole);
+    digits.push_str(fraction);
+    let significant = digits.trim_start_matches('0');
+    if significant.is_empty() {
+        return Ok("0".to_owned());
+    }
+    let scale = i64::try_from(fraction.len())
+        .map_err(|_| integral_error(value))?
+        .checked_sub(exponent)
+        .ok_or_else(|| integral_error(value))?;
+    let integer = if scale <= 0 {
+        let zeros = usize::try_from(scale.unsigned_abs()).map_err(|_| integral_error(value))?;
+        if significant.len().saturating_add(zeros) > INTEGER_DIGITS {
+            return Err(integral_error(value));
+        }
+        let mut integer = significant.to_owned();
+        integer.extend(std::iter::repeat_n('0', zeros));
+        integer
+    } else {
+        let scale = usize::try_from(scale).map_err(|_| integral_error(value))?;
+        if scale >= significant.len()
+            || significant[significant.len() - scale..]
+                .bytes()
+                .any(|byte| byte != b'0')
+        {
+            return Err(integral_error(value));
+        }
+        significant[..significant.len() - scale].to_owned()
+    };
+    Ok(if negative {
+        format!("-{integer}")
+    } else {
+        integer
+    })
+}
+
+fn integral_error(value: &Value) -> EmitError {
+    EmitError(format!(
+        "integer constraint {value} is not an integral value"
+    ))
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -101,7 +174,7 @@ pub(crate) trait Backend {
     fn literal(&mut self, value: &str) -> Rendered;
     fn external(&mut self, wire: &str, payload: Option<&str>) -> Rendered;
     fn string(&mut self, shape: &StringShape) -> Rendered;
-    fn integer(&mut self, shape: &IntegerShape) -> Rendered;
+    fn integer(&mut self, shape: &IntegerShape) -> Result<Rendered, EmitError>;
     fn float(&mut self, bits: u8) -> Rendered;
     fn decimal(&mut self, wire: DecimalWire) -> Rendered;
     fn bytes(&mut self) -> Rendered;

@@ -784,9 +784,11 @@ fn claim_camel_key(
 }
 
 fn is_integer_number(value: &serde_json::Value) -> bool {
-    value
-        .as_number()
-        .is_some_and(|number| number.as_i128().is_some() || number.as_u128().is_some())
+    value.as_number().is_some_and(|number| {
+        number.as_i128().is_some()
+            || number.as_u128().is_some()
+            || number.as_f64().is_some_and(|value| value.fract() == 0.0)
+    })
 }
 
 const RESERVED_NAMES: &[&str] = &[

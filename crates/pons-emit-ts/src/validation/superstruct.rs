@@ -4,7 +4,7 @@ use pons_ir::{DecimalWire, Document, FieldFormat, Presence, TypeRef, ValidationC
 
 use super::backend::{
     Backend as BackendTrait, Capability, Declaration, DeclarationKind, IntCarrier, IntegerShape,
-    Member, ObjectShape, Rendered, StringCarrier, StringShape,
+    Member, ObjectShape, Rendered, StringCarrier, StringShape, integral_constraint,
 };
 use super::walk::Walk;
 use super::{Capabilities, Generator as ValidationGenerator, Imports, Rendered as RenderedFile};
@@ -321,7 +321,7 @@ impl BackendTrait for Backend {
         Rendered::exact(schema)
     }
 
-    fn integer(&mut self, shape: &IntegerShape) -> Rendered {
+    fn integer(&mut self, shape: &IntegerShape) -> Result<Rendered, EmitError> {
         self.need_prelude("integer");
         let base = match shape.carrier {
             IntCarrier::Text => {
@@ -352,17 +352,17 @@ impl BackendTrait for Backend {
         let mut arguments = vec![shape.bits.to_string(), shape.signed.to_string()];
         for value in [shape.minimum, shape.maximum, shape.multiple_of] {
             arguments.push(match value {
-                Some(value) => string(&value.to_string()),
+                Some(value) => string(&integral_constraint(value)?),
                 None => String::from("undefined"),
             });
         }
         while arguments.last().map(String::as_str) == Some("undefined") {
             arguments.pop();
         }
-        Rendered::exact(format!(
+        Ok(Rendered::exact(format!(
             "refine({base}, \"integer\", exactInteger({}))",
             arguments.join(", ")
-        ))
+        )))
     }
 
     fn float(&mut self, bits: u8) -> Rendered {
@@ -637,14 +637,18 @@ mod tests {
     fn an_integer_carrier_keeps_its_bounds_and_multiple() {
         let mut generator = Backend::new();
         let minimum = json!(3);
-        let schema = rendered(generator.integer(&IntegerShape {
-            carrier: IntCarrier::Number,
-            bits: 16,
-            signed: false,
-            minimum: Some(&minimum),
-            maximum: None,
-            multiple_of: None,
-        }));
+        let schema = rendered(
+            generator
+                .integer(&IntegerShape {
+                    carrier: IntCarrier::Number,
+                    bits: 16,
+                    signed: false,
+                    minimum: Some(&minimum),
+                    maximum: None,
+                    multiple_of: None,
+                })
+                .unwrap(),
+        );
         assert_eq!(
             schema,
             "refine(refine(number(), \"integer\", (value) => Number.isInteger(value) || \"expected an exact integer\"), \"integer\", exactInteger(16, false, \"3\"))"

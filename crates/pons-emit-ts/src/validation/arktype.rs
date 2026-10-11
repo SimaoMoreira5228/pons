@@ -4,13 +4,13 @@ use pons_ir::{DecimalWire, Document, FieldFormat, Presence, TypeRef, ValidationC
 
 use super::backend::{
     Backend as ValidationBackend, Capability, Declaration, IntCarrier, IntegerShape, Member,
-    ObjectShape, Rendered, StringCarrier, StringShape,
+    ObjectShape, Rendered, StringCarrier, StringShape, integral_constraint,
 };
 use super::walk::Walk;
 use super::{Capabilities, Generator as ValidationGenerator, Imports, Rendered as RenderedFile};
 use crate::{EmitError, TsOptions, jsdoc, string};
 
-const MISMATCH: &str = "function mismatch(schema: (value: unknown) => unknown): (value: unknown) => ValidationIssue | null {\n  return (value) => {\n    const result = schema(value);\n    if (!(result instanceof ark.errors)) return null;\n    const error = result[0];\n    if (error === undefined) return { path: [], message: result.summary };\n    return { path: error.path.map((step) => typeof step === \"number\" ? step : String(step)), message: result.summary };\n  };\n}\n";
+const MISMATCH: &str = "function mismatch(schema: (value: unknown) => unknown): (value: unknown) => ValidationIssue | null {\n  return (value) => {\n    try {\n      const result = schema(value);\n      if (!(result instanceof ark.errors)) return null;\n      const error = result[0];\n      if (error === undefined) return { path: [], message: result.summary };\n      return { path: error.path.map((step) => typeof step === \"number\" ? step : String(step)), message: result.summary };\n    } catch (cause) {\n      return { path: [], message: cause instanceof Error ? cause.message : String(cause) };\n    }\n  };\n}\n";
 
 const PRELUDE: &[(&str, &str)] = &[
     (
@@ -315,7 +315,9 @@ impl ValidationBackend for Backend {
 
     fn string(&mut self, shape: &StringShape) -> Rendered {
         if shape.carrier == StringCarrier::Date {
-            return Rendered::exact("ark(\"Date\")");
+            return Rendered::exact(
+                "ark(\"Date\").narrow((value) => Number.isFinite(value.getTime()))",
+            );
         }
         let mut conditions = Vec::new();
         let base = match shape.format {
@@ -389,22 +391,22 @@ impl ValidationBackend for Backend {
         }
     }
 
-    fn integer(&mut self, shape: &IntegerShape) -> Rendered {
+    fn integer(&mut self, shape: &IntegerShape) -> Result<Rendered, EmitError> {
         match shape.carrier {
-            IntCarrier::Number if shape.bits <= 32 => Rendered::exact(native_integer(shape)),
+            IntCarrier::Number if shape.bits <= 32 => Ok(Rendered::exact(native_integer(shape)?)),
             IntCarrier::Text => {
                 self.need("integer");
                 self.need("canonical-integer");
                 self.need("canonical-signed-integer");
-                Rendered::exact(integer_call("integerText", shape))
+                Ok(Rendered::exact(integer_call("integerText", shape)?))
             }
             IntCarrier::Bigint => {
                 self.need("integer");
-                Rendered::exact(integer_call("integerBigint", shape))
+                Ok(Rendered::exact(integer_call("integerBigint", shape)?))
             }
             IntCarrier::Number => {
                 self.need("integer");
-                Rendered::exact(integer_call("integerNumber", shape))
+                Ok(Rendered::exact(integer_call("integerNumber", shape)?))
             }
         }
     }
@@ -551,21 +553,21 @@ fn literal(value: &str) -> String {
     ))
 }
 
-fn integer_call(name: &str, shape: &IntegerShape) -> String {
+fn integer_call(name: &str, shape: &IntegerShape) -> Result<String, EmitError> {
     let mut arguments = vec![shape.bits.to_string(), shape.signed.to_string()];
     for value in [shape.minimum, shape.maximum, shape.multiple_of] {
         arguments.push(match value {
-            Some(value) => string(&integral_text(value)),
+            Some(value) => string(&integral_constraint(value)?),
             None => String::from("undefined"),
         });
     }
     while arguments.last().map(String::as_str) == Some("undefined") {
         arguments.pop();
     }
-    format!("{name}({})", arguments.join(", "))
+    Ok(format!("{name}({})", arguments.join(", ")))
 }
 
-fn native_integer(shape: &IntegerShape) -> String {
+fn native_integer(shape: &IntegerShape) -> Result<String, EmitError> {
     let magnitude = 1i128
         << (if shape.signed {
             shape.bits - 1
@@ -584,7 +586,10 @@ fn native_integer(shape: &IntegerShape) -> String {
         ("%", shape.multiple_of),
     ] {
         if let Some(value) = value {
-            bounds.push(format!("number.integer {operator} {}", number_text(value)));
+            bounds.push(format!(
+                "number.integer {operator} {}",
+                integral_constraint(value)?
+            ));
         }
     }
     let members = bounds
@@ -595,22 +600,5 @@ fn native_integer(shape: &IntegerShape) -> String {
     for member in members.iter().skip(1) {
         expression = format!("[{expression}, \"&\", {member}]");
     }
-    expression
-}
-
-fn number_text(value: &serde_json::Value) -> String {
-    if let Some(integer) = value.as_i64() {
-        return integer.to_string();
-    }
-    if let Some(integer) = value.as_u64() {
-        return integer.to_string();
-    }
-    value
-        .as_f64()
-        .filter(|number| number.fract() == 0.0)
-        .map_or_else(|| value.to_string(), |number| format!("{number:.0}"))
-}
-
-fn integral_text(value: &serde_json::Value) -> String {
-    number_text(value)
+    Ok(expression)
 }
