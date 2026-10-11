@@ -885,28 +885,6 @@ fn the_builtin_backend_ignores_import_from() {
     assert!(!validators.contains("zod"), "{validators}");
 }
 
-#[test]
-fn a_backend_without_an_implementation_is_refused_by_name() {
-    let document: Document = serde_json::from_value(fixture()).unwrap();
-    for backend in [ValidationBackend::Superstruct] {
-        let error = emit_with_options(
-            &document,
-            TsOptions {
-                validation: ValidationOptions::new(backend),
-                ..TsOptions::default()
-            },
-        )
-        .unwrap_err();
-        assert_eq!(
-            error.0,
-            format!(
-                "the {} validation backend is not implemented yet",
-                backend.name()
-            )
-        );
-    }
-}
-
 fn paths(files: &[GeneratedFile]) -> Vec<String> {
     let mut paths = files
         .iter()

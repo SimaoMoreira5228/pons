@@ -1,6 +1,7 @@
 mod arktype;
 mod backend;
 mod builtin;
+mod superstruct;
 mod typebox;
 mod valibot;
 mod walk;
@@ -73,12 +74,9 @@ impl<'a> Backend<'a> {
                 Some(Box::new(typebox::Generator::new(document, names, options)))
             }
             ValidationBackend::Yup => Some(Box::new(yup::Generator::new(document, names, options))),
-            backend => {
-                return Err(EmitError(format!(
-                    "the {} validation backend is not implemented yet",
-                    backend.name()
-                )));
-            }
+            ValidationBackend::Superstruct => Some(Box::new(superstruct::Generator::new(
+                document, names, options,
+            ))),
         };
         Ok(Backend { generator })
     }
