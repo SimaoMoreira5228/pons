@@ -39,19 +39,23 @@ const PRELUDE: &[(&str, &str)] = &[
     ),
     (
         "date-time",
-        "const DATE_TIME = /^\\d{4}-\\d{2}-\\d{2}[Tt]\\d{2}:\\d{2}:\\d{2}(?:\\.\\d{1,3})?(?:[Zz]|[+-]\\d{2}:\\d{2})$/;\n",
+        "const DATE_TIME = /^(\\d{4})-(\\d{2})-(\\d{2})[Tt](\\d{2}):(\\d{2}):(\\d{2})(?:\\.\\d{1,3})?(?:[Zz]|([+-])(\\d{2}):(\\d{2}))$/;\n",
     ),
     (
         "instant",
-        "const instant = () => yup.string().matches(DATE_TIME, \"the date-time is not a full-date and a full-time\").test(\"instant\", \"date-time is not an instant a Date can hold\", (value) => value === undefined || !Number.isNaN(Date.parse(value as string)));\n",
+        "const instant = () => yup.string().matches(DATE_TIME, \"the date-time is not a full-date and a full-time\").test(\"instant\", \"date-time is not an instant a Date can hold\", (value) => {\n  if (value === undefined) return true;\n  const match = DATE_TIME.exec(value as string);\n  return match !== null && isCalendarDay(`${match[1]}-${match[2]}-${match[3]}`)\n    && isClock(match[4], match[5], match[6]) && isOffset(match[8], match[9])\n    && !Number.isNaN(Date.parse(value as string));\n});\n",
     ),
     (
         "time",
-        "const TIME = /^\\d{2}:\\d{2}:\\d{2}(?:\\.\\d+)?(?:[Zz]|[+-]\\d{2}:\\d{2})$/;\n",
+        "const TIME = /^(\\d{2}):(\\d{2}):(\\d{2})(?:\\.\\d+)?(?:[Zz]|([+-])(\\d{2}):(\\d{2}))$/;\n",
+    ),
+    (
+        "clock-parts",
+        "function isClock(hour: string, minute: string, second: string): boolean {\n  return Number(hour) <= 23 && Number(minute) <= 59 && Number(second) <= 59;\n}\nfunction isOffset(hour: string | undefined, minute: string | undefined): boolean {\n  return hour === undefined || (Number(hour) <= 23 && Number(minute) <= 59);\n}\n",
     ),
     (
         "clock",
-        "const clock = () => yup.string().matches(TIME, \"the time is not a full-time\");\n",
+        "const clock = () => yup.string().matches(TIME, \"the time is not a full-time\").test(\"clock\", \"the time is not a valid clock\", (value) => {\n  if (value === undefined) return true;\n  const match = TIME.exec(value as string);\n  return match !== null && isClock(match[1], match[2], match[3]) && isOffset(match[5], match[6]);\n});\n",
     ),
     (
         "duration",
@@ -257,8 +261,15 @@ impl Backend {
         }
         match id {
             "calendar" => self.require("date"),
-            "instant" => self.require("date-time"),
-            "clock" => self.require("time"),
+            "instant" => {
+                self.require("date-time");
+                self.require("calendar");
+                self.require("clock-parts");
+            }
+            "clock" => {
+                self.require("time");
+                self.require("clock-parts");
+            }
             "present" | "optional" | "nullable" => self.require("schema-of"),
             "unique" => self.require("present"),
             _ => {}
