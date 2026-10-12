@@ -1032,11 +1032,11 @@ fn emit_strict_rejects_a_target_that_cannot_carry_preserved_objects() {
         &plugin,
         r##"#!/bin/sh
 if [ "$1" = describe ]; then
-  printf '%s' '{"name":"fixture","version":"1.0.0","protocol":{"min":"2.0","max":"2.0"},"ir_version":{"min":"0.2","max":"0.2"},"capabilities":{"streaming":["sse"],"enum_reprs":["string","external","internal","adjacent","untagged"],"direction_split":true,"provides":true,"flattened":true,"object_openness":["reject","preserve_typed","preserve_opaque"]}}'
+  printf '%s' '{"name":"fixture","version":"1.0.0","protocol":{"min":"3.0","max":"3.0"},"ir_version":{"min":"0.2","max":"0.2"},"capabilities":{"streaming":["sse"],"enum_reprs":["string","external","internal","adjacent","untagged"],"direction_split":true,"provides":true,"flattened":true,"object_openness":["reject","preserve_typed","preserve_opaque"]}}'
 elif [ "$1" = emit ]; then
   request=$(cat)
   printf '%s' "$request" > "$PONS_REQUEST"
-  printf '%s' '{"protocol":2,"files":[{"path":"nested/client.ts","content":"generated"}],"coverage":{"exact":["types.EventQuery","types.LoginError"],"opaque":["operations.auth.login","operations.events.watch","types.LoginRequest","types.User"],"lossy":[],"unsupported":[]}}'
+  printf '%s' '{"protocol":3,"files":[{"path":"nested/client.ts","content":"generated"}],"coverage":{"exact":["types.EventQuery","types.LoginError"],"opaque":["operations.auth.login","operations.events.watch","types.LoginRequest","types.User"],"lossy":[],"unsupported":[]}}'
 else
   exit 2
 fi
@@ -1110,7 +1110,7 @@ fn emit_runs_an_external_target_and_writes_its_files() {
         &plugin,
         r##"#!/bin/sh
 if [ "$1" = describe ]; then
-  printf '%s' '{"name":"fixture","version":"1.0.0","protocol":{"min":"2.0","max":"2.0"},"ir_version":{"min":"0.2","max":"0.2"},"capabilities":{"streaming":["sse"],"enum_reprs":["string","external","internal","adjacent","untagged"],"direction_split":true,"provides":true,"flattened":true,"opaque":true,"object_openness":["reject","preserve_typed","preserve_opaque"]}}'
+  printf '%s' '{"name":"fixture","version":"1.0.0","protocol":{"min":"3.0","max":"3.0"},"ir_version":{"min":"0.2","max":"0.2"},"capabilities":{"streaming":["sse"],"enum_reprs":["string","external","internal","adjacent","untagged"],"direction_split":true,"provides":true,"flattened":true,"opaque":true,"object_openness":["reject","preserve_typed","preserve_opaque"]}}'
 elif [ "$1" = emit ]; then
   i=0
   while [ "$i" -lt 2000 ]; do
@@ -1121,8 +1121,8 @@ elif [ "$1" = emit ]; then
   printf '%s' "$request" > "$PONS_REQUEST"
   printf '%s\n' 'plugin log' >&2
   case "$request" in
-    *'"bits":64,"signed":false,"wire":"number"'*'"target":"fixture"'*) printf '%s' '{"protocol":2,"files":[{"path":"nested/client.ts","content":"generated"}],"coverage":{"exact":["types.EventQuery","types.LoginError"],"opaque":[],"lossy":["operations.auth.login","operations.events.watch","types.LoginRequest","types.User"],"unsupported":[]}}' ;;
-    *'"target":"fixture"'*) printf '%s' '{"protocol":2,"files":[{"path":"nested/client.ts","content":"generated"}],"coverage":{"exact":["types.EventQuery","types.LoginError"],"opaque":["operations.auth.login","operations.events.watch","types.LoginRequest","types.User"],"lossy":[],"unsupported":[]}}' ;;
+    *'"bits":64,"signed":false,"wire":"number"'*'"target":"fixture"'*) printf '%s' '{"protocol":3,"files":[{"path":"nested/client.ts","content":"generated"}],"coverage":{"exact":["types.EventQuery","types.LoginError"],"opaque":[],"lossy":["operations.auth.login","operations.events.watch","types.LoginRequest","types.User"],"unsupported":[]}}' ;;
+    *'"target":"fixture"'*) printf '%s' '{"protocol":3,"files":[{"path":"nested/client.ts","content":"generated"}],"coverage":{"exact":["types.EventQuery","types.LoginError"],"opaque":["operations.auth.login","operations.events.watch","types.LoginRequest","types.User"],"lossy":[],"unsupported":[]}}' ;;
     *) exit 3 ;;
   esac
 else
@@ -1279,10 +1279,10 @@ fn emit_lossy_warns_about_coverage_an_external_target_reports_below_exact() {
         &plugin,
         r##"#!/bin/sh
 if [ "$1" = describe ]; then
-  printf '%s' '{"name":"python","version":"1.0.0","protocol":{"min":"2.0","max":"2.0"},"ir_version":{"min":"0.2","max":"0.2"},"capabilities":{"streaming":["sse"],"enum_reprs":["string","external","internal","adjacent","untagged"],"direction_split":true,"provides":true,"flattened":true,"opaque":true,"object_openness":["reject","preserve_typed","preserve_opaque"]}}'
+  printf '%s' '{"name":"python","version":"1.0.0","protocol":{"min":"3.0","max":"3.0"},"ir_version":{"min":"0.2","max":"0.2"},"capabilities":{"streaming":["sse"],"enum_reprs":["string","external","internal","adjacent","untagged"],"direction_split":true,"provides":true,"flattened":true,"opaque":true,"object_openness":["reject","preserve_typed","preserve_opaque"]}}'
 elif [ "$1" = emit ]; then
   cat > /dev/null
-  printf '%s' '{"protocol":2,"files":[{"path":"client.py","content":"generated"}],"coverage":{"exact":["types.EventQuery","types.LoginError"],"opaque":["operations.auth.login","operations.events.watch","types.LoginRequest"],"lossy":["types.User"],"unsupported":[]}}'
+  printf '%s' '{"protocol":3,"files":[{"path":"client.py","content":"generated"}],"coverage":{"exact":["types.EventQuery","types.LoginError"],"opaque":["operations.auth.login","operations.events.watch","types.LoginRequest"],"lossy":["types.User"],"unsupported":[]}}'
 else
   exit 2
 fi
@@ -1322,6 +1322,255 @@ fi
 
 #[cfg(target_os = "linux")]
 #[test]
+fn emit_writes_both_coverage_blocks_for_a_validating_plugin() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let directory = tempfile::tempdir().unwrap();
+    let bin = directory.path().join("bin");
+    fs::create_dir(&bin).unwrap();
+    let plugin = bin.join("pons-emit-python");
+    fs::write(
+        &plugin,
+        r##"#!/bin/sh
+if [ "$1" = describe ]; then
+  printf '%s' '{"name":"python","version":"1.0.0","protocol":{"min":"3.0","max":"3.0"},"ir_version":{"min":"0.2","max":"0.2"},"capabilities":{"streaming":["sse"],"enum_reprs":["string","external","internal","adjacent","untagged"],"direction_split":true,"provides":true,"flattened":true,"opaque":true,"object_openness":["reject","preserve_typed","preserve_opaque"],"validation":{"backends":["pydantic"],"capabilities":{"validation.scalars":"exact"}}},"option_schema":{"options":{"validation":{"type":"object"}}}}'
+elif [ "$1" = emit ]; then
+  cat > /dev/null
+  printf '%s' '{"protocol":3,"files":[{"path":"client.py","content":"generated"}],"coverage":{"exact":["types.EventQuery","types.LoginError"],"opaque":["operations.auth.login","operations.events.watch","types.LoginRequest","types.User"],"lossy":[],"unsupported":[]},"validation_coverage":{"exact":["operations.auth.login","operations.events.watch","types.EventQuery","types.LoginError","types.LoginRequest","types.User"],"lossy":[],"unsupported":[]}}'
+else
+  exit 2
+fi
+"##,
+    )
+    .unwrap();
+    let mut permissions = fs::metadata(&plugin).unwrap().permissions();
+    permissions.set_mode(0o755);
+    fs::set_permissions(&plugin, permissions).unwrap();
+
+    fs::write(directory.path().join("api.json"), FIXTURE).unwrap();
+    fs::write(
+        directory.path().join("pons.toml"),
+        "[emit.python]\nout_dir = \"generated\"\nvalidation = { backend = \"pydantic\" }\n",
+    )
+    .unwrap();
+    let output = pons()
+        .args([
+            "emit",
+            "--target",
+            "python",
+            "api.json",
+            "--coverage",
+            "coverage.json",
+        ])
+        .current_dir(directory.path())
+        .env("PATH", on_path(&bin))
+        .output()
+        .unwrap();
+
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let report: Value = serde_json::from_str(
+        &fs::read_to_string(directory.path().join("generated/coverage.json")).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(
+        report["coverage"]["opaque"],
+        serde_json::json!(PRESERVED_SUBJECTS)
+    );
+    assert_eq!(
+        report["validation_coverage"],
+        serde_json::json!({
+            "exact": [
+                "operations.auth.login",
+                "operations.events.watch",
+                "types.EventQuery",
+                "types.LoginError",
+                "types.LoginRequest",
+                "types.User"
+            ],
+            "lossy": [],
+            "unsupported": []
+        })
+    );
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn emit_refuses_a_validating_plugin_that_omits_validation_coverage() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let directory = tempfile::tempdir().unwrap();
+    let bin = directory.path().join("bin");
+    fs::create_dir(&bin).unwrap();
+    let plugin = bin.join("pons-emit-python");
+    fs::write(
+        &plugin,
+        r##"#!/bin/sh
+if [ "$1" = describe ]; then
+  printf '%s' '{"name":"python","version":"1.0.0","protocol":{"min":"3.0","max":"3.0"},"ir_version":{"min":"0.2","max":"0.2"},"capabilities":{"streaming":["sse"],"enum_reprs":["string","external","internal","adjacent","untagged"],"direction_split":true,"provides":true,"flattened":true,"opaque":true,"object_openness":["reject","preserve_typed","preserve_opaque"],"validation":{"backends":["pydantic"],"capabilities":{"validation.scalars":"exact"}}},"option_schema":{"options":{"validation":{"type":"object"}}}}'
+elif [ "$1" = emit ]; then
+  cat > /dev/null
+  printf '%s' '{"protocol":3,"files":[{"path":"client.py","content":"generated"}],"coverage":{"exact":["types.EventQuery","types.LoginError"],"opaque":["operations.auth.login","operations.events.watch","types.LoginRequest","types.User"],"lossy":[],"unsupported":[]}}'
+else
+  exit 2
+fi
+"##,
+    )
+    .unwrap();
+    let mut permissions = fs::metadata(&plugin).unwrap().permissions();
+    permissions.set_mode(0o755);
+    fs::set_permissions(&plugin, permissions).unwrap();
+
+    fs::write(directory.path().join("api.json"), FIXTURE).unwrap();
+    fs::write(
+        directory.path().join("pons.toml"),
+        "[emit.python]\nout_dir = \"generated\"\nvalidation = { backend = \"pydantic\" }\n",
+    )
+    .unwrap();
+    let output = pons()
+        .args([
+            "emit",
+            "--target",
+            "python",
+            "api.json",
+            "--coverage",
+            "coverage.json",
+        ])
+        .current_dir(directory.path())
+        .env("PATH", on_path(&bin))
+        .output()
+        .unwrap();
+
+    assert!(!output.status.success());
+    assert!(
+        String::from_utf8_lossy(&output.stderr)
+            .contains("missing validation coverage while validation is enabled"),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(!directory.path().join("generated").exists());
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn emit_writes_an_empty_validation_block_when_the_plugin_disables_validation() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let directory = tempfile::tempdir().unwrap();
+    let bin = directory.path().join("bin");
+    fs::create_dir(&bin).unwrap();
+    let plugin = bin.join("pons-emit-python");
+    fs::write(
+        &plugin,
+        r##"#!/bin/sh
+if [ "$1" = describe ]; then
+  printf '%s' '{"name":"python","version":"1.0.0","protocol":{"min":"3.0","max":"3.0"},"ir_version":{"min":"0.2","max":"0.2"},"capabilities":{"streaming":["sse"],"enum_reprs":["string","external","internal","adjacent","untagged"],"direction_split":true,"provides":true,"flattened":true,"opaque":true,"object_openness":["reject","preserve_typed","preserve_opaque"]}}'
+elif [ "$1" = emit ]; then
+  cat > /dev/null
+  printf '%s' '{"protocol":3,"files":[{"path":"client.py","content":"generated"}],"coverage":{"exact":["types.EventQuery","types.LoginError"],"opaque":["operations.auth.login","operations.events.watch","types.LoginRequest","types.User"],"lossy":[],"unsupported":[]}}'
+else
+  exit 2
+fi
+"##,
+    )
+    .unwrap();
+    let mut permissions = fs::metadata(&plugin).unwrap().permissions();
+    permissions.set_mode(0o755);
+    fs::set_permissions(&plugin, permissions).unwrap();
+
+    fs::write(directory.path().join("api.json"), FIXTURE).unwrap();
+    fs::write(
+        directory.path().join("pons.toml"),
+        "[emit.python]\nout_dir = \"generated\"\n",
+    )
+    .unwrap();
+    let output = pons()
+        .args([
+            "emit",
+            "--target",
+            "python",
+            "api.json",
+            "--coverage",
+            "coverage.json",
+        ])
+        .current_dir(directory.path())
+        .env("PATH", on_path(&bin))
+        .output()
+        .unwrap();
+
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let report: Value = serde_json::from_str(
+        &fs::read_to_string(directory.path().join("generated/coverage.json")).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(
+        report["validation_coverage"],
+        serde_json::json!({ "exact": [], "lossy": [], "unsupported": [] })
+    );
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn emit_lossy_warns_about_a_validation_gap() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let directory = tempfile::tempdir().unwrap();
+    let bin = directory.path().join("bin");
+    fs::create_dir(&bin).unwrap();
+    let plugin = bin.join("pons-emit-python");
+    fs::write(
+        &plugin,
+        r##"#!/bin/sh
+if [ "$1" = describe ]; then
+  printf '%s' '{"name":"python","version":"1.0.0","protocol":{"min":"3.0","max":"3.0"},"ir_version":{"min":"0.2","max":"0.2"},"capabilities":{"streaming":["sse"],"enum_reprs":["string","external","internal","adjacent","untagged"],"direction_split":true,"provides":true,"flattened":true,"opaque":true,"object_openness":["reject","preserve_typed","preserve_opaque"]},"option_schema":{"options":{"validation":{"type":"object"}}}}'
+elif [ "$1" = emit ]; then
+  cat > /dev/null
+  printf '%s' '{"protocol":3,"files":[{"path":"client.py","content":"generated"}],"coverage":{"exact":["types.EventQuery","types.LoginError"],"opaque":["operations.auth.login","operations.events.watch","types.LoginRequest","types.User"],"lossy":[],"unsupported":[]},"validation_coverage":{"exact":["operations.auth.login","operations.events.watch","types.EventQuery","types.LoginError","types.LoginRequest","types.User"],"lossy":[],"unsupported":[]}}'
+else
+  exit 2
+fi
+"##,
+    )
+    .unwrap();
+    let mut permissions = fs::metadata(&plugin).unwrap().permissions();
+    permissions.set_mode(0o755);
+    fs::set_permissions(&plugin, permissions).unwrap();
+
+    fs::write(directory.path().join("api.json"), FIXTURE).unwrap();
+    fs::write(
+        directory.path().join("pons.toml"),
+        "[emit.python]\nout_dir = \"generated\"\nvalidation = { backend = \"pydantic\" }\n",
+    )
+    .unwrap();
+    let output = pons()
+        .args(["emit", "--target", "python", "api.json", "--lossy"])
+        .current_dir(directory.path())
+        .env("PATH", on_path(&bin))
+        .output()
+        .unwrap();
+
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        String::from_utf8_lossy(&output.stderr)
+            .contains("does not declare validation support for the pydantic backend"),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[cfg(target_os = "linux")]
+#[test]
 fn a_fixture_a_target_cannot_build_is_reported_unsupported() {
     use std::os::unix::fs::PermissionsExt;
 
@@ -1333,11 +1582,11 @@ fn a_fixture_a_target_cannot_build_is_reported_unsupported() {
         &plugin,
         r##"#!/bin/sh
 if [ "$1" = describe ]; then
-  printf '%s' '{"name":"python","version":"1.0.0","protocol":{"min":"2.0","max":"2.0"},"ir_version":{"min":"0.2","max":"0.2"},"capabilities":{"streaming":["sse"],"enum_reprs":["string","external","internal","adjacent","untagged"],"direction_split":true,"provides":true,"flattened":true,"opaque":true,"object_openness":["reject","preserve_typed","preserve_opaque"]}}'
+  printf '%s' '{"name":"python","version":"1.0.0","protocol":{"min":"3.0","max":"3.0"},"ir_version":{"min":"0.2","max":"0.2"},"capabilities":{"streaming":["sse"],"enum_reprs":["string","external","internal","adjacent","untagged"],"direction_split":true,"provides":true,"flattened":true,"opaque":true,"object_openness":["reject","preserve_typed","preserve_opaque"]}}'
 elif [ "$1" = emit ]; then
   request=$(cat)
   printf '%s' "$request" > "$PONS_REQUEST"
-  printf '%s' '{"protocol":2,"files":[{"path":"client.py","content":"generated"}],"coverage":{"exact":["types.EventQuery","types.LoginError"],"opaque":["operations.auth.login","types.LoginRequest","types.User"],"lossy":[],"unsupported":["operations.events.watch"]}}'
+  printf '%s' '{"protocol":3,"files":[{"path":"client.py","content":"generated"}],"coverage":{"exact":["types.EventQuery","types.LoginError"],"opaque":["operations.auth.login","types.LoginRequest","types.User"],"lossy":[],"unsupported":["operations.events.watch"]}}'
 else
   exit 2
 fi
@@ -1412,13 +1661,13 @@ fn emit_bounds_the_log_it_echoes_from_an_external_target() {
         &plugin,
         r##"#!/bin/sh
 if [ "$1" = describe ]; then
-  printf '%s' '{"name":"python","version":"1.0.0","protocol":{"min":"2.0","max":"2.0"},"ir_version":{"min":"0.2","max":"0.2"},"capabilities":{"streaming":["sse","ndjson","bytes"],"enum_reprs":["string","external","internal","adjacent","untagged"],"direction_split":true,"provides":true,"flattened":true,"opaque":true,"object_openness":["reject","preserve_typed","preserve_opaque"]}}'
+  printf '%s' '{"name":"python","version":"1.0.0","protocol":{"min":"3.0","max":"3.0"},"ir_version":{"min":"0.2","max":"0.2"},"capabilities":{"streaming":["sse","ndjson","bytes"],"enum_reprs":["string","external","internal","adjacent","untagged"],"direction_split":true,"provides":true,"flattened":true,"opaque":true,"object_openness":["reject","preserve_typed","preserve_opaque"]}}'
 elif [ "$1" = emit ]; then
   cat > /dev/null
   printf 'log head\n' >&2
   dd if=/dev/zero bs=1048576 count=9 2>/dev/null | tr '\000' 'x' 1>&2
   printf 'log tail\n' >&2
-  printf '%s' '{"protocol":2,"files":[{"path":"client.py","content":"generated"}],"coverage":{"exact":["types.EventQuery","types.LoginError"],"opaque":["operations.auth.login","operations.events.watch","types.LoginRequest","types.User"],"lossy":[],"unsupported":[]}}'
+  printf '%s' '{"protocol":3,"files":[{"path":"client.py","content":"generated"}],"coverage":{"exact":["types.EventQuery","types.LoginError"],"opaque":["operations.auth.login","operations.events.watch","types.LoginRequest","types.User"],"lossy":[],"unsupported":[]}}'
 else
   exit 2
 fi
@@ -1532,12 +1781,12 @@ fn emit_writes_an_openapi_31_document() {
     assert!(document["paths"]["/auth/login"]["post"].is_object());
 }
 
-const STUB_RESPONSE: &str = r#"{"protocol":2,"files":[{"path":"acme/__init__.py","content":"generated"}],"coverage":{"exact":["types.EventQuery","types.LoginError"],"opaque":["operations.auth.login","operations.events.watch","types.LoginRequest","types.User"],"lossy":[],"unsupported":[]}}"#;
+const STUB_RESPONSE: &str = r#"{"protocol":3,"files":[{"path":"acme/__init__.py","content":"generated"}],"coverage":{"exact":["types.EventQuery","types.LoginError"],"opaque":["operations.auth.login","operations.events.watch","types.LoginRequest","types.User"],"lossy":[],"unsupported":[]}}"#;
 
 #[cfg(target_os = "linux")]
 fn stub_manifest(option_schema: &str) -> String {
     let mut manifest = String::from(
-        r#"{"name":"python","version":"1.0.0","protocol":{"min":"2.0","max":"2.0"},"ir_version":{"min":"0.2","max":"0.2"},"capabilities":{"streaming":["sse"],"enum_reprs":["string","external","internal","adjacent","untagged"],"direction_split":true,"provides":true,"custom_auth":true,"flattened":true,"wide_integers":true,"opaque":true,"object_openness":["reject","preserve_typed","preserve_opaque"]}"#,
+        r#"{"name":"python","version":"1.0.0","protocol":{"min":"3.0","max":"3.0"},"ir_version":{"min":"0.2","max":"0.2"},"capabilities":{"streaming":["sse"],"enum_reprs":["string","external","internal","adjacent","untagged"],"direction_split":true,"provides":true,"custom_auth":true,"flattened":true,"wide_integers":true,"opaque":true,"object_openness":["reject","preserve_typed","preserve_opaque"]}"#,
     );
     if !option_schema.is_empty() {
         manifest.push_str(",\"option_schema\":");
@@ -2022,7 +2271,8 @@ fn an_external_target_takes_its_options_from_the_file_and_puts_them_on_the_wire(
     );
     assert_eq!(sent["target"], "python");
     assert_eq!(sent["mode"], "strict");
-    assert_eq!(sent["protocol"], 2);
+    assert_eq!(sent["protocol"], 3);
+    assert_eq!(sent["source_ir_version"], "0.2");
     assert!(directory.path().join("generated/acme/__init__.py").exists());
 }
 
@@ -2210,7 +2460,8 @@ fn dump_request_writes_the_request_and_runs_no_emitter() {
         sent["options"],
         serde_json::json!({ "package": "acme-sdk" })
     );
-    assert_eq!(sent["protocol"], 2);
+    assert_eq!(sent["protocol"], 3);
+    assert_eq!(sent["source_ir_version"], "0.2");
     assert_eq!(sent["mode"], "strict");
 
     let mut expected: pons_ir::Document = serde_json::from_str(FIXTURE).unwrap();

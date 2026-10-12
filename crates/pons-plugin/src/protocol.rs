@@ -3,15 +3,16 @@ use std::path::{Component, Path};
 
 use pons_ir::{
     AuthScheme, Coverage, Direction, Document, EnumRepr, ObjectOpenness, StreamKind, TypeKind,
-    coverage_for_document, operation_subject, strict_violation_message,
+    ValidationCoverage, coverage_for_document, operation_subject, strict_violation_message,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-pub const PROTOCOL_VERSION: u32 = 2;
+pub const PROTOCOL_VERSION: u32 = 3;
 const STREAMING: &[&str] = &["sse", "ndjson", "bytes", "websocket"];
 const ENUM_REPRS: &[&str] = &["string", "external", "internal", "adjacent", "untagged"];
 const OBJECT_OPENNESS: &[&str] = &["reject", "preserve_typed", "preserve_opaque"];
+const VALIDATION_LEVELS: &[&str] = &["exact", "lossy", "unsupported"];
 const DEVICE_INDEXES: &[&str] = &["1", "2", "3", "4", "5", "6", "7", "8", "9", "¹", "²", "³"];
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -82,6 +83,17 @@ pub struct EmitterCapabilities {
     pub opaque: bool,
     #[serde(default)]
     pub object_openness: Vec<String>,
+    #[serde(default)]
+    pub validation: ValidationCapabilities,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ValidationCapabilities {
+    #[serde(default)]
+    pub backends: Vec<String>,
+    #[serde(default)]
+    pub capabilities: BTreeMap<String, String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -94,6 +106,7 @@ pub enum EmitMode {
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct EmitRequest<'a> {
     pub protocol: u32,
+    pub source_ir_version: String,
     pub mode: EmitMode,
     pub ir: &'a Document,
     pub options: BTreeMap<String, Value>,
@@ -142,6 +155,8 @@ pub struct EmitResponse {
     #[serde(default)]
     pub coverage: Option<Coverage>,
     #[serde(default)]
+    pub validation_coverage: Option<ValidationCoverage>,
+    #[serde(default)]
     pub error: Option<String>,
 }
 
@@ -182,7 +197,39 @@ impl EmitterManifest {
         ] {
             validate_capability_list(list, values, allowed)?;
         }
+        self.capabilities.validation.validate()?;
         Ok(())
+    }
+
+    pub fn validation_gap(&self, options: &BTreeMap<String, Value>) -> Option<CapabilityWarning> {
+        let RequestedValidation::Enabled { backend } = requested_validation(options) else {
+            return None;
+        };
+        let validation = &self.capabilities.validation;
+        let backend_declared = backend.map_or(!validation.backends.is_empty(), |backend| {
+            validation.backends.iter().any(|id| id == backend)
+        });
+        let capability_declared = validation
+            .capabilities
+            .keys()
+            .any(|id| id.starts_with("validation."));
+        let message = match (backend_declared, capability_declared) {
+            (true, true) => return None,
+            (false, true) => format!(
+                "{} does not declare {} validation backend",
+                self.name,
+                backend.map_or("a".to_owned(), |backend| format!("the {backend}"))
+            ),
+            (true, false) => format!("{} declares no validation capabilities", self.name),
+            (false, false) => format!(
+                "{} does not declare validation support for {}",
+                self.name,
+                backend.map_or("a validation backend".to_owned(), |backend| {
+                    format!("the {backend} backend")
+                })
+            ),
+        };
+        Some(CapabilityWarning(message))
     }
 
     pub fn validate_options(&self, options: &BTreeMap<String, Value>) -> Result<(), String> {
@@ -352,6 +399,76 @@ impl EmitterManifest {
     }
 }
 
+impl ValidationCapabilities {
+    fn validate(&self) -> Result<(), String> {
+        let mut seen = BTreeSet::new();
+        for backend in &self.backends {
+            if backend.is_empty()
+                || !backend
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.'))
+            {
+                return Err(format!(
+                    "emitter validation backend {backend:?} is not a plain backend id"
+                ));
+            }
+            if !seen.insert(backend) {
+                return Err(format!(
+                    "emitter validation lists the backend {backend} more than once"
+                ));
+            }
+        }
+        for (id, level) in &self.capabilities {
+            if id.strip_prefix("validation.").is_none_or(str::is_empty) {
+                return Err(format!(
+                    "emitter validation capability {id:?} is not a validation.* id"
+                ));
+            }
+            if !VALIDATION_LEVELS.contains(&level.as_str()) {
+                return Err(format!(
+                    "emitter validation capability {id} has level {level:?}; it is exact, lossy, \
+                     or unsupported"
+                ));
+            }
+        }
+        Ok(())
+    }
+}
+
+enum RequestedValidation<'a> {
+    Disabled,
+    Enabled { backend: Option<&'a str> },
+}
+
+fn requested_validation(options: &BTreeMap<String, Value>) -> RequestedValidation<'_> {
+    let Some(value) = options.get("validation") else {
+        return RequestedValidation::Disabled;
+    };
+    match value {
+        Value::Null => RequestedValidation::Disabled,
+        Value::Bool(false) => RequestedValidation::Disabled,
+        Value::String(backend) if backend == "none" => RequestedValidation::Disabled,
+        Value::String(backend) => RequestedValidation::Enabled {
+            backend: Some(backend),
+        },
+        Value::Object(table) => match table.get("backend") {
+            Some(Value::String(backend)) if backend == "none" => RequestedValidation::Disabled,
+            Some(Value::String(backend)) => RequestedValidation::Enabled {
+                backend: Some(backend),
+            },
+            _ => RequestedValidation::Enabled { backend: None },
+        },
+        _ => RequestedValidation::Enabled { backend: None },
+    }
+}
+
+pub fn validation_enabled(options: &BTreeMap<String, Value>) -> bool {
+    matches!(
+        requested_validation(options),
+        RequestedValidation::Enabled { .. }
+    )
+}
+
 impl OptionKind {
     fn as_str(self) -> &'static str {
         match self {
@@ -451,6 +568,7 @@ pub(crate) fn validate_response_for_document(
     document: &Document,
     mode: EmitMode,
     opaque_supported: bool,
+    validation_enabled: bool,
 ) -> Result<(), String> {
     validate_response(response)?;
     let Some(coverage) = &response.coverage else {
@@ -496,6 +614,56 @@ pub(crate) fn validate_response_for_document(
     }
     if mode == EmitMode::Strict
         && let Some(violations) = strict_violation_message(coverage)
+    {
+        return Err(format!("emitter reported {violations}"));
+    }
+    validate_validation_coverage(response, document, mode, validation_enabled)
+}
+
+fn validate_validation_coverage(
+    response: &EmitResponse,
+    document: &Document,
+    mode: EmitMode,
+    validation_enabled: bool,
+) -> Result<(), String> {
+    let Some(coverage) = &response.validation_coverage else {
+        return if validation_enabled {
+            Err(
+                "emitter response is missing validation coverage while validation is enabled"
+                    .into(),
+            )
+        } else {
+            Ok(())
+        };
+    };
+    let expected = pons_ir::coverage_subjects(document);
+    let mut seen = BTreeSet::new();
+    for (level, subjects) in [
+        ("exact", &coverage.exact),
+        ("lossy", &coverage.lossy),
+        ("unsupported", &coverage.unsupported),
+    ] {
+        for subject in subjects {
+            if !expected.contains(subject) {
+                return Err(format!(
+                    "emitter validation coverage names unknown {level} subject {subject}"
+                ));
+            }
+            if !seen.insert(subject.clone()) {
+                return Err(format!(
+                    "emitter validation coverage names {subject} more than once"
+                ));
+            }
+        }
+    }
+    if seen != expected {
+        let missing = expected.difference(&seen).cloned().collect::<Vec<_>>();
+        return Err(format!(
+            "emitter validation coverage is missing subjects {missing:?}"
+        ));
+    }
+    if mode == EmitMode::Strict
+        && let Some(violations) = coverage.strict_violation_message()
     {
         return Err(format!("emitter reported {violations}"));
     }
@@ -591,8 +759,8 @@ mod tests {
             name: "fixture".into(),
             version: "1.0.0".into(),
             protocol: VersionRange {
-                min: "1.0".into(),
-                max: "1.0".into(),
+                min: "3.0".into(),
+                max: "3.0".into(),
             },
             ir_version: VersionRange {
                 min: "0.2".into(),
@@ -871,18 +1039,47 @@ mod tests {
     }
 
     #[test]
-    fn emit_requests_carry_the_selected_mode() {
+    fn protocol_three_round_trips_a_manifest_request_and_response() {
         let document: Document =
             serde_json::from_str(include_str!("../../../fixtures/login.json")).unwrap();
+        let manifest = manifest();
+        let encoded = serde_json::to_value(&manifest).unwrap();
+        assert_eq!(encoded["protocol"]["min"], "3.0");
+        assert_eq!(
+            serde_json::from_value::<EmitterManifest>(encoded).unwrap(),
+            manifest
+        );
+
         let request = EmitRequest {
             protocol: PROTOCOL_VERSION,
+            source_ir_version: document.ir_version.clone(),
             mode: EmitMode::Lossy,
             ir: &document,
             options: BTreeMap::new(),
             target: "fixture",
         };
         let value = serde_json::to_value(request).unwrap();
+        assert_eq!(value["protocol"], 3);
+        assert_eq!(value["source_ir_version"], document.ir_version);
         assert_eq!(value["mode"], "lossy");
+        assert_eq!(
+            serde_json::from_value::<Document>(value["ir"].clone()).unwrap(),
+            document
+        );
+
+        let response = EmitResponse {
+            protocol: PROTOCOL_VERSION,
+            files: Vec::new(),
+            diagnostics: Vec::new(),
+            coverage: Some(coverage_for_document(&document, false).unwrap()),
+            validation_coverage: Some(ValidationCoverage::exact_for_document(&document)),
+            error: None,
+        };
+        let encoded = serde_json::to_value(&response).unwrap();
+        assert_eq!(
+            serde_json::from_value::<EmitResponse>(encoded).unwrap(),
+            response
+        );
     }
 
     fn options(source: &str) -> BTreeMap<String, Value> {
@@ -1004,7 +1201,7 @@ mod tests {
         let declared: EmitterManifest = serde_json::from_value(serde_json::json!({
             "name": "python",
             "version": "1.0.0",
-            "protocol": { "min": "2.0", "max": "2.0" },
+            "protocol": { "min": "3.0", "max": "3.0" },
             "ir_version": { "min": "0.2", "max": "0.2" },
             "option_schema": { "options": { "package": { "type": "string" } } }
         }))
@@ -1045,7 +1242,7 @@ mod tests {
             ),
         ] {
             let mut value = serde_json::to_value(manifest()).unwrap();
-            value["protocol"] = serde_json::json!({ "min": "2.0", "max": "2.0" });
+            value["protocol"] = serde_json::json!({ "min": "3.0", "max": "3.0" });
             for (key, replacement) in source.as_object().unwrap() {
                 value[key] = replacement.clone();
             }
@@ -1058,18 +1255,32 @@ mod tests {
     }
 
     #[test]
-    fn protocol_v2_rejects_v1_manifests_and_responses() {
-        let manifest = manifest();
-        assert!(manifest.validate("0.2").is_err());
-
-        let response = EmitResponse {
-            protocol: 1,
-            files: Vec::new(),
-            diagnostics: Vec::new(),
-            coverage: None,
-            error: None,
+    fn protocol_v3_rejects_v2_manifests_and_responses() {
+        let mut v2 = manifest();
+        v2.protocol = VersionRange {
+            min: "2.0".into(),
+            max: "2.0".into(),
         };
-        assert!(validate_response(&response).is_err());
+        assert_eq!(
+            v2.validate("0.2").unwrap_err(),
+            "emitter fixture does not support protocol 3"
+        );
+        assert!(manifest().validate("0.2").is_ok());
+
+        for protocol in [1, 2] {
+            let response = EmitResponse {
+                protocol,
+                files: Vec::new(),
+                diagnostics: Vec::new(),
+                coverage: None,
+                validation_coverage: None,
+                error: None,
+            };
+            assert_eq!(
+                validate_response(&response).unwrap_err(),
+                format!("emitter returned protocol {protocol}, expected 3")
+            );
+        }
     }
 
     fn renamed(value: &serde_json::Value, key: &str, typo: &str) -> serde_json::Value {
@@ -1101,6 +1312,7 @@ mod tests {
             "files": [{ "path": "client.ts", "content": "generated", "encoding": "utf8" }],
             "diagnostics": [{ "severity": "warning", "code": "X-1", "message": "note" }],
             "coverage": { "exact": [], "opaque": [], "lossy": [], "unsupported": [] },
+            "validation_coverage": { "exact": [], "lossy": [], "unsupported": [] },
             "error": null
         });
         for (key, typo) in [
@@ -1108,6 +1320,7 @@ mod tests {
             ("files", "filesx"),
             ("diagnostics", "diagnostcs"),
             ("coverage", "coverag"),
+            ("validation_coverage", "validation_coverag"),
             ("error", "eror"),
         ] {
             assert_unknown_field::<EmitResponse>(&renamed(&response, key, typo), typo, key);
@@ -1131,9 +1344,12 @@ mod tests {
         let manifest = serde_json::json!({
             "name": "fixture",
             "version": "1.0.0",
-            "protocol": { "min": "2.0", "max": "2.0" },
+            "protocol": { "min": "3.0", "max": "3.0" },
             "ir_version": { "min": "0.2", "max": "0.2" },
-            "capabilities": { "streaming": ["sse"] }
+            "capabilities": {
+                "streaming": ["sse"],
+                "validation": { "backends": ["pydantic"] }
+            }
         });
         for (key, typo) in [
             ("protocol", "protokol"),
@@ -1151,6 +1367,15 @@ mod tests {
             &renamed(&manifest["capabilities"], "streaming", "streamin"),
             "streamin",
             "capabilities.streaming",
+        );
+        assert_unknown_field::<ValidationCapabilities>(
+            &renamed(
+                &manifest["capabilities"]["validation"],
+                "backends",
+                "backendz",
+            ),
+            "backendz",
+            "capabilities.validation.backends",
         );
     }
 
@@ -1195,7 +1420,7 @@ mod tests {
 
     fn manifest_with(list: &str, values: serde_json::Value) -> EmitterManifest {
         let mut value = serde_json::to_value(manifest()).unwrap();
-        value["protocol"] = serde_json::json!({ "min": "2.0", "max": "2.0" });
+        value["protocol"] = serde_json::json!({ "min": "3.0", "max": "3.0" });
         value["capabilities"][list] = values;
         serde_json::from_value(value).unwrap()
     }
@@ -1259,16 +1484,18 @@ mod tests {
             files: Vec::new(),
             diagnostics: Vec::new(),
             coverage: Some(coverage_for_document(&document, false).unwrap()),
+            validation_coverage: None,
             error: None,
         };
         assert!(
-            validate_response_for_document(&response, &document, EmitMode::Strict, true).is_ok()
+            validate_response_for_document(&response, &document, EmitMode::Strict, true, false)
+                .is_ok()
         );
 
         let mut missing = response.clone();
         missing.coverage = None;
         assert!(
-            validate_response_for_document(&missing, &document, EmitMode::Strict, true)
+            validate_response_for_document(&missing, &document, EmitMode::Strict, true, false)
                 .unwrap_err()
                 .contains("missing coverage")
         );
@@ -1281,7 +1508,7 @@ mod tests {
             .opaque
             .insert("types.EventQuery".into());
         assert!(
-            validate_response_for_document(&duplicate, &document, EmitMode::Strict, true)
+            validate_response_for_document(&duplicate, &document, EmitMode::Strict, true, false)
                 .unwrap_err()
                 .contains("more than once")
         );
@@ -1291,24 +1518,31 @@ mod tests {
         coverage.exact.remove("types.EventQuery");
         coverage.opaque.insert("types.EventQuery".into());
         assert!(
-            validate_response_for_document(&opaque, &document, EmitMode::Strict, false)
+            validate_response_for_document(&opaque, &document, EmitMode::Strict, false, false)
                 .unwrap_err()
                 .contains("opaque coverage without declaring opaque support")
         );
-        assert!(validate_response_for_document(&opaque, &document, EmitMode::Strict, true).is_ok());
-        assert!(validate_response_for_document(&opaque, &document, EmitMode::Lossy, false).is_ok());
+        assert!(
+            validate_response_for_document(&opaque, &document, EmitMode::Strict, true, false)
+                .is_ok()
+        );
+        assert!(
+            validate_response_for_document(&opaque, &document, EmitMode::Lossy, false, false)
+                .is_ok()
+        );
 
         let mut unsupported = response.clone();
         let coverage = unsupported.coverage.as_mut().unwrap();
         coverage.exact.remove("types.EventQuery");
         coverage.unsupported.insert("types.EventQuery".into());
         assert!(
-            validate_response_for_document(&unsupported, &document, EmitMode::Strict, true)
+            validate_response_for_document(&unsupported, &document, EmitMode::Strict, true, false)
                 .unwrap_err()
                 .contains("unsupported coverage")
         );
         assert!(
-            validate_response_for_document(&unsupported, &document, EmitMode::Lossy, true).is_ok()
+            validate_response_for_document(&unsupported, &document, EmitMode::Lossy, true, false)
+                .is_ok()
         );
 
         let mut lossy = response;
@@ -1316,11 +1550,182 @@ mod tests {
         coverage.exact.remove("types.EventQuery");
         coverage.lossy.insert("types.EventQuery".into());
         assert!(
-            validate_response_for_document(&lossy, &document, EmitMode::Strict, true)
+            validate_response_for_document(&lossy, &document, EmitMode::Strict, true, false)
                 .unwrap_err()
                 .contains("lossy coverage")
         );
-        assert!(validate_response_for_document(&lossy, &document, EmitMode::Lossy, true).is_ok());
+        assert!(
+            validate_response_for_document(&lossy, &document, EmitMode::Lossy, true, false).is_ok()
+        );
+    }
+
+    #[test]
+    fn validation_coverage_covers_every_subject_once_and_rejects_opaque() {
+        let document: Document =
+            serde_json::from_str(include_str!("../../../fixtures/login.json")).unwrap();
+        let mut validation = ValidationCoverage::exact_for_document(&document);
+        validation.exact.remove("types.EventQuery");
+        validation.lossy.insert("types.EventQuery".into());
+        validation.exact.remove("types.LoginError");
+        validation.unsupported.insert("types.LoginError".into());
+        let response = EmitResponse {
+            protocol: PROTOCOL_VERSION,
+            files: Vec::new(),
+            diagnostics: Vec::new(),
+            coverage: Some(coverage_for_document(&document, false).unwrap()),
+            validation_coverage: Some(validation),
+            error: None,
+        };
+        assert_eq!(
+            validate_response_for_document(&response, &document, EmitMode::Strict, true, true)
+                .unwrap_err(),
+            "emitter reported unsupported validation coverage in strict mode: types.LoginError; \
+             lossy validation coverage in strict mode: types.EventQuery"
+        );
+        assert!(
+            validate_response_for_document(&response, &document, EmitMode::Lossy, true, true)
+                .is_ok()
+        );
+
+        let mut missing = response.clone();
+        missing
+            .validation_coverage
+            .as_mut()
+            .unwrap()
+            .exact
+            .remove("types.User");
+        assert!(
+            validate_response_for_document(&missing, &document, EmitMode::Lossy, true, true)
+                .unwrap_err()
+                .contains("missing subjects [\"types.User\"]")
+        );
+
+        let mut duplicate = response.clone();
+        duplicate
+            .validation_coverage
+            .as_mut()
+            .unwrap()
+            .lossy
+            .insert("types.User".into());
+        assert!(
+            validate_response_for_document(&duplicate, &document, EmitMode::Lossy, true, true)
+                .unwrap_err()
+                .contains("more than once")
+        );
+
+        let mut absent = response;
+        absent.validation_coverage = None;
+        assert_eq!(
+            validate_response_for_document(&absent, &document, EmitMode::Lossy, true, true)
+                .unwrap_err(),
+            "emitter response is missing validation coverage while validation is enabled"
+        );
+        assert!(
+            validate_response_for_document(&absent, &document, EmitMode::Lossy, true, false)
+                .is_ok()
+        );
+
+        let error = serde_json::from_value::<EmitResponse>(serde_json::json!({
+            "protocol": PROTOCOL_VERSION,
+            "validation_coverage": { "opaque": ["types.User"] }
+        }))
+        .unwrap_err();
+        assert!(
+            error.to_string().contains("unknown field `opaque`"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn validation_capabilities_name_backends_and_levels() {
+        let supported = validation_manifest(
+            &["pydantic"],
+            &[
+                ("validation.scalars", "exact"),
+                ("validation.formats", "lossy"),
+                ("validation.stream", "unsupported"),
+            ],
+        );
+        assert!(supported.validate("0.2").is_ok());
+        let custom = validation_manifest(&[], &[("validation.custom_thing", "exact")]);
+        assert!(
+            custom.validate("0.2").is_ok(),
+            "a capability list is not fixed"
+        );
+
+        assert_eq!(
+            validation_manifest(&["pydantic"], &[("validation.scalars", "opaque")])
+                .validate("0.2")
+                .unwrap_err(),
+            "emitter validation capability validation.scalars has level \"opaque\"; it is exact, \
+             lossy, or unsupported"
+        );
+        assert_eq!(
+            validation_manifest(&[], &[("enum.external", "exact")])
+                .validate("0.2")
+                .unwrap_err(),
+            "emitter validation capability \"enum.external\" is not a validation.* id"
+        );
+        assert_eq!(
+            validation_manifest(&["py dantic"], &[])
+                .validate("0.2")
+                .unwrap_err(),
+            "emitter validation backend \"py dantic\" is not a plain backend id"
+        );
+        assert_eq!(
+            validation_manifest(&["pydantic", "pydantic"], &[])
+                .validate("0.2")
+                .unwrap_err(),
+            "emitter validation lists the backend pydantic more than once"
+        );
+    }
+
+    #[test]
+    fn a_validation_option_needs_a_declared_backend_and_capability() {
+        let requested = options(r#"{"validation":{"backend":"pydantic"}}"#);
+        assert!(validation_enabled(&requested));
+        assert!(
+            manifest()
+                .validation_gap(&requested)
+                .unwrap()
+                .0
+                .contains("does not declare validation support for the pydantic backend")
+        );
+
+        let supported = validation_manifest(&["pydantic"], &[("validation.scalars", "exact")]);
+        assert!(supported.validation_gap(&requested).is_none());
+        assert!(
+            supported
+                .validation_gap(&options(r#"{"validation":{"backend":"none"}}"#))
+                .is_none()
+        );
+        assert!(supported.validation_gap(&BTreeMap::new()).is_none());
+        assert!(!validation_enabled(&options(
+            r#"{"validation":{"backend":"none"}}"#
+        )));
+
+        let wrong = validation_manifest(&["zod"], &[("validation.scalars", "exact")]);
+        assert_eq!(
+            wrong.validation_gap(&requested).unwrap().0,
+            "fixture does not declare the pydantic validation backend"
+        );
+        let no_capabilities = validation_manifest(&["pydantic"], &[]);
+        assert_eq!(
+            no_capabilities.validation_gap(&requested).unwrap().0,
+            "fixture declares no validation capabilities"
+        );
+    }
+
+    fn validation_manifest(backends: &[&str], capabilities: &[(&str, &str)]) -> EmitterManifest {
+        let mut manifest = manifest();
+        manifest.capabilities.validation = ValidationCapabilities {
+            backends: backends.iter().map(|backend| (*backend).into()).collect(),
+            capabilities: capabilities
+                .iter()
+                .map(|(id, level)| ((*id).into(), (*level).into()))
+                .collect(),
+        };
+        manifest
     }
 
     #[test]
@@ -1338,13 +1743,15 @@ mod tests {
             files: Vec::new(),
             diagnostics: Vec::new(),
             coverage: Some(overclaimed),
+            validation_coverage: None,
             error: None,
         };
         let error = "emitter reported types.User as exact coverage, better than the canonical \
                      opaque coverage";
         for mode in [EmitMode::Strict, EmitMode::Lossy] {
             assert_eq!(
-                validate_response_for_document(&response, &document, mode, true).unwrap_err(),
+                validate_response_for_document(&response, &document, mode, true, false)
+                    .unwrap_err(),
                 error,
                 "{mode:?}"
             );
@@ -1363,15 +1770,17 @@ mod tests {
             files: Vec::new(),
             diagnostics: Vec::new(),
             coverage: Some(coverage),
+            validation_coverage: None,
             error: None,
         };
         assert_eq!(
-            validate_response_for_document(&response, &document, EmitMode::Strict, true)
+            validate_response_for_document(&response, &document, EmitMode::Strict, true, false)
                 .unwrap_err(),
             "emitter reported lossy coverage in strict mode: types.User"
         );
         assert!(
-            validate_response_for_document(&response, &document, EmitMode::Lossy, true).is_ok()
+            validate_response_for_document(&response, &document, EmitMode::Lossy, true, false)
+                .is_ok()
         );
     }
 
@@ -1399,17 +1808,19 @@ mod tests {
             files: Vec::new(),
             diagnostics: Vec::new(),
             coverage: Some(coverage),
+            validation_coverage: None,
             error: None,
         };
         assert_eq!(
-            validate_response_for_document(&response, &document, EmitMode::Strict, true)
+            validate_response_for_document(&response, &document, EmitMode::Strict, true, false)
                 .unwrap_err(),
             "emitter reported unsupported coverage in strict mode: types.LoginError; lossy \
              coverage in strict mode: types.EventQuery",
             "the worst class comes first and every subject is named"
         );
         assert!(
-            validate_response_for_document(&response, &document, EmitMode::Lossy, true).is_ok()
+            validate_response_for_document(&response, &document, EmitMode::Lossy, true, false)
+                .is_ok()
         );
     }
 
@@ -1428,14 +1839,17 @@ mod tests {
             files: Vec::new(),
             diagnostics: Vec::new(),
             coverage: Some(coverage_for_document(&document, true).unwrap()),
+            validation_coverage: None,
             error: None,
         };
         assert!(
-            validate_response_for_document(&certified, &document, EmitMode::Lossy, true).is_ok(),
+            validate_response_for_document(&certified, &document, EmitMode::Lossy, true, false)
+                .is_ok(),
             "the built-in emitter's own lossy-mode coverage is accepted"
         );
         assert!(
-            validate_response_for_document(&certified, &document, EmitMode::Strict, true).is_err(),
+            validate_response_for_document(&certified, &document, EmitMode::Strict, true, false)
+                .is_err(),
             "the same coverage is lossy in strict mode"
         );
 
@@ -1443,7 +1857,7 @@ mod tests {
         coverage.lossy.remove("types.User");
         coverage.exact.insert("types.User".into());
         assert_eq!(
-            validate_response_for_document(&certified, &document, EmitMode::Lossy, true)
+            validate_response_for_document(&certified, &document, EmitMode::Lossy, true, false)
                 .unwrap_err(),
             "emitter reported types.User as exact coverage, better than the canonical lossy \
              coverage"
@@ -1476,16 +1890,19 @@ mod tests {
             files: Vec::new(),
             diagnostics: Vec::new(),
             coverage: Some(coverage.clone()),
+            validation_coverage: None,
             error: None,
         };
         assert!(
-            validate_response_for_document(&response, &document, EmitMode::Strict, true).is_ok()
+            validate_response_for_document(&response, &document, EmitMode::Strict, true, false)
+                .is_ok()
         );
         assert!(
-            validate_response_for_document(&response, &document, EmitMode::Lossy, false).is_ok()
+            validate_response_for_document(&response, &document, EmitMode::Lossy, false, false)
+                .is_ok()
         );
         assert_eq!(
-            validate_response_for_document(&response, &document, EmitMode::Strict, false)
+            validate_response_for_document(&response, &document, EmitMode::Strict, false, false)
                 .unwrap_err(),
             "emitter reported opaque coverage without declaring opaque support"
         );
@@ -1512,16 +1929,18 @@ mod tests {
                 files: Vec::new(),
                 diagnostics: Vec::new(),
                 coverage: Some(coverage),
+                validation_coverage: None,
                 error: None,
             };
             assert_eq!(
-                validate_response_for_document(&narrowed, &document, EmitMode::Strict, true)
+                validate_response_for_document(&narrowed, &document, EmitMode::Strict, true, false)
                     .unwrap_err(),
                 error,
                 "{level}"
             );
             assert!(
-                validate_response_for_document(&narrowed, &document, EmitMode::Lossy, true).is_ok(),
+                validate_response_for_document(&narrowed, &document, EmitMode::Lossy, true, false)
+                    .is_ok(),
                 "{level}"
             );
         }
@@ -1725,7 +2144,8 @@ mod tests {
         }))
         .unwrap();
         assert!(
-            validate_response_for_document(&response, &document, EmitMode::Strict, true).is_ok()
+            validate_response_for_document(&response, &document, EmitMode::Strict, true, false)
+                .is_ok()
         );
 
         let mut repeated: Vec<String> = pons_ir::coverage_subjects(&document).into_iter().collect();
@@ -1814,6 +2234,7 @@ mod tests {
                 files: vec![file(path)],
                 diagnostics: Vec::new(),
                 coverage: None,
+                validation_coverage: None,
                 error: None,
             };
             assert!(validate_response(&response).is_err(), "accepted {path:?}");
@@ -1831,6 +2252,7 @@ mod tests {
                 files: vec![file(path)],
                 diagnostics: Vec::new(),
                 coverage: None,
+                validation_coverage: None,
                 error: None,
             };
             assert!(validate_response(&response).is_ok(), "refused {path:?}");
@@ -1841,6 +2263,7 @@ mod tests {
             files: vec![file("client.ts"), file("client.ts")],
             diagnostics: Vec::new(),
             coverage: None,
+            validation_coverage: None,
             error: None,
         };
         assert!(validate_response(&response).is_err());
@@ -1863,6 +2286,7 @@ mod tests {
                 files: vec![file(path)],
                 diagnostics: Vec::new(),
                 coverage: None,
+                validation_coverage: None,
                 error: None,
             };
             assert!(validate_response(&response).is_err(), "accepted {path:?}");
@@ -1874,6 +2298,7 @@ mod tests {
                 files: vec![file(path)],
                 diagnostics: Vec::new(),
                 coverage: None,
+                validation_coverage: None,
                 error: None,
             };
             assert!(validate_response(&response).is_ok(), "refused {path:?}");

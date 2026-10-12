@@ -14,7 +14,7 @@ use serde_json::Value;
 
 use crate::protocol::{
     EmitMode, EmitRequest, EmitResponse, EmitterManifest, PROTOCOL_VERSION,
-    validate_response_for_document,
+    validate_response_for_document, validation_enabled,
 };
 
 #[derive(Debug)]
@@ -90,9 +90,11 @@ pub fn invoke(
     }
     manifest.validate(&ir.ir_version).map_err(PluginError)?;
     manifest.validate_options(&options).map_err(PluginError)?;
+    let validation_requested = validation_enabled(&options);
     let capability_warnings: Vec<String> = manifest
         .unsupported_features(ir)
         .into_iter()
+        .chain(manifest.validation_gap(&options))
         .map(|warning| warning.0)
         .collect();
     if strict && !capability_warnings.is_empty() {
@@ -109,6 +111,7 @@ pub fn invoke(
     };
     let request = EmitRequest {
         protocol: PROTOCOL_VERSION,
+        source_ir_version: ir.ir_version.clone(),
         mode,
         ir,
         options,
@@ -129,8 +132,14 @@ pub fn invoke(
             &logs,
         )
     })?;
-    validate_response_for_document(&response, ir, mode, manifest.capabilities.opaque)
-        .map_err(|error| with_emitter_log(&error, &logs))?;
+    validate_response_for_document(
+        &response,
+        ir,
+        mode,
+        manifest.capabilities.opaque,
+        validation_requested,
+    )
+    .map_err(|error| with_emitter_log(&error, &logs))?;
     Ok(PluginResult {
         manifest,
         response,
@@ -812,13 +821,13 @@ mod tests {
     fn keeps_the_answer_of_a_target_that_stops_reading_its_stdin() {
         let output = run_command_with_limits(
             OsStr::new("sh"),
-            &["-c", r#"printf '{"protocol":2}'; exit 0"#],
+            &["-c", r#"printf '{"protocol":3}'; exit 0"#],
             Some(vec![b'x'; 1024 * 1024]),
             Duration::from_secs(10),
             MAX_PLUGIN_OUTPUT_BYTES,
         )
         .unwrap();
-        assert_eq!(output.stdout, br#"{"protocol":2}"#);
+        assert_eq!(output.stdout, br#"{"protocol":3}"#);
     }
 
     #[cfg(target_os = "linux")]
@@ -1012,7 +1021,7 @@ mod tests {
             "unparsable-manifest",
             r#"#!/bin/sh
 printf '%s\n' 'the range key is protokl' >&2
-printf '%s' '{"name":"fixture","protokl":{"min":"2.0","max":"2.0"}}'
+printf '%s' '{"name":"fixture","protokl":{"min":"3.0","max":"3.0"}}'
 "#,
         );
         let error = invoke(
@@ -1033,12 +1042,12 @@ printf '%s' '{"name":"fixture","protokl":{"min":"2.0","max":"2.0"}}'
             "unparsable-response",
             r#"#!/bin/sh
 if [ "$1" = describe ]; then
-  printf '%s' '{"name":"fixture","version":"1.0.0","protocol":{"min":"2.0","max":"2.0"},"ir_version":{"min":"0.2","max":"0.2"},"capabilities":{"streaming":["sse"],"enum_reprs":["string","external","internal","adjacent","untagged"],"direction_split":true,"provides":true,"flattened":true,"opaque":true,"object_openness":["reject","preserve_typed","preserve_opaque"]}}'
+  printf '%s' '{"name":"fixture","version":"1.0.0","protocol":{"min":"3.0","max":"3.0"},"ir_version":{"min":"0.2","max":"0.2"},"capabilities":{"streaming":["sse"],"enum_reprs":["string","external","internal","adjacent","untagged"],"direction_split":true,"provides":true,"flattened":true,"opaque":true,"object_openness":["reject","preserve_typed","preserve_opaque"]}}'
   exit 0
 fi
 cat > /dev/null
 printf '%s\n' 'the coverage key is coverag' >&2
-printf '%s' '{"protocol":2,"coverag":{}}'
+printf '%s' '{"protocol":3,"coverag":{}}'
 "#,
         );
         let error = invoke(
@@ -1070,7 +1079,7 @@ printf '%s' '{"protocol":2,"coverag":{}}'
             "refusing",
             r#"#!/bin/sh
 printf '%s\n' 'cannot model preserved objects' >&2
-printf '%s' '{"name":"fixture","version":"1.0.0","protocol":{"min":"2.0","max":"2.0"},"ir_version":{"min":"0.2","max":"0.2"},"capabilities":{"streaming":["sse"],"enum_reprs":["string","external","internal","adjacent","untagged"],"direction_split":true,"provides":true,"flattened":true,"object_openness":["reject","preserve_typed","preserve_opaque"]}}'
+printf '%s' '{"name":"fixture","version":"1.0.0","protocol":{"min":"3.0","max":"3.0"},"ir_version":{"min":"0.2","max":"0.2"},"capabilities":{"streaming":["sse"],"enum_reprs":["string","external","internal","adjacent","untagged"],"direction_split":true,"provides":true,"flattened":true,"object_openness":["reject","preserve_typed","preserve_opaque"]}}'
 "#,
         );
         let error = invoke(
@@ -1094,12 +1103,12 @@ printf '%s' '{"name":"fixture","version":"1.0.0","protocol":{"min":"2.0","max":"
             "unclassified",
             r#"#!/bin/sh
 if [ "$1" = describe ]; then
-  printf '%s' '{"name":"fixture","version":"1.0.0","protocol":{"min":"2.0","max":"2.0"},"ir_version":{"min":"0.2","max":"0.2"},"capabilities":{"streaming":["sse"],"enum_reprs":["string","external","internal","adjacent","untagged"],"direction_split":true,"provides":true,"flattened":true,"opaque":true,"object_openness":["reject","preserve_typed","preserve_opaque"]}}'
+  printf '%s' '{"name":"fixture","version":"1.0.0","protocol":{"min":"3.0","max":"3.0"},"ir_version":{"min":"0.2","max":"0.2"},"capabilities":{"streaming":["sse"],"enum_reprs":["string","external","internal","adjacent","untagged"],"direction_split":true,"provides":true,"flattened":true,"opaque":true,"object_openness":["reject","preserve_typed","preserve_opaque"]}}'
   exit 0
 fi
 cat > /dev/null
 printf '%s\n' 'gave up on types.User' >&2
-printf '%s' '{"protocol":2,"files":[{"path":"client.ts","content":"generated"}],"coverage":{"exact":["types.EventQuery","types.LoginError"],"opaque":["operations.auth.login","operations.events.watch","types.LoginRequest"],"lossy":[],"unsupported":[]}}'
+printf '%s' '{"protocol":3,"files":[{"path":"client.ts","content":"generated"}],"coverage":{"exact":["types.EventQuery","types.LoginError"],"opaque":["operations.auth.login","operations.events.watch","types.LoginRequest"],"lossy":[],"unsupported":[]}}'
 "#,
         );
         let error = invoke(

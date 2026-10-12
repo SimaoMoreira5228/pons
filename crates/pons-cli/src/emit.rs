@@ -3,6 +3,7 @@ use std::fs;
 use std::io::Write;
 use std::path::{Component, Path};
 
+use pons_emit_ts::ValidationBackend;
 use pons_ir::{Coverage, Document, ValidationCoverage};
 use pons_plugin::{DiagnosticSeverity, EmitRequest, PROTOCOL_VERSION, PluginDiagnostic, log_tail};
 
@@ -18,6 +19,7 @@ struct Emitted {
     files: Vec<OutputFile>,
     coverage: Option<Coverage>,
     validation_coverage: Option<ValidationCoverage>,
+    validation_enabled: bool,
     diagnostics: Vec<PluginDiagnostic>,
     warnings: Vec<String>,
     logs: Vec<u8>,
@@ -47,11 +49,13 @@ pub(super) fn run(
         mut files,
         coverage,
         validation_coverage,
+        validation_enabled,
         diagnostics,
         warnings,
         logs,
     } = match &resolved.built {
         Built::Ts(options) => {
+            let validation_enabled = options.validation.backend != ValidationBackend::None;
             let output = pons_emit_ts::emit_with_options(document, options.clone())
                 .map_err(|error| CliError::Failure(error.to_string()))?;
             Emitted {
@@ -65,6 +69,7 @@ pub(super) fn run(
                     .collect(),
                 coverage: Some(output.coverage),
                 validation_coverage: Some(output.validation_coverage),
+                validation_enabled,
                 diagnostics: Vec::new(),
                 warnings: output.warnings,
                 logs: Vec::new(),
@@ -87,6 +92,7 @@ pub(super) fn run(
                 }],
                 coverage: Some(output.coverage),
                 validation_coverage: None,
+                validation_enabled: false,
                 diagnostics: Vec::new(),
                 warnings: output.warnings,
                 logs: Vec::new(),
@@ -95,6 +101,7 @@ pub(super) fn run(
         Built::External(options) => {
             let mut executable = OsString::from("pons-emit-");
             executable.push(target);
+            let validation_enabled = pons_plugin::validation_enabled(options);
             let result = pons_plugin::invoke(
                 &executable,
                 target,
@@ -105,6 +112,7 @@ pub(super) fn run(
             )
             .map_err(|error| CliError::Failure(error.to_string()))?;
             let coverage = result.response.coverage.clone();
+            let validation_coverage = result.response.validation_coverage.clone();
             let files = result
                 .response
                 .files
@@ -121,7 +129,8 @@ pub(super) fn run(
             Emitted {
                 files,
                 coverage,
-                validation_coverage: None,
+                validation_coverage,
+                validation_enabled,
                 diagnostics: result.response.diagnostics,
                 warnings,
                 logs: result.logs,
@@ -159,9 +168,18 @@ pub(super) fn run(
                 "coverage output conflicts with emitter output {relative}"
             )));
         }
+        let validation_coverage = match validation_coverage {
+            Some(coverage) => coverage,
+            None if validation_enabled => {
+                return Err(CliError::Failure(format!(
+                    "{target} returned no validation coverage while validation is enabled"
+                )));
+            }
+            None => ValidationCoverage::default(),
+        };
         let report = serde_json::json!({
             "coverage": coverage,
-            "validation_coverage": validation_coverage.unwrap_or_default(),
+            "validation_coverage": validation_coverage,
         });
         let mut content = serde_json::to_string_pretty(&report)
             .map_err(|error| CliError::Failure(format!("cannot serialize coverage: {error}")))?;
@@ -196,6 +214,7 @@ fn dump(path: &Path, resolved: &Resolved, document: &Document) -> Result<(), Cli
     })?;
     let request = EmitRequest {
         protocol: PROTOCOL_VERSION,
+        source_ir_version: canonical.ir_version.clone(),
         mode: resolved.mode,
         ir: &canonical,
         options: resolved.wire_options(),

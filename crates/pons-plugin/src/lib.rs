@@ -6,5 +6,5 @@ pub use process::{PluginError, PluginResult, invoke, log_tail};
 pub use protocol::{
     CapabilityWarning, DiagnosticSeverity, EmitMode, EmitRequest, EmitResponse,
     EmitterCapabilities, EmitterManifest, GeneratedFile, OptionKind, OptionSchema, OptionSpec,
-    PROTOCOL_VERSION, PluginDiagnostic,
+    PROTOCOL_VERSION, PluginDiagnostic, ValidationCapabilities, validation_enabled,
 };
