@@ -136,7 +136,7 @@ function formatStruct(format: string): Struct<string, null> {
     ),
     (
         "one-key",
-        r#"const oneKey = (key: string, payload: Struct<any, any>) => openType({ [key]: required(payload) });
+        r#"const oneKey = (key: string, payload: Struct<any, any>) => object({ [key]: required(payload) });
 "#,
     ),
     (
@@ -414,7 +414,12 @@ impl BackendTrait for Backend {
 
     fn tuple(&mut self, items: &[String]) -> Rendered {
         self.used("tuple");
-        Rendered::exact(format!("tuple([{}])", items.join(", ")))
+        self.used("refine");
+        let length = items.len();
+        let items = items.join(", ");
+        Rendered::exact(format!(
+            "refine(tuple([{items}]), \"length\", (value) => value.length === {length} || \"tuple has the wrong length\")"
+        ))
     }
 
     fn map(&mut self, key: &str, value: &str) -> Rendered {
@@ -593,7 +598,7 @@ fn prelude_imports(entry: &str) -> &'static [&'static str] {
         "format" => &["refine", "string", "Struct"],
         "finite" | "binary32" => &["number", "refine"],
         "required" => &["refine", "Struct"],
-        "one-key" => &["openType"],
+        "one-key" => &["object"],
         "unique" => &["array", "refine", "Struct"],
         _ => &[],
     }

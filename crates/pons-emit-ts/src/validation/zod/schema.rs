@@ -205,6 +205,7 @@ impl Backend for Generator {
 
     fn external(&mut self, wire: &str, payload: Option<&str>) -> Rendered {
         self.need.insert("one-key");
+        self.need.insert("required");
         match payload {
             Some(payload) => Rendered::exact(format!("oneKey({}, {payload})", string(wire))),
             None => Rendered::exact(format!(

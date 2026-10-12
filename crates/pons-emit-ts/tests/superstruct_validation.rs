@@ -316,3 +316,179 @@ fn a_preserve_typed_object_is_lossy_rather_than_exact() {
         "the emitted check is the open form it can express: {validators}"
     );
 }
+
+fn response_document(types: Value, response: &str) -> Document {
+    let mut raw = fixture();
+    raw["types"] = types;
+    raw["operations"] = json!([{
+        "id": [["shape"], ["read"]],
+        "method": "GET",
+        "path": [{"lit": "shape"}],
+        "auth": {"alternatives": [], "optional": false},
+        "semantics": {"safe": true, "idempotent": true},
+        "responses": [{"status": 200, "content": "json", "body": {"ref": response}}],
+        "errors": []
+    }]);
+    serde_json::from_value(raw).unwrap()
+}
+
+#[test]
+fn a_tuple_rejects_a_value_that_is_too_long_or_too_short() {
+    let document = response_document(
+        json!({
+            "Pair": {
+                "kind": "struct", "name": ["pair"], "direction": "output", "openness": "reject",
+                "fields": [{
+                    "wire": "pair",
+                    "ident": ["pair"],
+                    "ty": {"kind": "tuple", "items": [{"kind": "string"}, {"kind": "bool"}]},
+                    "presence": "required"
+                }]
+            }
+        }),
+        "Pair",
+    );
+    let files = superstruct(&document, TsOptions::default());
+    let validators = file(&files, "validators.ts");
+    assert!(
+        validators.contains(
+            "refine(tuple([string(), boolean()]), \"length\", (value) => value.length === 2 || \"tuple has the wrong length\")"
+        ),
+        "the tuple keeps its exact length: {validators}"
+    );
+    let harness = r#"
+import { validatePair } from "./validators.ts";
+
+const admits = (label: string, value: unknown) => {
+  if (validatePair(value) !== null) throw new Error(`${label} was refused`);
+};
+const refuses = (label: string, value: unknown) => {
+  if (validatePair(value) === null) throw new Error(`${label} was admitted`);
+};
+
+admits("an exact tuple", { pair: ["x", true] });
+refuses("a short tuple", { pair: ["x"] });
+refuses("a long tuple", { pair: ["x", true, 1] });
+"#;
+    run_bun(&files, harness);
+}
+
+#[test]
+fn an_external_enum_accepts_one_key_and_no_others() {
+    let document = response_document(
+        json!({
+            "Only": {
+                "kind": "enum", "name": ["only"], "direction": "output",
+                "repr": {"kind": "external"},
+                "variants": [{
+                    "wire": "held",
+                    "ident": ["held"],
+                    "payload": {"kind": "struct", "fields": [{
+                        "wire": "at",
+                        "ident": ["at"],
+                        "ty": {"kind": "int", "bits": 32, "signed": false, "wire": "number"},
+                        "presence": "required"
+                    }]}
+                }]
+            }
+        }),
+        "Only",
+    );
+    let files = superstruct(&document, TsOptions::default());
+    let validators = file(&files, "validators.ts");
+    assert!(
+        validators.contains("const oneKey = (key: string, payload: Struct<any, any>) => object({ [key]: required(payload) });"),
+        "the one-key wrapper is strict: {validators}"
+    );
+    let harness = r#"
+import { validateOnly, validateOnlyHeld } from "./validators.ts";
+
+const admits = (label: string, check: (value: unknown) => unknown, value: unknown) => {
+  const found = check(value);
+  if (found !== null) throw new Error(`${label} was refused: ${JSON.stringify(found)}`);
+};
+const refuses = (label: string, check: (value: unknown) => unknown, value: unknown) => {
+  if (check(value) === null) throw new Error(`${label} was admitted`);
+};
+
+admits("the only external variant", validateOnly, { held: { at: 1 } });
+admits("the narrowed external variant", validateOnlyHeld, { held: { at: 1 } });
+refuses("an extra external key", validateOnly, { held: { at: 1 }, other: null });
+refuses("two external keys", validateOnly, { held: { at: 1 }, bare: null });
+refuses("an external payload of the wrong type", validateOnly, { held: { at: "1" } });
+"#;
+    run_bun(&files, harness);
+}
+
+#[test]
+fn a_struct_error_path_names_the_nested_member_it_failed_on() {
+    let document = response_document(
+        json!({
+            "Outer": {
+                "kind": "struct", "name": ["outer"], "direction": "output", "openness": "reject",
+                "fields": [{"wire": "inner", "ident": ["inner"], "ty": {"ref": "Inner"}, "presence": "required"}]
+            },
+            "Inner": {
+                "kind": "struct", "name": ["inner"], "direction": "output", "openness": "reject",
+                "fields": [{"wire": "items", "ident": ["items"], "ty": {"kind": "array", "item": {"ref": "Item"}}, "presence": "required"}]
+            },
+            "Item": {
+                "kind": "struct", "name": ["item"], "direction": "output", "openness": "reject",
+                "fields": [{"wire": "name", "ident": ["name"], "ty": {"kind": "string"}, "presence": "required"}]
+            }
+        }),
+        "Outer",
+    );
+    let files = superstruct(&document, TsOptions::default());
+    let harness = r#"
+import { validateOuter } from "./validators.ts";
+
+const found = validateOuter({ inner: { items: [{ name: 1 }] } });
+if (found === null) throw new Error("a wrong nested member was admitted");
+const path = (found as { path: unknown }).path;
+if (JSON.stringify(path) !== JSON.stringify(["inner", "items", 0, "name"])) {
+  throw new Error(`the issue path is not the nested member: ${JSON.stringify(path)}`);
+}
+"#;
+    run_bun(&files, harness);
+}
+
+#[test]
+fn a_required_field_whose_schema_accepts_undefined_is_still_required() {
+    let document = response_document(
+        json!({
+            "Required": {
+                "kind": "struct", "name": ["required"], "direction": "output", "openness": "reject",
+                "fields": [
+                    {"wire": "value", "ident": ["value"], "ty": {"kind": "any"}, "presence": "required"},
+                    {"wire": "secret", "ident": ["secret"], "ty": {"kind": "opaque", "codec": "c", "wire": "json"}, "presence": "required"}
+                ]
+            }
+        }),
+        "Required",
+    );
+    let files = superstruct(&document, TsOptions::default());
+    let validators = file(&files, "validators.ts");
+    assert!(
+        validators.contains("\"value\": required(any())")
+            && validators.contains("\"secret\": required(unknown())"),
+        "a required any or opaque value is non-optional: {validators}"
+    );
+    let harness = r#"
+import { validateRequired } from "./validators.ts";
+
+const admits = (label: string, value: unknown) => {
+  if (validateRequired(value) !== null) throw new Error(`${label} was refused`);
+};
+const refuses = (label: string, value: unknown) => {
+  if (validateRequired(value) === null) throw new Error(`${label} was admitted`);
+};
+
+admits("both required values", { value: 1, secret: { any: "json" } });
+refuses("a missing any", { secret: {} });
+refuses("a missing opaque", { value: 1 });
+refuses("an undefined any", { value: undefined, secret: {} });
+refuses("an undefined opaque", { value: 1, secret: undefined });
+"#;
+    run_bun(&files, harness);
+}

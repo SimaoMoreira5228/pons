@@ -230,10 +230,20 @@ fn type_checks(files: &[GeneratedFile], probe: &str) {
 }
 
 fn type_checks_with(files: &[GeneratedFile], probe: &str, packaged: bool) {
-    type_checks_beside(files, probe, packaged, false)
+    type_checks_with_packages(files, probe, packaged, &[])
 }
 
 fn type_checks_beside(files: &[GeneratedFile], probe: &str, packaged: bool, zod: bool) {
+    let packages = if zod { vec!["zod"] } else { Vec::new() };
+    type_checks_with_packages(files, probe, packaged, &packages);
+}
+
+fn type_checks_with_packages(
+    files: &[GeneratedFile],
+    probe: &str,
+    packaged: bool,
+    packages: &[&str],
+) {
     let compiler = tsc_command();
     let checked = checked_files(files);
     let directory = tempfile::tempdir().unwrap();
@@ -248,8 +258,8 @@ fn type_checks_beside(files: &[GeneratedFile], probe: &str, packaged: bool, zod:
     if packaged {
         expected.extend(install_runtime_package(directory.path()));
     }
-    if zod {
-        install_zod(directory.path());
+    for package in packages {
+        install_package(directory.path(), package);
     }
     let mut written = written_sources(directory.path());
     written.sort();
@@ -273,25 +283,25 @@ fn type_checks_beside(files: &[GeneratedFile], probe: &str, packaged: bool, zod:
     );
 }
 
-fn install_zod(output: &Path) {
+fn install_package(output: &Path, name: &str) {
     let mut directory = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     let package = loop {
-        let candidate = directory.join("node_modules").join("zod");
+        let candidate = directory.join("node_modules").join(name);
         if candidate.join("package.json").is_file() {
             break candidate;
         }
         if !directory.pop() {
             panic!(
-                "no zod beside the workspace to type check the emitted schemas against, looked in \
-                 {:?} and every directory above it; install it with `bun add --dev zod` or \
-                 `npm install --save-dev zod`",
+                "no {name} beside the workspace to type check the emitted schemas against, looked \
+                 in {:?} and every directory above it; install it with `bun add --dev {name}` or \
+                 `npm install --save-dev {name}`",
                 env!("CARGO_MANIFEST_DIR")
             );
         }
     };
     let scope = output.join("node_modules");
     fs::create_dir_all(&scope).unwrap();
-    let link = scope.join("zod");
+    let link = scope.join(name);
     #[cfg(unix)]
     std::os::unix::fs::symlink(&package, &link).unwrap();
     #[cfg(windows)]
@@ -515,6 +525,74 @@ export const wrong = validateUser({ id: "1" }, { id: "1" });
 "#,
             packaged,
             true,
+        );
+    }
+}
+
+#[test]
+fn a_client_that_checks_its_responses_against_valibot_compiles_beside_valibot() {
+    let document: Document = serde_json::from_value(fixture()).unwrap();
+    for packaged in [false, true] {
+        let files = files_with(
+            &document,
+            pons_emit_ts::TsOptions {
+                validation: pons_emit_ts::ValidationOptions::new(
+                    pons_emit_ts::ValidationBackend::Valibot,
+                ),
+                runtime: if packaged {
+                    pons_emit_ts::Runtime::Package
+                } else {
+                    pons_emit_ts::Runtime::Vendor
+                },
+                ..pons_emit_ts::TsOptions::default()
+            },
+        );
+        type_checks_with_packages(
+            &files,
+            r#"
+import { validateLoginErrorInvalid, validateUser } from "./validators.js";
+
+export const user = validateUser({ id: "1" });
+export const invalid = validateLoginErrorInvalid({ code: "invalid" });
+// @ts-expect-error a validator takes one argument and returns a verdict
+export const wrong = validateUser({ id: "1" }, { id: "1" });
+"#,
+            packaged,
+            &["valibot"],
+        );
+    }
+}
+
+#[test]
+fn a_client_that_checks_its_responses_against_superstruct_compiles_beside_superstruct() {
+    let document: Document = serde_json::from_value(fixture()).unwrap();
+    for packaged in [false, true] {
+        let files = files_with(
+            &document,
+            pons_emit_ts::TsOptions {
+                validation: pons_emit_ts::ValidationOptions::new(
+                    pons_emit_ts::ValidationBackend::Superstruct,
+                ),
+                runtime: if packaged {
+                    pons_emit_ts::Runtime::Package
+                } else {
+                    pons_emit_ts::Runtime::Vendor
+                },
+                ..pons_emit_ts::TsOptions::default()
+            },
+        );
+        type_checks_with_packages(
+            &files,
+            r#"
+import { validateLoginErrorInvalid, validateUser } from "./validators.js";
+
+export const user = validateUser({ id: "1" });
+export const invalid = validateLoginErrorInvalid({ code: "invalid" });
+// @ts-expect-error a validator takes one argument and returns a verdict
+export const wrong = validateUser({ id: "1" }, { id: "1" });
+"#,
+            packaged,
+            &["superstruct"],
         );
     }
 }

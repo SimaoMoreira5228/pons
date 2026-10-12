@@ -5,7 +5,7 @@ use std::{
 };
 
 use pons_emit_ts::{
-    ErrorStrategy, GeneratedFile, TsOptions, ValidationBackend, ValidationOptions,
+    EmitMode, ErrorStrategy, GeneratedFile, TsOptions, ValidationBackend, ValidationOptions,
     emit_with_options,
 };
 use pons_ir::Document;
@@ -112,10 +112,10 @@ fn the_valibot_backend_emits_private_schemas_and_checks_a_login_response() {
     );
     for expected in [
         "import type { ValidationIssue, Validator } from \"./runtime.js\";",
-        "const LoginErrorInvalidSchema = v.looseObject({\"code\": v.literal(\"invalid\")});",
-        "const LoginErrorLockedSchema = v.looseObject({\"code\": v.literal(\"locked\"), \"retry_after\": integer(v.pipe(v.number(), v.integer()), 32, false)});",
+        "const LoginErrorInvalidSchema = plainRecord(v.looseObject({\"code\": v.literal(\"invalid\")}));",
+        "const LoginErrorLockedSchema = plainRecord(v.looseObject({\"code\": v.literal(\"locked\"), \"retry_after\": integer(v.pipe(v.number(), v.integer()), 32, false)}));",
         "const LoginErrorSchema = v.variant(\"code\", [LoginErrorInvalidSchema, LoginErrorLockedSchema]);",
-        "const UserSchema = v.looseObject({\"id\": integer(v.pipe(v.string(), v.regex(CANONICAL_INTEGER)), 64, false), \"nickname\": v.optional(v.nullable(v.string()))});",
+        "const UserSchema = plainRecord(v.looseObject({\"id\": integer(v.pipe(v.string(), v.regex(CANONICAL_INTEGER)), 64, false), \"nickname\": v.optional(v.nullable(v.string()))}));",
         "export const validateLoginErrorInvalid: Validator = mismatch(LoginErrorInvalidSchema);",
         "export const validateLoginErrorLocked: Validator = mismatch(LoginErrorLockedSchema);",
         "export const validateLoginError: Validator = mismatch(LoginErrorSchema);",
@@ -254,6 +254,263 @@ if (validateInline1("person@example.test") !== null) {
 const found = validateInline1("not an email");
 if (found === null) throw new Error("an invalid email was admitted");
 if (!Array.isArray(found.path)) throw new Error(`the issue path is not an array: ${JSON.stringify(found)}`);
+"#;
+    run_bun(&files, harness);
+}
+
+fn response_document(types: Value, response: &str) -> Document {
+    let mut raw = fixture();
+    raw["types"] = types;
+    raw["operations"] = json!([{
+        "id": [["shape"], ["read"]],
+        "method": "GET",
+        "path": [{"lit": "shape"}],
+        "auth": {"alternatives": [], "optional": false},
+        "semantics": {"safe": true, "idempotent": true},
+        "responses": [{"status": 200, "content": "json", "body": {"ref": response}}],
+        "errors": []
+    }]);
+    serde_json::from_value(raw).unwrap()
+}
+
+#[test]
+fn a_tuple_rejects_a_value_that_is_too_long_or_too_short() {
+    let document = response_document(
+        json!({
+            "Pair": {
+                "kind": "struct", "name": ["pair"], "direction": "output", "openness": "reject",
+                "fields": [{
+                    "wire": "pair",
+                    "ident": ["pair"],
+                    "ty": {"kind": "tuple", "items": [{"kind": "string"}, {"kind": "bool"}]},
+                    "presence": "required"
+                }]
+            }
+        }),
+        "Pair",
+    );
+    let files = valibot(&document);
+    let validators = file(&files, "validators.ts");
+    assert!(
+        validators.contains("v.strictTuple([v.string(), v.boolean()])"),
+        "the tuple keeps its exact length: {validators}"
+    );
+    let harness = r#"
+import { validatePair } from "./validators.ts";
+
+const admits = (label: string, value: unknown) => {
+  if (validatePair(value) !== null) throw new Error(`${label} was refused`);
+};
+const refuses = (label: string, value: unknown) => {
+  if (validatePair(value) === null) throw new Error(`${label} was admitted`);
+};
+
+admits("an exact tuple", { pair: ["x", true] });
+refuses("a short tuple", { pair: ["x"] });
+refuses("a long tuple", { pair: ["x", true, 1] });
+"#;
+    run_bun(&files, harness);
+}
+
+#[test]
+fn objects_reject_arrays_dates_typed_arrays_and_class_instances() {
+    let document = response_document(
+        json!({
+            "Loose": {
+                "kind": "struct", "name": ["loose"], "direction": "output",
+                "openness": "preserve_opaque", "fields": []
+            },
+            "Sealed": {
+                "kind": "struct", "name": ["sealed"], "direction": "output",
+                "openness": "reject", "fields": []
+            }
+        }),
+        "Loose",
+    );
+    let files = valibot(&document);
+    let validators = file(&files, "validators.ts");
+    assert!(
+        validators.contains("plainRecord(v.looseObject({}))")
+            && validators.contains("plainRecord(v.strictObject({}))"),
+        "both object policies are guarded: {validators}"
+    );
+    let harness = r#"
+import { validateLoose, validateSealed } from "./validators.ts";
+
+class Box { a = 1; }
+
+for (const [name, check] of [["loose", validateLoose], ["sealed", validateSealed]] as const) {
+  if (check({}) !== null) throw new Error(`${name} refused a plain object`);
+  if (check([]) === null) throw new Error(`${name} admitted an array`);
+  if (check(new Date()) === null) throw new Error(`${name} admitted a date`);
+  if (check(new Uint8Array([1])) === null) throw new Error(`${name} admitted a typed array`);
+  if (check(new Box()) === null) throw new Error(`${name} admitted a class instance`);
+}
+"#;
+    run_bun(&files, harness);
+}
+
+#[test]
+fn a_single_variant_external_enum_stays_a_union() {
+    let document = response_document(
+        json!({
+            "Only": {
+                "kind": "enum", "name": ["only"], "direction": "output",
+                "repr": {"kind": "external"},
+                "variants": [{
+                    "wire": "held",
+                    "ident": ["held"],
+                    "payload": {"kind": "struct", "fields": [{
+                        "wire": "at",
+                        "ident": ["at"],
+                        "ty": {"kind": "int", "bits": 32, "signed": false, "wire": "number"},
+                        "presence": "required"
+                    }]}
+                }]
+            }
+        }),
+        "Only",
+    );
+    let files = valibot(&document);
+    let validators = file(&files, "validators.ts");
+    assert!(
+        validators.contains("const OnlySchema = v.union([OnlyHeldSchema]);"),
+        "an external enum is a union, not a variant: {validators}"
+    );
+    assert!(
+        validators.contains(
+            "const OnlyHeldSchema = oneKey(\"held\", plainRecord(v.looseObject({\"at\": integer(v.pipe(v.number(), v.integer()), 32, false)})));"
+        ),
+        "the external wrapper keeps one key: {validators}"
+    );
+    let harness = r#"
+import { validateOnly, validateOnlyHeld } from "./validators.ts";
+
+const admits = (label: string, check: (value: unknown) => unknown, value: unknown) => {
+  const found = check(value);
+  if (found !== null) throw new Error(`${label} was refused: ${JSON.stringify(found)}`);
+};
+const refuses = (label: string, check: (value: unknown) => unknown, value: unknown) => {
+  if (check(value) === null) throw new Error(`${label} was admitted`);
+};
+
+admits("the only external variant", validateOnly, { held: { at: 1 } });
+admits("the narrowed external variant", validateOnlyHeld, { held: { at: 1 } });
+refuses("an extra external key", validateOnly, { held: { at: 1 }, other: null });
+refuses("an external payload of the wrong type", validateOnly, { held: { at: "1" } });
+refuses("an external array", validateOnly, []);
+"#;
+    run_bun(&files, harness);
+}
+
+#[test]
+fn a_map_is_lossy_because_a_record_skips_reserved_keys() {
+    let document = response_document(
+        json!({
+            "Table": {
+                "kind": "struct", "name": ["table"], "direction": "output", "openness": "reject",
+                "fields": [{
+                    "wire": "entries",
+                    "ident": ["entries"],
+                    "ty": {"kind": "map", "key": {"kind": "string"}, "value": {"kind": "string"}},
+                    "presence": "required"
+                }]
+            }
+        }),
+        "Table",
+    );
+    let error = emit_with_options(
+        &document,
+        TsOptions {
+            validation: ValidationOptions::new(ValidationBackend::Valibot),
+            errors: ErrorStrategy::Throw,
+            ..TsOptions::default()
+        },
+    )
+    .expect_err("strict mode must refuse a lossy map");
+    assert!(
+        error.to_string().contains("types.Table") && error.to_string().contains("valibot"),
+        "the refusal names the backend and the subject: {error}"
+    );
+    let output = emit_with_options(
+        &document,
+        TsOptions {
+            mode: EmitMode::Lossy,
+            validation: ValidationOptions::new(ValidationBackend::Valibot),
+            errors: ErrorStrategy::Throw,
+            ..TsOptions::default()
+        },
+    )
+    .unwrap();
+    assert!(
+        output.validation_coverage.lossy.contains("types.Table"),
+        "a map is lossy: {:?}",
+        output.validation_coverage
+    );
+    assert!(
+        !output.validation_coverage.exact.contains("types.Table"),
+        "a map is not exact: {:?}",
+        output.validation_coverage
+    );
+    let validators = file(&output.files, "validators.ts");
+    assert!(
+        validators.contains("plainRecord(v.record(v.string(), v.string()))"),
+        "the lossy form still checks the entries it can: {validators}"
+    );
+    let harness = r#"
+import { validateTable } from "./validators.ts";
+
+const admits = (label: string, value: unknown) => {
+  const found = validateTable(value);
+  if (found !== null) throw new Error(`${label} was refused: ${JSON.stringify(found)}`);
+};
+const refuses = (label: string, value: unknown) => {
+  if (validateTable(value) === null) throw new Error(`${label} was admitted`);
+};
+
+admits("a map of strings", { entries: { a: "x", b: "y" } });
+refuses("a map value of the wrong type", { entries: { a: 1 } });
+refuses("an array in place of a map", { entries: [] });
+"#;
+    run_bun(&output.files, harness);
+}
+
+#[test]
+fn a_required_field_whose_schema_accepts_undefined_is_still_required() {
+    let document = response_document(
+        json!({
+            "Required": {
+                "kind": "struct", "name": ["required"], "direction": "output", "openness": "reject",
+                "fields": [
+                    {"wire": "value", "ident": ["value"], "ty": {"kind": "any"}, "presence": "required"},
+                    {"wire": "secret", "ident": ["secret"], "ty": {"kind": "opaque", "codec": "c", "wire": "json"}, "presence": "required"}
+                ]
+            }
+        }),
+        "Required",
+    );
+    let files = valibot(&document);
+    let validators = file(&files, "validators.ts");
+    assert!(
+        validators.contains("\"value\": v.nonOptional(v.any())")
+            && validators.contains("\"secret\": v.nonOptional(v.unknown())"),
+        "a required any or opaque value is non-optional: {validators}"
+    );
+    let harness = r#"
+import { validateRequired } from "./validators.ts";
+
+const admits = (label: string, value: unknown) => {
+  if (validateRequired(value) !== null) throw new Error(`${label} was refused`);
+};
+const refuses = (label: string, value: unknown) => {
+  if (validateRequired(value) === null) throw new Error(`${label} was admitted`);
+};
+
+admits("both required values", { value: 1, secret: { any: "json" } });
+refuses("a missing any", { secret: {} });
+refuses("a missing opaque", { value: 1 });
+refuses("an undefined any", { value: undefined, secret: {} });
+refuses("an undefined opaque", { value: 1, secret: undefined });
 "#;
     run_bun(&files, harness);
 }

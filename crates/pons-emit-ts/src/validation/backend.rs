@@ -171,6 +171,9 @@ pub(crate) trait Backend {
     fn schema(&self, name: &str) -> String;
     fn object(&mut self, members: &[Member], openness: &ObjectShape) -> Rendered;
     fn union(&mut self, members: &[String]) -> Rendered;
+    fn tagged_union(&mut self, _tag: &str, members: &[String]) -> Rendered {
+        self.union(members)
+    }
     fn literal(&mut self, value: &str) -> Rendered;
     fn external(&mut self, wire: &str, payload: Option<&str>) -> Rendered;
     fn string(&mut self, shape: &StringShape) -> Rendered;

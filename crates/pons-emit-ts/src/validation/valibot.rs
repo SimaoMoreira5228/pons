@@ -1,17 +1,16 @@
-use std::{
-    cell::RefCell,
-    collections::{BTreeMap, BTreeSet},
-};
+use std::collections::{BTreeMap, BTreeSet};
 
 use pons_ir::{DecimalWire, Document, FieldFormat, Presence, TypeRef, ValidationCoverage};
 
 use super::backend::{
-    Backend as BackendTrait, Declaration, DeclarationKind, IntCarrier, IntegerShape, Member,
-    ObjectShape, Rendered, StringCarrier, StringShape, integral_constraint,
+    Backend as BackendTrait, Capability, Declaration, DeclarationKind, IntCarrier, IntegerShape,
+    Member, ObjectShape, Rendered, StringCarrier, StringShape, integral_constraint,
 };
 use super::walk::Walk;
 use super::{Capabilities, Generator as ValidationGenerator, Imports, Rendered as RenderedFile};
 use crate::{EmitError, TsOptions, jsdoc, string};
+
+const MAP: Capability = Capability::new("validation.map");
 
 const MISMATCH: &str = "function mismatch(schema: v.GenericSchema): (value: unknown) => ValidationIssue | null {\n  return (value) => {\n    const result = v.safeParse(schema, value);\n    if (result.success) return null;\n    const issue = result.issues[0];\n    if (issue === undefined) return { path: [], message: \"the value does not match the contract\" };\n    return { path: issue.path?.map((step) => typeof step.key === \"number\" ? step.key : String(step.key)) ?? [], message: issue.message };\n  };\n}\n";
 
@@ -144,7 +143,28 @@ function integer(base: v.GenericSchema, bits: number, signed: boolean, minimum?:
     ),
     (
         "one-key",
-        "const oneKey = (key: string, payload: v.GenericSchema) => v.strictObject({ [key]: v.nonOptional(payload) });\n",
+        "const oneKey = (key: string, payload: v.GenericSchema) => plainRecord(v.strictObject({ [key]: v.nonOptional(payload) }));\n",
+    ),
+    (
+        "plain-record",
+        r#"function isPlainRecord(value: unknown): value is Record<string, unknown> {
+  if (value === null || typeof value !== "object" || Array.isArray(value)) return false;
+  const prototype = Object.getPrototypeOf(value);
+  return prototype === Object.prototype || prototype === null;
+}
+function plainRecord<TSchema extends v.BaseSchema<unknown, unknown, v.BaseIssue<unknown>>>(schema: TSchema): TSchema {
+  return {
+    ...schema,
+    "~run"(dataset: v.UnknownDataset, config: v.Config<v.BaseIssue<unknown>>) {
+      if (!isPlainRecord(dataset.value)) {
+        v._addIssue(schema, "type", dataset, config, { message: "expected a plain object" });
+        return dataset;
+      }
+      return schema["~run"](dataset, config);
+    },
+  } as unknown as TSchema;
+}
+"#,
     ),
     (
         "unique",
@@ -159,7 +179,7 @@ function integer(base: v.GenericSchema, bits: number, signed: boolean, minimum?:
   }
   return JSON.stringify(value);
 }
-const uniqueItems = (item: v.GenericSchema) => v.pipe(v.array(item), v.checkItems((_value, index, values) => new Set(values.map(stableKey)).size === values.length, "array values must be unique"));
+const uniqueItems = (item: v.GenericSchema) => v.pipe(v.array(item), v.checkItems((_value, _index, values) => new Set(values.map(stableKey)).size === values.length, "array values must be unique"));
 "#,
     ),
 ];
@@ -246,16 +266,12 @@ impl ValidationGenerator for Generator<'_> {
 
 struct Backend {
     need: BTreeSet<&'static str>,
-    pending_tag: RefCell<Option<String>>,
-    tags: RefCell<BTreeMap<String, String>>,
 }
 
 impl Backend {
     fn new() -> Self {
         Backend {
             need: BTreeSet::new(),
-            pending_tag: RefCell::new(None),
-            tags: RefCell::new(BTreeMap::new()),
         }
     }
 
@@ -372,19 +388,11 @@ impl BackendTrait for Backend {
     }
 
     fn schema(&self, name: &str) -> String {
-        let reference = format!("{name}Schema");
-        if let Some(tag) = self.pending_tag.borrow_mut().take() {
-            self.tags.borrow_mut().insert(reference.clone(), tag);
-        }
-        reference
+        format!("{name}Schema")
     }
 
     fn object(&mut self, members: &[Member], openness: &ObjectShape) -> Rendered {
-        let tag = members
-            .first()
-            .filter(|member| member.schema.starts_with("v.literal("))
-            .map(|member| member.key.clone());
-        *self.pending_tag.borrow_mut() = tag;
+        self.need(&["plain-record"]);
         let members = members
             .iter()
             .map(|member| {
@@ -405,22 +413,19 @@ impl BackendTrait for Backend {
                 format!("v.objectWithRest({{{members}}}, {value})")
             }
         };
-        Rendered::exact(schema)
+        Rendered::exact(format!("plainRecord({schema})"))
+    }
+
+    fn tagged_union(&mut self, tag: &str, members: &[String]) -> Rendered {
+        Rendered::exact(format!(
+            "v.variant({}, [{}])",
+            string(tag),
+            members.join(", ")
+        ))
     }
 
     fn union(&mut self, members: &[String]) -> Rendered {
-        let tags = self.tags.borrow();
-        let tag = members.first().and_then(|member| tags.get(member).cloned());
-        let tagged = tag.is_some()
-            && members
-                .iter()
-                .all(|member| tags.get(member) == tag.as_ref());
-        Rendered::exact(match tag {
-            Some(tag) if tagged => {
-                format!("v.variant({}, [{}])", string(&tag), members.join(", "))
-            }
-            _ => format!("v.union([{}])", members.join(", ")),
-        })
+        Rendered::exact(format!("v.union([{}])", members.join(", ")))
     }
 
     fn literal(&mut self, value: &str) -> Rendered {
@@ -428,7 +433,7 @@ impl BackendTrait for Backend {
     }
 
     fn external(&mut self, wire: &str, payload: Option<&str>) -> Rendered {
-        self.need(&["one-key"]);
+        self.need(&["one-key", "plain-record"]);
         Rendered::exact(match payload {
             Some(payload) => format!("oneKey({}, {payload})", string(wire)),
             None => format!(
@@ -487,11 +492,12 @@ impl BackendTrait for Backend {
     }
 
     fn tuple(&mut self, items: &[String]) -> Rendered {
-        Rendered::exact(format!("v.tuple([{}])", items.join(", ")))
+        Rendered::exact(format!("v.strictTuple([{}])", items.join(", ")))
     }
 
     fn map(&mut self, key: &str, value: &str) -> Rendered {
-        Rendered::exact(format!("v.record({key}, {value})"))
+        self.need(&["plain-record"]);
+        Rendered::Widened(format!("plainRecord(v.record({key}, {value}))"), MAP)
     }
 
     fn nullable(&mut self, inner: &str) -> Rendered {

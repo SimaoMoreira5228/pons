@@ -261,7 +261,7 @@ impl<'a> Walk<'a> {
         definition: &'a TypeDef,
     ) -> Result<(), EmitError> {
         match &definition.definition {
-            TypeKind::Enum { variants, .. } => {
+            TypeKind::Enum { repr, variants } => {
                 for variant in variants {
                     let name = self.declaration_name(id, Some(&variant.wire))?.to_owned();
                     let schema = self.variant(backend, id, definition, variant)?;
@@ -286,7 +286,13 @@ impl<'a> Walk<'a> {
                     dependencies.push(variant_name.to_owned());
                     members.push(backend.schema(variant_name));
                 }
-                let schema = self.record(backend.name(), backend.union(&members))?;
+                let schema = match repr {
+                    EnumRepr::Internal { tag } | EnumRepr::Adjacent { tag, .. } => {
+                        backend.tagged_union(tag, &members)
+                    }
+                    _ => backend.union(&members),
+                };
+                let schema = self.record(backend.name(), schema)?;
                 let reference = backend.schema(&name);
                 self.owned.push(OwnedDeclaration {
                     id: id.to_owned(),

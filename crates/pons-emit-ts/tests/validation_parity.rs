@@ -254,7 +254,159 @@ fn cases() -> Vec<Case> {
     ]
 }
 
-fn harness(cases: &[Case]) -> String {
+fn shapes() -> Document {
+    let raw = json!({
+        "ir_version": "0.2",
+        "info": {"title": "Shapes", "version": "1"},
+        "types": {
+            "Forms": {
+                "kind": "struct",
+                "name": ["forms"],
+                "direction": "output",
+                "openness": "reject",
+                "fields": [
+                    {"wire": "spread", "ident": ["spread"], "ty": {"ref": "Spread"}, "presence": "required"},
+                    {"wire": "marked", "ident": ["marked"], "ty": {"ref": "Marked"}, "presence": "required"},
+                    {"wire": "beside", "ident": ["beside"], "ty": {"ref": "Beside"}, "presence": "required"},
+                    {"wire": "shapes", "ident": ["shapes"], "ty": {"ref": "Shapes"}, "presence": "required"},
+                    {"wire": "table", "ident": ["table"], "ty": {"kind": "map", "key": {"kind": "string"}, "value": {"kind": "string"}}, "presence": "required"},
+                    {"wire": "label", "ident": ["label"], "ty": {"kind": "string", "min_length": 2, "max_length": 4}, "presence": "required"}
+                ]
+            },
+            "Spread": {
+                "kind": "enum", "name": ["spread"], "direction": "output",
+                "repr": {"kind": "external"},
+                "variants": [
+                    {"wire": "bare", "ident": ["bare"], "payload": {"kind": "unit"}},
+                    {"wire": "held", "ident": ["held"], "payload": {"kind": "newtype", "ty": {"kind": "int", "bits": 32, "signed": false, "wire": "number"}}}
+                ]
+            },
+            "Marked": {
+                "kind": "enum", "name": ["marked"], "direction": "output",
+                "repr": {"kind": "internal", "tag": "kind"},
+                "variants": [
+                    {"wire": "none", "ident": ["none"], "payload": {"kind": "unit"}},
+                    {"wire": "some", "ident": ["some"], "payload": {"kind": "struct", "fields": [
+                        {"wire": "at", "ident": ["at"], "ty": {"kind": "int", "bits": 32, "signed": false, "wire": "number"}, "presence": "required"}
+                    ]}}
+                ]
+            },
+            "Beside": {
+                "kind": "enum", "name": ["beside"], "direction": "output",
+                "repr": {"kind": "adjacent", "tag": "kind", "content": "payload"},
+                "variants": [
+                    {"wire": "none", "ident": ["none"], "payload": {"kind": "unit"}},
+                    {"wire": "some", "ident": ["some"], "payload": {"kind": "newtype", "ty": {"kind": "bool"}}}
+                ]
+            },
+            "Shapes": {
+                "kind": "enum", "name": ["shapes"], "direction": "output",
+                "repr": {"kind": "untagged"},
+                "variants": [
+                    {"wire": "nothing", "ident": ["nothing"], "payload": {"kind": "unit"}},
+                    {"wire": "count", "ident": ["count"], "payload": {"kind": "newtype", "ty": {"kind": "int", "bits": 32, "signed": false, "wire": "number"}}},
+                    {"wire": "named", "ident": ["named"], "payload": {"kind": "struct", "fields": [
+                        {"wire": "name", "ident": ["name"], "ty": {"kind": "string"}, "presence": "required"}
+                    ]}}
+                ]
+            }
+        },
+        "operations": [
+            {
+                "id": [["shapes"], ["read"]],
+                "method": "GET",
+                "path": [{"lit": "shapes"}],
+                "auth": {"alternatives": [], "optional": false},
+                "semantics": {"safe": true, "idempotent": true},
+                "responses": [{"status": 200, "content": "json", "body": {"ref": "Forms"}}]
+            }
+        ]
+    });
+    serde_json::from_value(raw).unwrap()
+}
+
+fn shape_value(edit: impl FnOnce(&mut BTreeMap<&'static str, String>)) -> String {
+    let mut fields = BTreeMap::from([
+        ("spread", "\"bare\"".into()),
+        ("marked", "{ kind: \"none\" }".into()),
+        ("beside", "{ kind: \"none\" }".into()),
+        ("shapes", "null".into()),
+        ("table", "{ a: \"x\" }".into()),
+        ("label", "\"😀😀\"".into()),
+    ]);
+    edit(&mut fields);
+    let members = fields
+        .iter()
+        .map(|(key, value)| format!("{key:?}: {value}"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!("{{ {members} }}")
+}
+
+fn shape_case(
+    label: &'static str,
+    valid: bool,
+    edit: impl FnOnce(&mut BTreeMap<&'static str, String>),
+) -> Case {
+    Case {
+        label,
+        value: shape_value(edit),
+        valid,
+    }
+}
+
+fn shape_cases() -> Vec<Case> {
+    vec![
+        shape_case("every shape at once", true, |_| {}),
+        shape_case("an external unit variant", true, |fields| {
+            fields.insert("spread", "\"bare\"".into());
+        }),
+        shape_case("an external payload variant", true, |fields| {
+            fields.insert("spread", "{ held: 3 }".into());
+        }),
+        shape_case("an internal payload variant", true, |fields| {
+            fields.insert("marked", "{ kind: \"some\", at: 1 }".into());
+        }),
+        shape_case("an adjacent payload variant", true, |fields| {
+            fields.insert("beside", "{ kind: \"some\", payload: true }".into());
+        }),
+        shape_case("an untagged struct", true, |fields| {
+            fields.insert("shapes", "{ name: \"a\" }".into());
+        }),
+        shape_case("an unknown external variant", false, |fields| {
+            fields.insert("spread", "\"ghost\"".into());
+        }),
+        shape_case("an external payload of the wrong type", false, |fields| {
+            fields.insert("spread", "{ held: \"3\" }".into());
+        }),
+        shape_case("an internal variant without its tag", false, |fields| {
+            fields.insert("marked", "{ at: 1 }".into());
+        }),
+        shape_case("an unknown internal variant", false, |fields| {
+            fields.insert("marked", "{ kind: \"ghost\" }".into());
+        }),
+        shape_case("an adjacent payload that is missing", false, |fields| {
+            fields.insert("beside", "{ kind: \"some\" }".into());
+        }),
+        shape_case("an adjacent payload of the wrong type", false, |fields| {
+            fields.insert("beside", "{ kind: \"some\", payload: 1 }".into());
+        }),
+        shape_case("a value no untagged variant fits", false, |fields| {
+            fields.insert("shapes", "\"text\"".into());
+        }),
+        shape_case("a map value of the wrong type", false, |fields| {
+            fields.insert("table", "{ a: 1 }".into());
+        }),
+        shape_case("a short astral string", false, |fields| {
+            fields.insert("label", "\"😀\"".into());
+        }),
+        shape_case("a long astral string", false, |fields| {
+            fields.insert("label", "\"😀😀😀😀😀\"".into());
+        }),
+    ]
+}
+
+fn harness(cases: &[Case], response: &str) -> String {
     let entries = cases
         .iter()
         .map(|case| {
@@ -265,8 +417,9 @@ fn harness(cases: &[Case]) -> String {
         })
         .collect::<Vec<_>>()
         .join("\n");
+    let validator = format!("validate{response}");
     format!(
-        r#"import {{ validateParity }} from "./validators.ts";
+        r#"import {{ {validator} }} from "./validators.ts";
 import {{ validateContract }} from "./runtime/index.ts";
 
 type Case = {{ label: string; value: unknown; valid: boolean }};
@@ -275,8 +428,8 @@ const cases: Case[] = [
 ];
 
 for (const {{ label, value, valid }} of cases) {{
-  const contract = validateContract(value, {{ ref: "Parity" }});
-  const emitted = validateParity(value);
+  const contract = validateContract(value, {{ ref: "{response}" }});
+  const emitted = {validator}(value);
   const contractValid = contract === null;
   const emittedValid = emitted === null;
   if (contractValid !== valid) {{
@@ -294,9 +447,9 @@ console.log(`${{cases.length}} parity cases passed`);
     )
 }
 
-fn options(backend: ValidationBackend) -> TsOptions {
+fn options(backend: ValidationBackend, mode: EmitMode) -> TsOptions {
     TsOptions {
-        mode: EmitMode::Strict,
+        mode,
         errors: ErrorStrategy::Throw,
         runtime: Runtime::Package,
         int64: Int64::Bigint,
@@ -306,23 +459,13 @@ fn options(backend: ValidationBackend) -> TsOptions {
     }
 }
 
-fn emitted(backend: ValidationBackend) -> Vec<GeneratedFile> {
-    let output = emit_with_options(&document(), options(backend)).unwrap_or_else(|error| {
-        panic!("{} must emit the parity document: {error}", backend.name())
-    });
-    assert!(
-        output.validation_coverage.lossy.is_empty(),
-        "{} classified the parity document as lossy: {:?}",
-        backend.name(),
-        output.validation_coverage.lossy
-    );
-    assert!(
-        output.validation_coverage.unsupported.is_empty(),
-        "{} classified the parity document as unsupported: {:?}",
-        backend.name(),
-        output.validation_coverage.unsupported
-    );
-    output.files
+fn emitted(
+    document: &Document,
+    backend: ValidationBackend,
+    mode: EmitMode,
+) -> pons_emit_ts::EmitOutput {
+    emit_with_options(document, options(backend, mode))
+        .unwrap_or_else(|error| panic!("{} must emit the parity document: {error}", backend.name()))
 }
 
 fn workspace_package(name: &str) -> PathBuf {
@@ -406,7 +549,44 @@ fn run_bun(files: &[GeneratedFile], harness: &str) {
 }
 
 fn check(backend: ValidationBackend) {
-    run_bun(&emitted(backend), &harness(&cases()));
+    let output = emitted(&document(), backend, EmitMode::Strict);
+    assert!(
+        output.validation_coverage.lossy.is_empty(),
+        "{} classified the parity document as lossy: {:?}",
+        backend.name(),
+        output.validation_coverage.lossy
+    );
+    assert!(
+        output.validation_coverage.unsupported.is_empty(),
+        "{} classified the parity document as unsupported: {:?}",
+        backend.name(),
+        output.validation_coverage.unsupported
+    );
+    run_bun(&output.files, &harness(&cases(), "Parity"));
+}
+
+fn check_shapes(backend: ValidationBackend, expected_lossy: &[&str]) {
+    let output = emitted(&shapes(), backend, EmitMode::Lossy);
+    let lossy = output
+        .validation_coverage
+        .lossy
+        .iter()
+        .map(String::as_str)
+        .collect::<Vec<_>>();
+    assert_eq!(
+        lossy,
+        expected_lossy,
+        "{} classified the shape corpus differently: {:?}",
+        backend.name(),
+        output.validation_coverage
+    );
+    assert!(
+        output.validation_coverage.unsupported.is_empty(),
+        "{} classified the shape corpus as unsupported: {:?}",
+        backend.name(),
+        output.validation_coverage.unsupported
+    );
+    run_bun(&output.files, &harness(&shape_cases(), "Forms"));
 }
 
 #[test]
@@ -442,4 +622,25 @@ fn yup_agrees_with_the_contract() {
 #[test]
 fn superstruct_agrees_with_the_contract() {
     check(ValidationBackend::Superstruct);
+}
+
+#[test]
+fn every_backend_that_keeps_the_enum_shapes_exact_agrees_on_them() {
+    for backend in [
+        ValidationBackend::Builtin,
+        ValidationBackend::Zod,
+        ValidationBackend::Arktype,
+        ValidationBackend::Typebox,
+        ValidationBackend::Superstruct,
+    ] {
+        check_shapes(backend, &[]);
+    }
+}
+
+#[test]
+fn valibot_keeps_the_enum_shapes_exact_and_widens_only_the_map() {
+    check_shapes(
+        ValidationBackend::Valibot,
+        &["operations.shapes.read", "types.Forms"],
+    );
 }
