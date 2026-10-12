@@ -109,7 +109,7 @@ fn the_module_declares_the_types_and_the_operations_import_their_validators() {
     let validators = file(&files, "validators.ts");
     assert!(
         validators.starts_with(
-            "import Type from \"typebox\";\nimport Value from \"typebox/value\";\nimport type { ValidationIssue, Validator } from \"./runtime.js\";\nexport type { ValidationIssue, Validator } from \"./runtime.js\";\n\n"
+            "import Type from \"typebox\";\nimport Value from \"typebox/value\";\nimport type { Validator } from \"./runtime.js\";\nexport type { ValidationIssue, Validator } from \"./runtime.js\";\n\n"
         ),
         "{validators}"
     );
@@ -507,7 +507,7 @@ fn the_packaged_runtime_carries_the_hook_the_option_uses() {
     let validators = file(&files, "validators.ts");
     assert!(
         validators.contains(
-            "import type { ValidationIssue, Validator } from \"@pons/runtime\";\nexport type { ValidationIssue, Validator } from \"@pons/runtime\";"
+            "import type { Validator } from \"@pons/runtime\";\nexport type { ValidationIssue, Validator } from \"@pons/runtime\";"
         ),
         "{validators}"
     );

@@ -50,7 +50,9 @@ fn document() -> Document {
                     {"wire": "unique", "ident": ["unique"], "ty": {"kind": "array", "item": {"kind": "string"}, "unique": true}, "presence": "required"},
                     {"wire": "pair", "ident": ["pair"], "ty": {"kind": "tuple", "items": [{"kind": "string"}, {"kind": "bool"}]}, "presence": "required"},
                     {"wire": "choice", "ident": ["choice"], "ty": {"ref": "Choice"}, "presence": "required"},
-                    {"wire": "tree", "ident": ["tree"], "ty": {"ref": "Tree"}, "presence": "required"}
+                    {"wire": "tree", "ident": ["tree"], "ty": {"ref": "Tree"}, "presence": "required"},
+                    {"wire": "anything", "ident": ["anything"], "ty": {"kind": "any"}, "presence": "required"},
+                    {"wire": "sealed", "ident": ["sealed"], "ty": {"kind": "opaque", "codec": "test.codec", "wire": "json"}, "presence": "required"}
                 ],
                 "flattened": [{"ref": "Part"}]
             },
@@ -125,6 +127,8 @@ fn base() -> BTreeMap<&'static str, String> {
             "tree",
             "{ value: 1, next: { value: 2, next: null } }".into(),
         ),
+        ("anything", "{ nested: [1, true] }".into()),
+        ("sealed", "{ token: \"opaque\" }".into()),
         ("part", "\"joined\"".into()),
     ])
 }
@@ -223,6 +227,12 @@ fn cases() -> Vec<Case> {
         }),
         case("a missing required field", false, |fields| {
             fields.remove("who");
+        }),
+        case("a missing required any", false, |fields| {
+            fields.remove("anything");
+        }),
+        case("a missing required opaque", false, |fields| {
+            fields.remove("sealed");
         }),
         case("an absent nullable field", false, |fields| {
             fields.remove("maybe");

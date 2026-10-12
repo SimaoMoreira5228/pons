@@ -364,7 +364,7 @@ impl<'a> Walk<'a> {
                 VariantPayload::Unit => backend.literal(&variant.wire),
                 _ => {
                     return Err(EmitError(format!(
-                        "the type {id} spells the variant {} as a string but gives it a payload, which a zod string cannot hold",
+                        "the type {id} spells the variant {} as a string but gives it a payload, which a string enum cannot hold",
                         variant.wire
                     )));
                 }

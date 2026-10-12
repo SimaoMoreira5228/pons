@@ -9,7 +9,6 @@ const INTEGER_DIGITS: usize = 39;
 pub(crate) struct Capability(&'static str);
 
 impl Capability {
-    #[allow(dead_code)]
     pub(crate) const fn new(id: &'static str) -> Self {
         Capability(id)
     }

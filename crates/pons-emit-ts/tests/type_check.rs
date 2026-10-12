@@ -598,6 +598,75 @@ export const wrong = validateUser({ id: "1" }, { id: "1" });
 }
 
 #[test]
+fn a_client_that_checks_its_responses_against_typebox_compiles_beside_typebox() {
+    let document: Document = serde_json::from_value(fixture()).unwrap();
+    for packaged in [false, true] {
+        let files = files_with(
+            &document,
+            pons_emit_ts::TsOptions {
+                validation: pons_emit_ts::ValidationOptions::new(
+                    pons_emit_ts::ValidationBackend::Typebox,
+                ),
+                runtime: if packaged {
+                    pons_emit_ts::Runtime::Package
+                } else {
+                    pons_emit_ts::Runtime::Vendor
+                },
+                ..pons_emit_ts::TsOptions::default()
+            },
+        );
+        type_checks_with_packages(
+            &files,
+            r#"
+import { validateLoginErrorInvalid, validateUser } from "./validators.js";
+
+export const user = validateUser({ id: "1" });
+export const invalid = validateLoginErrorInvalid({ code: "invalid" });
+// @ts-expect-error a validator takes one argument and returns a verdict
+export const wrong = validateUser({ id: "1" }, { id: "1" });
+"#,
+            packaged,
+            &["typebox"],
+        );
+    }
+}
+
+#[test]
+fn a_client_that_checks_its_responses_against_yup_compiles_beside_yup() {
+    let document: Document = serde_json::from_value(fixture()).unwrap();
+    for packaged in [false, true] {
+        let files = files_with(
+            &document,
+            pons_emit_ts::TsOptions {
+                validation: pons_emit_ts::ValidationOptions::new(
+                    pons_emit_ts::ValidationBackend::Yup,
+                ),
+                mode: pons_emit_ts::EmitMode::Lossy,
+                runtime: if packaged {
+                    pons_emit_ts::Runtime::Package
+                } else {
+                    pons_emit_ts::Runtime::Vendor
+                },
+                ..pons_emit_ts::TsOptions::default()
+            },
+        );
+        type_checks_with_packages(
+            &files,
+            r#"
+import { validateLoginErrorInvalid, validateUser } from "./validators.js";
+
+export const user = validateUser({ id: "1" });
+export const invalid = validateLoginErrorInvalid({ code: "invalid" });
+// @ts-expect-error a validator takes one argument and returns a verdict
+export const wrong = validateUser({ id: "1" }, { id: "1" });
+"#,
+            packaged,
+            &["yup"],
+        );
+    }
+}
+
+#[test]
 fn a_validator_over_every_format_compiles_beside_zod() {
     let mut raw = fixture();
     raw["types"]["User"] = serde_json::json!({

@@ -209,7 +209,7 @@ impl ValidationGenerator for Generator<'_> {
             content: format!(
                 "import Type from {};\n\
                  import Value from {};\n\
-                 import type {{ ValidationIssue, Validator }} from {specifier};\n\
+                 import type {{ Validator }} from {specifier};\n\
                  export type {{ ValidationIssue, Validator }} from {specifier};\n\n{body}",
                 string(root),
                 string(&value)

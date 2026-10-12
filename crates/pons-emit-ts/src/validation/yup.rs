@@ -98,19 +98,19 @@ const day = () => yup.string().matches(DATE, "the date is not a full-date").test
     ),
     (
         "schema-of",
-        "function schemaOf(schema: yup.ISchema, value: unknown): yup.Schema {\n  let current = schema;\n  while (current.type === \"lazy\") current = (current as yup.Lazy).resolve({ value });\n  return current as yup.Schema;\n}\n",
+        "type SchemaLike = yup.Schema | yup.Lazy<any>;\nfunction schemaOf(schema: SchemaLike, value: unknown): SchemaLike {\n  let current = schema;\n  while (current.type === \"lazy\") current = (current as yup.Lazy<any>).resolve({ value });\n  return current;\n}\n",
     ),
     (
         "present",
-        "const present = (schema: yup.ISchema) => yup.lazy((value) => value === undefined ? yup.mixed().defined() : schemaOf(schema, value));\n",
+        "const present = (schema: SchemaLike) => yup.lazy((value) => value === undefined ? yup.mixed().defined() : schemaOf(schema, value));\n",
     ),
     (
         "optional",
-        "const optional = (schema: yup.ISchema) => yup.lazy((value) => value === undefined ? yup.mixed() : schemaOf(schema, value));\n",
+        "const optional = (schema: SchemaLike) => yup.lazy((value) => value === undefined ? yup.mixed() : schemaOf(schema, value));\n",
     ),
     (
         "nullable",
-        "const nullable = (schema: yup.ISchema) => yup.lazy((value) => value === null ? yup.mixed().nullable() : schemaOf(schema, value));\n",
+        "const nullable = (schema: SchemaLike) => yup.lazy((value) => value === null ? yup.mixed().nullable() : schemaOf(schema, value));\n",
     ),
     (
         "integer",
@@ -118,7 +118,7 @@ const day = () => yup.string().matches(DATE, "the date is not a full-date").test
     ),
     (
         "unique",
-        "function stableKey(value: unknown): string {\n  if (typeof value === \"bigint\") return `bigint:${value}`;\n  if (value instanceof Date) return `date:${value.getTime()}`;\n  if (value instanceof Uint8Array) return `bytes:${Array.from(value).join(\",\")}`;\n  if (Array.isArray(value)) return `[${value.map(stableKey).join(\",\")}]`;\n  if (value !== null && typeof value === \"object\") {\n    const record = value as Record<string, unknown>;\n    return `{${Object.keys(record).sort().map((key) => `${JSON.stringify(key)}:${stableKey(record[key])}`).join(\",\")}}`;\n  }\n  return JSON.stringify(value);\n}\nconst uniqueItems = (item: yup.ISchema) => yup.array().of(present(item)).test(\"unique\", \"array values must be unique\", (values) => values === undefined || new Set((values as unknown[]).map(stableKey)).size === (values as unknown[]).length);\n",
+        "function stableKey(value: unknown): string {\n  if (typeof value === \"bigint\") return `bigint:${value}`;\n  if (value instanceof Date) return `date:${value.getTime()}`;\n  if (value instanceof Uint8Array) return `bytes:${Array.from(value).join(\",\")}`;\n  if (Array.isArray(value)) return `[${value.map(stableKey).join(\",\")}]`;\n  if (value !== null && typeof value === \"object\") {\n    const record = value as Record<string, unknown>;\n    return `{${Object.keys(record).sort().map((key) => `${JSON.stringify(key)}:${stableKey(record[key])}`).join(\",\")}}`;\n  }\n  return JSON.stringify(value);\n}\nconst uniqueItems = (item: SchemaLike) => yup.array().of(present(item)).test(\"unique\", \"array values must be unique\", (values) => values === undefined || new Set((values as unknown[]).map(stableKey)).size === (values as unknown[]).length);\n",
     ),
 ];
 
@@ -135,7 +135,7 @@ const MISMATCH: &str = r#"function parsePath(path: string | undefined): (string 
   }
   return steps;
 }
-function mismatch(schema: yup.ISchema): Validator {
+function mismatch(schema: SchemaLike): Validator {
   return (value) => {
     if (value === undefined) return { path: [], message: "a JSON value is required" };
     try {
@@ -228,7 +228,7 @@ impl ValidationGenerator for Generator<'_> {
             file: "validators.ts",
             content: format!(
                 "import * as yup from {};\n\
-                 import type {{ ValidationIssue, Validator }} from {specifier};\n\
+                 import type {{ Validator }} from {specifier};\n\
                  export type {{ ValidationIssue, Validator }} from {specifier};\n\n{body}",
                 string(package)
             ),
