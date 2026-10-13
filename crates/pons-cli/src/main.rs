@@ -1,11 +1,13 @@
 mod config;
 mod emit;
+mod export;
+mod file;
+mod init;
 mod options;
 
 use std::env;
 use std::ffi::OsString;
 use std::fs;
-use std::io::Write;
 use std::path::Path;
 use std::process::ExitCode;
 
@@ -15,7 +17,7 @@ use pons_plugin::EmitMode;
 
 use options::{EmitArgs, validation_backend};
 
-const HELP: &str = "Usage: pons <command> <ir.json> [arguments]\n\nCommands:\n  check <ir.json>                              Validate an IR document\n  fmt <ir.json>                                Rewrite an IR document in canonical form\n  diff <old.json> <new.json>                   Classify changes between two IR documents\n  emit --target <name> [ir.json] [output-dir] [--strict|--lossy] [--errors <neverthrow|throw>] [--validation <backend>] [--coverage <relative-file>] [--dump-request <relative-file>]\n                                                Generate files (built-in: ts, openapi)\n      --strict                                 Reject unsupported/lossy coverage; opaque is allowed on ts/openapi, and on a plugin that declares it (default)\n      --lossy                                  Emit non-exact coverage with warnings\n      --errors <neverthrow|throw>              TypeScript target only: neverthrow (default), throw\n      --validation <backend>                   TypeScript target only: none, builtin, zod, valibot, arktype, typebox, yup, superstruct\n      --coverage <relative-file>               Write emitter coverage as JSON\n      --dump-request <relative-file>           Write the emit request as JSON, and run no emitter\n\n  A document and an output directory may come from pons.toml, so \"emit --target ts\" is enough\n  there. A flag beats the file, and the file beats the default.\n\nExit codes:\n  0  success, and a diff that found nothing to report\n  1  diff only: the contract changed, but nothing in it is breaking\n  2  diff only: the new contract has a breaking change\n  3  diff only: the new contract is invalid\n  4  the arguments are wrong, and so is a pons.toml that does not parse or that names a key its\n     table does not hold and a value its option does not take\n  5  the tool could not do its job: an unreadable or malformed document, a\n     check/fmt validation failure, or an emit failure\n";
+const HELP: &str = "Usage: pons <command> [arguments]\n\nCommands:\n  init [path]                                  Write a starter pons.toml (default pons.toml)\n  export                                       Run the [frontend] command and write project.ir\n  check <ir.json>                              Validate an IR document\n  fmt <ir.json>                                Rewrite an IR document in canonical form\n  diff <old.json> <new.json>                   Classify changes between two IR documents\n  emit --target <name> [ir.json] [output-dir] [--strict|--lossy] [--errors <neverthrow|throw>] [--validation <backend>] [--coverage <relative-file>] [--dump-request <relative-file>]\n                                                Generate files (built-in: ts, openapi)\n      --strict                                 Reject unsupported/lossy coverage; opaque is allowed on ts/openapi, and on a plugin that declares it (default)\n      --lossy                                  Emit non-exact coverage with warnings\n      --errors <neverthrow|throw>              TypeScript target only: neverthrow (default), throw\n      --validation <backend>                   TypeScript target only: none, builtin, zod, valibot, arktype, typebox, yup, superstruct\n      --coverage <relative-file>               Write emitter coverage as JSON\n      --dump-request <relative-file>           Write the emit request as JSON, and run no emitter\n\n  A document and an output directory may come from pons.toml, so \"emit --target ts\" is enough\n  there. A flag beats the file, and the file beats the default.\n\n  pons.toml names the frontend that produces the IR:\n    [frontend]\n    kind = \"axum\"        # axum or spring\n    command = \"cargo pons export\"\n  A missing command defaults to \"cargo pons export\" for axum and \"./gradlew ponsExport\"\n  for spring. export writes project.ir, and no server starts.\n\nExit codes:\n  0  success, and a diff that found nothing to report\n  1  diff only: the contract changed, but nothing in it is breaking\n  2  diff only: the new contract has a breaking change\n  3  diff only: the new contract is invalid\n  4  the arguments are wrong, and so is a pons.toml that does not parse or that names a key its\n     table does not hold and a value its option does not take\n  5  the tool could not do its job: an unreadable or malformed document, a\n     check/fmt validation failure, a frontend/init failure, or an emit failure\n";
 
 fn main() -> ExitCode {
     match run(env::args_os().skip(1).collect()) {
@@ -50,6 +52,28 @@ fn run(args: Vec<OsString>) -> Result<(), CliError> {
     if matches!(command, "--help" | "-h" | "help") {
         print!("{HELP}");
         return Ok(());
+    }
+    if command == "init" {
+        if args.len() > 2 {
+            return Err(CliError::Usage(format!(
+                "init takes at most one path, got {}",
+                args.len() - 1
+            )));
+        }
+        let path = args
+            .get(1)
+            .map(Path::new)
+            .unwrap_or(Path::new(config::FILE_NAME));
+        return init::run(path);
+    }
+    if command == "export" {
+        if args.len() != 1 {
+            return Err(CliError::Usage(format!(
+                "export takes no arguments, got {}",
+                args.len() - 1
+            )));
+        }
+        return export::run();
     }
     if command == "diff" {
         if args.len() != 3 {
@@ -247,7 +271,7 @@ fn read_document(path: &Path) -> Result<Document, CliError> {
     })
 }
 
-fn validate(document: &Document) -> Result<(), CliError> {
+pub(crate) fn validate(document: &Document) -> Result<(), CliError> {
     document
         .validate()
         .map_err(|errors| CliError::Failure(render(&errors)))
@@ -262,42 +286,10 @@ fn render(errors: &[ValidationError]) -> String {
 }
 
 fn rewrite_canonical(path: &Path, document: &Document) -> Result<(), CliError> {
-    let metadata = fs::symlink_metadata(path).map_err(|error| {
-        CliError::Failure(format!("cannot inspect {}: {error}", path.display()))
-    })?;
-    if !metadata.is_file() {
-        return Err(CliError::Failure(format!(
-            "{} is not a regular file",
-            path.display()
-        )));
-    }
-
-    let parent = path
-        .parent()
-        .filter(|parent| !parent.as_os_str().is_empty())
-        .unwrap_or(Path::new("."));
-    let mut temporary = tempfile::NamedTempFile::new_in(parent).map_err(|error| {
-        CliError::Failure(format!(
-            "cannot create a temporary file beside {}: {error}",
-            path.display()
-        ))
-    })?;
-    let mut canonical = document
+    let canonical = document
         .to_canonical_json()
         .map_err(|error| CliError::Failure(format!("cannot serialize IR: {error}")))?;
-    canonical.push('\n');
-    temporary
-        .write_all(canonical.as_bytes())
-        .map_err(|error| CliError::Failure(format!("cannot write canonical IR: {error}")))?;
-    temporary
-        .as_file()
-        .sync_all()
-        .map_err(|error| CliError::Failure(format!("cannot sync canonical IR to disk: {error}")))?;
-    temporary
-        .as_file()
-        .set_permissions(metadata.permissions())
-        .map_err(|error| CliError::Failure(format!("cannot preserve file permissions: {error}")))?;
-    crate::emit::replace_file(temporary, path)
+    crate::file::write_atomic(path, &(canonical + "\n"))
 }
 
 #[derive(Debug)]

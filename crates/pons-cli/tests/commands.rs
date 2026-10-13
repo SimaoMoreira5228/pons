@@ -353,6 +353,9 @@ fn help_documents_every_exit_code() {
     }
     assert!(help.contains("breaking"), "{help}");
     assert!(help.contains("unreadable"), "{help}");
+    assert!(help.contains("init [path]"), "{help}");
+    assert!(help.contains("export"), "{help}");
+    assert!(help.contains("cargo pons export"), "{help}");
 }
 
 #[test]
@@ -926,6 +929,8 @@ fn malformed_arguments_exit_with_the_usage_code_and_a_one_line_diagnosis() {
             "--nonsense",
         ),
         (vec!["nonsense", "api.json"], "unknown command \"nonsense\""),
+        (vec!["init", "a", "b"], "init takes at most one path"),
+        (vec!["export", "extra"], "export takes no arguments"),
     ] {
         let output = pons()
             .args(&arguments)
@@ -2202,11 +2207,15 @@ fn a_misspelled_option_names_the_file_the_table_and_the_key() {
         ),
         (
             "[project]\nout_dir = \"generated\"\n",
-            ": [project] has no key \"out_dir\"; it is ir",
+            ": [project] has no key \"out_dir\"; it is ir, name",
+        ),
+        (
+            "[frontend]\nkind = \"axum\"\nrunner = \"x\"\n",
+            ": [frontend] has no key \"runner\"; it is kind, command",
         ),
         (
             "[emmit.ts]\nout_dir = \"generated\"\n",
-            ": has no key \"emmit\"; it is emit, plugins, project",
+            ": has no key \"emmit\"; it is emit, frontend, plugins, project",
         ),
     ] {
         let directory = tempfile::tempdir().unwrap();

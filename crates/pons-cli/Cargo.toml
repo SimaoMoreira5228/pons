@@ -10,6 +10,10 @@ default-run = "pons"
 name = "pons"
 path = "src/main.rs"
 
+[[bin]]
+name = "cargo-pons"
+path = "src/cargo_pons.rs"
+
 [dependencies]
 pons-ir = { path = "../pons-ir" }
 pons-plugin = { path = "../pons-plugin" }

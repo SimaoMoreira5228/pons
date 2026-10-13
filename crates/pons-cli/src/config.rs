@@ -8,23 +8,91 @@ use crate::options;
 pub(crate) const FILE_NAME: &str = "pons.toml";
 pub(crate) const DOCUMENT_TABLE: &str = "project";
 pub(crate) const DOCUMENT: &str = "ir";
+pub(crate) const NAME: &str = "name";
+pub(crate) const FRONTEND_TABLE: &str = "frontend";
+pub(crate) const KIND: &str = "kind";
+pub(crate) const COMMAND: &str = "command";
 pub(crate) const EMIT_TABLE: &str = "emit";
 pub(crate) const OUT_DIR: &str = "out_dir";
 
-const TOP_LEVEL: &[&str] = &[EMIT_TABLE, "plugins", DOCUMENT_TABLE];
-const PROJECT: &[&str] = &[DOCUMENT];
+const TOP_LEVEL: &[&str] = &[EMIT_TABLE, FRONTEND_TABLE, "plugins", DOCUMENT_TABLE];
+const PROJECT: &[&str] = &[DOCUMENT, NAME];
+const FRONTEND: &[&str] = &[KIND, COMMAND];
 const PLUGINS: &[&str] = &["search"];
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum FrontendKind {
+    Axum,
+    Spring,
+}
+
+impl FrontendKind {
+    fn parse(word: &str) -> Option<Self> {
+        match word {
+            "axum" => Some(Self::Axum),
+            "spring" => Some(Self::Spring),
+            _ => None,
+        }
+    }
+
+    pub(crate) fn default_command(self) -> &'static str {
+        match self {
+            Self::Axum => "cargo pons export",
+            Self::Spring => "./gradlew ponsExport",
+        }
+    }
+}
+
+impl std::fmt::Display for FrontendKind {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(match self {
+            Self::Axum => "axum",
+            Self::Spring => "spring",
+        })
+    }
+}
+
+pub(crate) struct Frontend {
+    kind: FrontendKind,
+    command: String,
+}
+
+impl Frontend {
+    pub(crate) fn kind(&self) -> FrontendKind {
+        self.kind
+    }
+
+    pub(crate) fn command(&self) -> &str {
+        &self.command
+    }
+}
 
 pub(crate) struct Config {
     file: PathBuf,
     document: Option<PathBuf>,
+    frontend: Option<Frontend>,
     targets: BTreeMap<String, toml::Table>,
     search: Vec<PathBuf>,
 }
 
 impl Config {
+    pub(crate) fn file(&self) -> &Path {
+        &self.file
+    }
+
+    pub(crate) fn directory(&self) -> &Path {
+        self.file
+            .parent()
+            .filter(|parent| !parent.as_os_str().is_empty())
+            .unwrap_or(Path::new("."))
+    }
+
     pub(crate) fn document(&self) -> Option<&Path> {
         self.document.as_deref()
+    }
+
+    pub(crate) fn frontend(&self) -> Option<&Frontend> {
+        self.frontend.as_ref()
     }
 
     pub(crate) fn target(&self, name: &str) -> Target<'_> {
@@ -115,6 +183,7 @@ pub(crate) fn load(file: PathBuf) -> Result<Config, CliError> {
     let mut config = Config {
         file,
         document: None,
+        frontend: None,
         targets: BTreeMap::new(),
         search: Vec::new(),
     };
@@ -124,6 +193,7 @@ pub(crate) fn load(file: PathBuf) -> Result<Config, CliError> {
                 config.document =
                     project(&config.file, value)?.map(|document| under(&directory, document))
             }
+            FRONTEND_TABLE => config.frontend = Some(frontend(&config.file, value)?),
             "plugins" => config.search = plugins(&config.file, value, &directory)?,
             EMIT_TABLE => config.targets = targets(&config.file, value, &directory)?,
             other => return Err(unknown_key(&config.file, "", other, TOP_LEVEL)),
@@ -157,6 +227,60 @@ fn project(file: &Path, value: &toml::Value) -> Result<Option<PathBuf>, CliError
         ));
     };
     Ok(Some(PathBuf::from(document)))
+}
+
+fn frontend(file: &Path, value: &toml::Value) -> Result<Frontend, CliError> {
+    let table = table(file, FRONTEND_TABLE, value)?;
+    check_keys(file, FRONTEND_TABLE, table, FRONTEND)?;
+    let frontend_kind = match table.get(KIND) {
+        None => {
+            return Err(config_error(
+                file,
+                FRONTEND_TABLE,
+                "has no kind; it is axum or spring",
+            ));
+        }
+        Some(value) => {
+            let Some(word) = value.as_str() else {
+                return Err(config_error(
+                    file,
+                    FRONTEND_TABLE,
+                    &format!("{KIND} is {}; it is axum or spring", kind(value)),
+                ));
+            };
+            FrontendKind::parse(word).ok_or_else(|| {
+                config_error(
+                    file,
+                    FRONTEND_TABLE,
+                    &format!("{KIND} is {word:?}; it is axum or spring"),
+                )
+            })?
+        }
+    };
+    let command = match table.get(COMMAND) {
+        None => frontend_kind.default_command().to_owned(),
+        Some(value) => {
+            let Some(command) = value.as_str() else {
+                return Err(config_error(
+                    file,
+                    FRONTEND_TABLE,
+                    &format!("{COMMAND} is {}; it is a shell command", kind(value)),
+                ));
+            };
+            if command.is_empty() {
+                return Err(config_error(
+                    file,
+                    FRONTEND_TABLE,
+                    &format!("{COMMAND} is empty; it is a shell command"),
+                ));
+            }
+            command.to_owned()
+        }
+    };
+    Ok(Frontend {
+        kind: frontend_kind,
+        command,
+    })
 }
 
 fn plugins(file: &Path, value: &toml::Value, directory: &Path) -> Result<Vec<PathBuf>, CliError> {
@@ -461,6 +585,91 @@ mod tests {
         let target = config.target("openapi");
         assert!(target.values.is_empty());
         assert_eq!(target.name(), "emit.openapi");
+    }
+
+    #[test]
+    fn the_frontend_defaults_its_command_and_reads_an_override() {
+        let directory = tempfile::tempdir().unwrap();
+        let config = loaded(directory.path(), "[frontend]\nkind = \"axum\"\n").unwrap();
+        let frontend = config.frontend().expect("the table names a frontend");
+        assert_eq!(frontend.kind(), FrontendKind::Axum);
+        assert_eq!(frontend.command(), "cargo pons export");
+
+        let config = loaded(directory.path(), "[frontend]\nkind = \"spring\"\n").unwrap();
+        let frontend = config.frontend().expect("the table names a frontend");
+        assert_eq!(frontend.kind(), FrontendKind::Spring);
+        assert_eq!(frontend.command(), "./gradlew ponsExport");
+
+        let config = loaded(
+            directory.path(),
+            "[frontend]\nkind = \"axum\"\ncommand = \"./tools/export.sh\"\n",
+        )
+        .unwrap();
+        assert_eq!(
+            config
+                .frontend()
+                .expect("the table names a frontend")
+                .command(),
+            "./tools/export.sh"
+        );
+    }
+
+    #[test]
+    fn the_frontend_refuses_what_it_does_not_know() {
+        for (source, expected) in [
+            (
+                "[frontend]\nkind = \"warp\"\n",
+                "[frontend] kind is \"warp\"; it is axum or spring",
+            ),
+            (
+                "[frontend]\nkind = \"axum\"\nrunner = \"x\"\n",
+                "[frontend] has no key \"runner\"; it is kind, command",
+            ),
+            (
+                "[frontend]\nkind = 3\n",
+                "[frontend] kind is an integer; it is axum or spring",
+            ),
+            (
+                "[frontend]\nkind = \"axum\"\ncommand = true\n",
+                "[frontend] command is a boolean; it is a shell command",
+            ),
+            (
+                "[frontend]\nkind = \"axum\"\ncommand = \"\"\n",
+                "[frontend] command is empty; it is a shell command",
+            ),
+            (
+                "[frontend]\ncommand = \"x\"\n",
+                "[frontend] has no kind; it is axum or spring",
+            ),
+            ("frontend = 3\n", "[frontend] is an integer; it is a table"),
+        ] {
+            let message = refusal(source);
+            assert!(message.ends_with(expected), "{source}: {message}");
+        }
+    }
+
+    #[test]
+    fn the_project_name_is_a_documented_key_that_does_not_supply_the_document() {
+        let directory = tempfile::tempdir().unwrap();
+        let config = loaded(
+            directory.path(),
+            "[project]\nname = \"acme\"\nir = \"api/ir.json\"\n",
+        )
+        .unwrap();
+        assert_eq!(
+            config.document(),
+            Some(directory.path().join("api/ir.json").as_path())
+        );
+    }
+
+    #[test]
+    fn the_config_knows_the_directory_it_was_loaded_from() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().join("project");
+        fs::create_dir(&root).unwrap();
+        let config = loaded(&root, "[frontend]\nkind = \"axum\"\n").unwrap();
+        assert_eq!(config.directory(), root.as_path());
+        assert_eq!(config.file(), root.join(FILE_NAME).as_path());
     }
 
     #[test]

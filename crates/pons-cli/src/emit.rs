@@ -8,6 +8,7 @@ use pons_ir::{Coverage, Document, ValidationCoverage};
 use pons_plugin::{DiagnosticSeverity, EmitRequest, PROTOCOL_VERSION, PluginDiagnostic, log_tail};
 
 use crate::CliError;
+use crate::file::{replace_file, set_default_permissions};
 use crate::options::{Built, Resolved};
 
 struct OutputFile {
@@ -298,31 +299,6 @@ fn write_files(output: &Path, files: Vec<OutputFile>) -> Result<(), CliError> {
     Ok(())
 }
 
-pub(crate) fn replace_file(
-    temporary: tempfile::NamedTempFile,
-    destination: &Path,
-) -> Result<(), CliError> {
-    let mut pending = temporary;
-    for attempt in 0..5 {
-        match pending.persist(destination) {
-            Ok(_) => return Ok(()),
-            Err(error) => {
-                if attempt == 4 || error.error.kind() != std::io::ErrorKind::PermissionDenied {
-                    return Err(CliError::Failure(format!(
-                        "cannot replace {}: {}",
-                        destination.display(),
-                        error.error
-                    )));
-                }
-
-                std::thread::sleep(std::time::Duration::from_millis(50 * (attempt + 1)));
-                pending = error.file;
-            }
-        }
-    }
-    Ok(())
-}
-
 fn write_file(root: &Path, file: &OutputFile) -> Result<(), CliError> {
     let relative = Path::new(&file.path);
     let mut parent = root.to_path_buf();
@@ -384,60 +360,6 @@ fn write_file(root: &Path, file: &OutputFile) -> Result<(), CliError> {
         }
         replace_file(temporary, &parent)?;
     }
-    Ok(())
-}
-
-#[cfg(unix)]
-fn set_default_permissions(file: &fs::File) -> Result<(), CliError> {
-    use std::os::unix::fs::PermissionsExt;
-
-    let mode = probe_default_mode()?;
-    file.set_permissions(fs::Permissions::from_mode(mode))
-        .map_err(|error| CliError::Failure(format!("cannot set default permissions: {error}")))
-}
-
-#[cfg(unix)]
-fn probe_default_mode() -> Result<u32, CliError> {
-    use std::os::unix::fs::PermissionsExt;
-    use std::sync::atomic::{AtomicU32, Ordering};
-
-    static ATTEMPT: AtomicU32 = AtomicU32::new(0);
-
-    for _ in 0..16 {
-        let probe = std::env::temp_dir().join(format!(
-            ".pons-mode-{}-{}",
-            std::process::id(),
-            ATTEMPT.fetch_add(1, Ordering::Relaxed)
-        ));
-        let created = match fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&probe)
-        {
-            Ok(created) => created,
-            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
-            Err(error) => {
-                return Err(CliError::Failure(format!(
-                    "cannot probe the default file mode at {}: {error}",
-                    probe.display()
-                )));
-            }
-        };
-        let mode = created.metadata().map_err(|error| {
-            CliError::Failure(format!("cannot inspect {}: {error}", probe.display()))
-        })?;
-        let mode = mode.permissions().mode();
-        drop(created);
-        let _ = fs::remove_file(&probe);
-        return Ok(mode);
-    }
-    Err(CliError::Failure(
-        "cannot probe the default file mode: a stale probe keeps every name".to_owned(),
-    ))
-}
-
-#[cfg(not(unix))]
-fn set_default_permissions(_file: &fs::File) -> Result<(), CliError> {
     Ok(())
 }
 
@@ -631,6 +553,7 @@ fn ensure_within_root(path: &Path, root: &Path) -> Result<(), CliError> {
 #[cfg(all(test, unix))]
 mod tests {
     use super::*;
+    use crate::file::probe_default_mode;
     use std::os::unix::fs::symlink;
 
     #[test]
