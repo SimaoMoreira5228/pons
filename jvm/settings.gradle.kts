@@ -14,3 +14,4 @@ dependencyResolutionManagement {
 rootProject.name = "pons-jvm"
 
 include(":pons-ir-kotlin")
+include(":pons-spring-boot-starter")

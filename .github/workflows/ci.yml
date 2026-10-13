@@ -72,7 +72,7 @@ jobs:
           java-version: '21'
       - name: Test
         working-directory: jvm
-        run: ./gradlew :pons-ir-kotlin:test --console=plain
+        run: ./gradlew build --console=plain
 
   windows-target:
     name: windows target
