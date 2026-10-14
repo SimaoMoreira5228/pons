@@ -38,7 +38,7 @@ impl FrontendKind {
     pub(crate) fn default_command(self) -> &'static str {
         match self {
             Self::Axum => "cargo pons export",
-            Self::Spring => "./gradlew ponsExport",
+            Self::Spring => "./gradlew --quiet ponsExport",
         }
     }
 }
@@ -598,7 +598,7 @@ mod tests {
         let config = loaded(directory.path(), "[frontend]\nkind = \"spring\"\n").unwrap();
         let frontend = config.frontend().expect("the table names a frontend");
         assert_eq!(frontend.kind(), FrontendKind::Spring);
-        assert_eq!(frontend.command(), "./gradlew ponsExport");
+        assert_eq!(frontend.command(), "./gradlew --quiet ponsExport");
 
         let config = loaded(
             directory.path(),
