@@ -1,6 +1,7 @@
 mod coverage;
 mod diff;
 mod document;
+mod equivalence;
 mod ext;
 mod media;
 mod operation;
@@ -14,6 +15,7 @@ mod violation;
 pub use coverage::{CoverageLevel, canonical_coverage, coverage_subjects, strict_violations};
 pub use diff::{Change, ChangeLevel, Diff, Validity};
 pub use document::{DecodeError, Document, Info, ValidationError, decode};
+pub use equivalence::{EquivalenceError, equivalent};
 pub use ext::RESERVED_PREFIX as EXT_RESERVED_PREFIX;
 pub use media::{is_valid_media_type, media_type_matches};
 pub use operation::{
