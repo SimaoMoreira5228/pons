@@ -74,6 +74,20 @@ jobs:
         working-directory: jvm
         run: ./gradlew build --console=plain
 
+  conformance:
+    name: conformance
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install the Rust toolchain
+        run: rustup toolchain install stable --profile minimal
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+      - name: Compare the frontends
+        run: ./conformance/run.sh
+
   windows-target:
     name: windows target
     runs-on: ubuntu-latest
