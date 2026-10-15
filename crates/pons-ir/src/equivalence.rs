@@ -4,8 +4,8 @@ use std::fmt;
 use serde_json::Value;
 
 use crate::{
-    Doc, Document, ErrorResponse, Field, Operation, Response, StreamKind, TypeDef, TypeKind,
-    TypeRef, VariantPayload,
+    Doc, Document, ErrorResponse, ErrorStatus, Field, Operation, Response, StreamKind, TypeDef,
+    TypeKind, TypeRef, VariantPayload,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -25,8 +25,39 @@ impl fmt::Display for EquivalenceError {
 }
 
 pub fn equivalent(left: &Document, right: &Document) -> Result<(), Vec<EquivalenceError>> {
-    let left = normalized(left)?;
-    let right = normalized(right)?;
+    equivalent_with(left, right, RequestRejectionPolicy::Keep)
+}
+
+/// Compares two documents while ignoring the request-rejection error a frontend injects (an exact
+/// 422 named `request.rejected`), for comparing frontends whose request-rejection support differs.
+pub fn equivalent_ignoring_request_rejections(
+    left: &Document,
+    right: &Document,
+) -> Result<(), Vec<EquivalenceError>> {
+    equivalent_with(left, right, RequestRejectionPolicy::Ignore)
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum RequestRejectionPolicy {
+    Keep,
+    Ignore,
+}
+
+const REQUEST_REJECTION_STATUS: u16 = 422;
+const REQUEST_REJECTION_NAME: [&str; 2] = ["request", "rejected"];
+
+fn is_request_rejection(error: &ErrorResponse) -> bool {
+    error.status == ErrorStatus::Exact(REQUEST_REJECTION_STATUS)
+        && error.name == REQUEST_REJECTION_NAME
+}
+
+fn equivalent_with(
+    left: &Document,
+    right: &Document,
+    request_rejections: RequestRejectionPolicy,
+) -> Result<(), Vec<EquivalenceError>> {
+    let left = normalized(left, request_rejections)?;
+    let right = normalized(right, request_rejections)?;
     let left = serde_json::to_value(&left).map_err(|error| {
         vec![failure(
             "",
@@ -48,11 +79,17 @@ pub fn equivalent(left: &Document, right: &Document) -> Result<(), Vec<Equivalen
     }
 }
 
-fn normalized(document: &Document) -> Result<Document, Vec<EquivalenceError>> {
+fn normalized(
+    document: &Document,
+    request_rejections: RequestRejectionPolicy,
+) -> Result<Document, Vec<EquivalenceError>> {
     let mut document = document.clone();
     document.canonicalize();
     document.diagnostics.clear();
     document.info.description = normalize_text(document.info.description.take());
+    if request_rejections == RequestRejectionPolicy::Ignore {
+        remove_unreachable_request_rejection_types(&mut document);
+    }
     let ids = display_ids(&document)?;
     normalize_errors(&mut document.common_errors, &ids)?;
     for operation in &mut document.operations {
@@ -60,6 +97,62 @@ fn normalized(document: &Document) -> Result<Document, Vec<EquivalenceError>> {
     }
     document.types = normalize_types(document.types, &ids)?;
     Ok(document)
+}
+
+fn remove_unreachable_request_rejection_types(document: &mut Document) {
+    let reachable_before = reachable_types(document, &[]);
+    for operation in &mut document.operations {
+        operation
+            .errors
+            .retain(|error| !is_request_rejection(error));
+    }
+    let unused: Vec<String> = document
+        .types
+        .keys()
+        .filter(|id| !reachable_before.contains(*id))
+        .cloned()
+        .collect();
+    let reachable_after = reachable_types(document, &unused);
+    for id in reachable_before.difference(&reachable_after) {
+        document.types.remove(id);
+    }
+}
+
+fn reachable_types(document: &Document, additional_roots: &[String]) -> BTreeSet<String> {
+    let mut pending = additional_roots.to_vec();
+    for operation in &document.operations {
+        operation.visit_refs(&mut |reference| push_named(reference, &mut pending));
+    }
+    for error in &document.common_errors {
+        if let Some(body) = &error.body {
+            body.visit_refs(&mut |reference| push_named(reference, &mut pending));
+        }
+        for header in &error.headers {
+            header
+                .ty
+                .visit_refs(&mut |reference| push_named(reference, &mut pending));
+        }
+    }
+
+    let mut reachable = BTreeSet::new();
+    while let Some(id) = pending.pop() {
+        if !reachable.insert(id.clone()) {
+            continue;
+        }
+        let Some(definition) = document.types.get(&id) else {
+            continue;
+        };
+        definition
+            .definition
+            .visit_refs(&mut |reference| push_named(reference, &mut pending));
+    }
+    reachable
+}
+
+fn push_named(reference: &TypeRef, pending: &mut Vec<String>) {
+    if let TypeRef::Named(named) = reference {
+        pending.push(named.id.clone());
+    }
 }
 
 fn display_ids(document: &Document) -> Result<BTreeMap<String, String>, Vec<EquivalenceError>> {
