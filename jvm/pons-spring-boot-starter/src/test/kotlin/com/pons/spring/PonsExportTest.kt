@@ -95,7 +95,7 @@ class PonsExportTest {
         )
         assertEquals(ResponseStatus.Exact(200), login.responses.single().status)
         assertEquals("session", login.provides?.scheme)
-        assertEquals(TypeRef.Named(NamedRef(InvalidCredentialsId)), login.errors.single().body)
+        assertEquals(TypeRef.Named(NamedRef(InvalidCredentialsId)), login.errors.first { it.status == ErrorStatus.Exact(401) }.body)
 
         val users = operations.getValue("users.get")
         assertEquals(listOf(listOf("session")), users.auth.alternatives)
@@ -146,7 +146,7 @@ class PonsExportTest {
         assertEquals(Presence.Optional, fields.getValue("role").presence)
 
         val login = document.operations.first { it.id.flatten() == listOf("auth", "login") }
-        val error = login.errors.single()
+        val error = login.errors.first { it.status == ErrorStatus.Exact(401) }
         assertEquals(ErrorStatus.Exact(401), error.status)
         assertEquals(ErrorContent.Json, error.content)
         assertTrue(error.retryable == true)

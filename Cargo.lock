@@ -1145,14 +1145,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "pons-conformance"
-version = "0.1.0"
-dependencies = [
- "pons-ir",
- "serde_json",
-]
-
-[[package]]
 name = "pons-core"
 version = "0.1.0"
 dependencies = [
@@ -1283,17 +1275,6 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn 3.0.6",
-]
-
-[[package]]
-name = "reference-api"
-version = "0.1.0"
-dependencies = [
- "axum",
- "pons-axum",
- "pons-core",
- "pons-ir",
- "serde",
 ]
 
 [[package]]

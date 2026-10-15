@@ -15,6 +15,23 @@ class PonsAutoConfigurationTest {
         .withConfiguration(AutoConfigurations.of(PonsSpringAutoConfiguration::class.java))
 
     @Test
+    fun requestValidationIsOnByDefaultAndCanBeDisabled() {
+        runner.run { context ->
+            assertTrue(
+                context.getBeanNamesForType(PonsRequestValidationFilter::class.java).isEmpty(),
+                "the filter is registered through a FilterRegistrationBean",
+            )
+            assertTrue(
+                context.containsBean("ponsRequestValidationFilter"),
+                "a servlet application validates its declared requests by default",
+            )
+        }
+        runner.withPropertyValues("pons.validation.enabled=false").run { context ->
+            assertTrue(!context.containsBean("ponsRequestValidationFilter"))
+        }
+    }
+
+    @Test
     fun exportAndEndpointAreOffByDefault() {
         runner.run { context ->
             assertTrue(context.getBeanNamesForType(PonsExportRunner::class.java).isEmpty())

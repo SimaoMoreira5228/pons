@@ -147,6 +147,7 @@ internal class RouteIntrospector(
         val headers = mutableListOf<HeaderParameter>()
         var body: IrBody? = null
         var modelQuery: TypeRef? = null
+        var validatedInput = false
         val requestContent = requestContent(info)
 
         for (parameter in handler.methodParameters) {
@@ -168,6 +169,7 @@ internal class RouteIntrospector(
             val shape = kotlinMethodShape(handler.method, parameter.parameterIndex)
             when {
                 parameter.hasParameterAnnotation(PathVariable::class.java) -> {
+                    validatedInput = true
                     val annotation = parameter.getParameterAnnotation(PathVariable::class.java)!!
                     val name = parameterName(parameter, annotation.name.ifEmpty { annotation.value })
                     if (shape.nullable) {
@@ -187,6 +189,7 @@ internal class RouteIntrospector(
                     pathParameters[name] = parameterRef(parameter, shape, Direction.Input)
                 }
                 parameter.hasParameterAnnotation(RequestParam::class.java) -> {
+                    validatedInput = true
                     val annotation = parameter.getParameterAnnotation(RequestParam::class.java)!!
                     val name = parameterName(parameter, annotation.name.ifEmpty { annotation.value })
                     val hasDefault = annotation.defaultValue != ValueConstants.DEFAULT_NONE
@@ -218,6 +221,7 @@ internal class RouteIntrospector(
                     )
                 }
                 parameter.hasParameterAnnotation(RequestHeader::class.java) -> {
+                    validatedInput = true
                     val annotation = parameter.getParameterAnnotation(RequestHeader::class.java)!!
                     val name = parameterName(parameter, annotation.name.ifEmpty { annotation.value })
                     val required = annotation.required && !shape.nullable
@@ -230,6 +234,8 @@ internal class RouteIntrospector(
                 }
                 parameter.hasParameterAnnotation(RequestBody::class.java) -> {
                     val annotation = parameter.getParameterAnnotation(RequestBody::class.java)!!
+                    val ty = parameterRef(parameter, shape, Direction.Input)
+                    if (validatedBody(requestContent.kind, ty)) validatedInput = true
                     if (body != null) {
                         diagnostics += Diagnostic(
                             severity = DiagnosticSeverity.Error,
@@ -238,7 +244,7 @@ internal class RouteIntrospector(
                         )
                     } else {
                         body = IrBody(
-                            ty = parameterRef(parameter, shape, Direction.Input),
+                            ty = ty,
                             content = requestContent.kind,
                             required = annotation.required && !shape.nullable,
                             mediaType = requestContent.mediaType,
@@ -246,6 +252,7 @@ internal class RouteIntrospector(
                     }
                 }
                 parameter.hasParameterAnnotation(ModelAttribute::class.java) -> {
+                    validatedInput = true
                     if (queryFields.isNotEmpty() || modelQuery != null) {
                         diagnostics += Diagnostic(
                             severity = DiagnosticSeverity.Error,
@@ -287,6 +294,15 @@ internal class RouteIntrospector(
         val query = queryType(id, handler, queryFields, modelQuery)
         val path = path(pattern, pathParameters)
         val meta = meta(handler)
+        val responses = response(handler, info)
+        var declaredErrors = errors.handlerErrors(handler)
+        if (validatedInput) {
+            requestRejection(method, declaredErrors, diagnostics)?.let { rejection ->
+                types.publishViolationReport()
+                declaredErrors = declaredErrors + rejection
+            }
+        }
+        body?.let { declareFrameworkRejections(it, responses, declaredErrors, diagnostics) }
         return com.pons.ir.Operation(
             id = id,
             method = method,
@@ -294,8 +310,8 @@ internal class RouteIntrospector(
             query = query,
             headers = headers.sortedBy { it.wire },
             body = body,
-            responses = response(handler, info),
-            errors = errors.handlerErrors(handler),
+            responses = responses,
+            errors = declaredErrors,
             errorsInherit = true,
             auth = auth.requirement(handler),
             provides = meta.provides,

@@ -9,8 +9,10 @@ import org.springframework.boot.autoconfigure.condition.ConditionalOnMissingBean
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty
 import org.springframework.boot.autoconfigure.condition.ConditionalOnWebApplication
 import org.springframework.boot.context.properties.EnableConfigurationProperties
+import org.springframework.boot.web.servlet.FilterRegistrationBean
 import org.springframework.context.ApplicationContext
 import org.springframework.context.annotation.Bean
+import org.springframework.core.Ordered
 
 @AutoConfiguration
 @ConditionalOnWebApplication(type = ConditionalOnWebApplication.Type.SERVLET)
@@ -40,6 +42,27 @@ class PonsSpringAutoConfiguration {
             defaultAuthScheme = properties.auth.defaultScheme?.takeIf { it.isNotBlank() },
             lowerers = lowerers.orderedStream().toList(),
         )
+    }
+
+    @Bean
+    @ConditionalOnMissingBean(name = ["ponsRequestValidationFilter"])
+    @ConditionalOnProperty(
+        prefix = "pons.validation",
+        name = ["enabled"],
+        havingValue = "true",
+        matchIfMissing = true,
+    )
+    fun ponsRequestValidationFilter(
+        exporter: PonsExporter,
+        mapper: ObjectProvider<ObjectMapper>,
+    ): FilterRegistrationBean<PonsRequestValidationFilter> {
+        val filter = PonsRequestValidationFilter(
+            exporter = exporter,
+            mapper = mapper.getIfAvailable { jacksonObjectMapper() },
+        )
+        return FilterRegistrationBean(filter).apply {
+            order = Ordered.LOWEST_PRECEDENCE
+        }
     }
 
     @Bean

@@ -32,6 +32,8 @@ dependencies {
 
     testImplementation("org.junit.jupiter:junit-jupiter:5.11.4")
     testImplementation("com.networknt:json-schema-validator:1.5.6")
+    testImplementation("com.jayway.jsonpath:json-path")
+    testImplementation("com.fasterxml.jackson.datatype:jackson-datatype-jsr310")
     testImplementation("org.springframework:spring-test")
     testImplementation("org.springframework.boot:spring-boot-test")
     testImplementation("org.assertj:assertj-core")

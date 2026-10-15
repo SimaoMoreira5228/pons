@@ -8,6 +8,7 @@ class PonsProperties {
     var endpoint = Endpoint()
     var info = Info()
     var auth = Auth()
+    var validation = Validation()
 
     class Export {
         var path: String? = null
@@ -16,6 +17,10 @@ class PonsProperties {
 
     class Endpoint {
         var enabled: Boolean = false
+    }
+
+    class Validation {
+        var enabled: Boolean = true
     }
 
     class Info {

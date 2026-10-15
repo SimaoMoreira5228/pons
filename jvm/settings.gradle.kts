@@ -3,7 +3,6 @@ pluginManagement {
         gradlePluginPortal()
         mavenCentral()
     }
-    includeBuild("pons-gradle-plugin")
 }
 
 dependencyResolutionManagement {
@@ -16,4 +15,4 @@ rootProject.name = "pons-jvm"
 
 include(":pons-ir-kotlin")
 include(":pons-spring-boot-starter")
-include(":conformance-reference")
+include(":pons-gradle-plugin")
