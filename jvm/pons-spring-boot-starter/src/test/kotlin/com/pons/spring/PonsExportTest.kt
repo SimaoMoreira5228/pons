@@ -27,6 +27,7 @@ import com.pons.spring.testapp.User
 import org.junit.jupiter.api.AfterEach
 import org.junit.jupiter.api.Assertions.assertEquals
 import org.junit.jupiter.api.Assertions.assertNotNull
+import org.junit.jupiter.api.Assertions.assertNull
 import org.junit.jupiter.api.Assertions.assertTrue
 import org.junit.jupiter.api.BeforeEach
 import org.junit.jupiter.api.Test
@@ -116,6 +117,7 @@ class PonsExportTest {
         })
         assertEquals(Presence.Optional, fields.getValue("nickname").presence)
         assertEquals(Presence.Optional, fields.getValue("deletedAt").presence)
+        assertNull(fields.getValue("email").access)
         assertEquals(
             TypeRef.Inline(
                 com.pons.ir.InlineType.StringType(format = com.pons.ir.FieldFormat.DateTime),

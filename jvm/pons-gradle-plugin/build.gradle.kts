@@ -2,7 +2,7 @@ import org.jetbrains.kotlin.gradle.dsl.JvmTarget
 
 plugins {
     `java-gradle-plugin`
-    kotlin("jvm")
+    kotlin("jvm") version "2.3.0"
 }
 
 group = "com.pons"

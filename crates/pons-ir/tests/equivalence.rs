@@ -1,6 +1,6 @@
 use std::collections::BTreeMap;
 
-use pons_ir::{Document, equivalent};
+use pons_ir::{Document, equivalent, equivalent_ignoring_request_rejections};
 use serde_json::{Map, Value, json};
 
 fn exact() -> Value {
@@ -24,6 +24,63 @@ fn rename_ids(value: &mut Value, prefix: &str) {
     }
     value["types"] = Value::Object(renamed);
     rewrite_refs(value, &mapping);
+}
+
+fn add_rejection_types(value: &mut Value) {
+    value["types"]["Violation"] = json!({
+        "kind": "struct",
+        "openness": "reject",
+        "name": ["violation"],
+        "direction": "output",
+        "fields": [
+            {
+                "wire": "path",
+                "ident": ["path"],
+                "ty": {"kind": "string"},
+                "presence": "required"
+            }
+        ]
+    });
+    value["types"]["ViolationReport"] = json!({
+        "kind": "struct",
+        "openness": "reject",
+        "name": ["violation", "report"],
+        "direction": "output",
+        "fields": [
+            {
+                "wire": "violations",
+                "ident": ["violations"],
+                "ty": {"kind": "array", "item": {"ref": "Violation"}},
+                "presence": "required"
+            }
+        ]
+    });
+}
+
+fn inject_request_rejection(value: &mut Value, body: Option<&str>) {
+    for operation in value["operations"]
+        .as_array_mut()
+        .expect("the fixture has operations")
+    {
+        let operation = operation
+            .as_object_mut()
+            .expect("an operation is an object");
+        let errors = operation
+            .entry("errors")
+            .or_insert_with(|| Value::Array(Vec::new()));
+        let mut error = json!({
+            "status": 422,
+            "name": ["request", "rejected"],
+            "content": if body.is_some() { "json" } else { "empty" }
+        });
+        if let Some(body) = body {
+            error["body"] = json!({"ref": body});
+        }
+        errors
+            .as_array_mut()
+            .expect("errors is an array")
+            .push(error);
+    }
 }
 
 fn rewrite_refs(value: &mut Value, mapping: &BTreeMap<String, String>) {
@@ -155,4 +212,227 @@ fn references_to_unknown_types_are_refused() {
             .any(|error| error.message.contains("does not define")),
         "{errors:?}"
     );
+}
+
+#[test]
+fn injected_request_rejections_are_ignored_under_the_explicit_policy() {
+    let without = document(exact());
+    let mut value = exact();
+    inject_request_rejection(&mut value, None);
+    let with = document(value);
+
+    equivalent_ignoring_request_rejections(&without, &with)
+        .expect("the injected request rejection is ignored");
+    equivalent_ignoring_request_rejections(&with, &without).expect("the policy is symmetric");
+
+    let errors =
+        equivalent(&without, &with).expect_err("the default comparison keeps the injected error");
+    assert!(
+        errors.iter().any(|error| error.path.contains("errors")),
+        "{errors:?}"
+    );
+}
+
+#[test]
+fn a_422_error_with_another_name_is_not_a_request_rejection() {
+    let left = document(exact());
+    let mut value = exact();
+    value["operations"][1]["errors"] = json!([
+        {"status": 422, "name": ["request", "invalid"], "content": "empty"}
+    ]);
+    let errors = equivalent_ignoring_request_rejections(&left, &document(value))
+        .expect_err("a differently named 422 is an application error");
+    assert!(
+        errors.iter().any(|error| error.path.contains("errors")),
+        "{errors:?}"
+    );
+}
+
+#[test]
+fn request_rejection_body_types_are_ignored_with_their_errors() {
+    let without = document(exact());
+    let mut value = exact();
+    add_rejection_types(&mut value);
+    inject_request_rejection(&mut value, Some("ViolationReport"));
+    let with = document(value);
+
+    equivalent_ignoring_request_rejections(&without, &with)
+        .expect("the rejection body types leave with the injected errors");
+    equivalent(&without, &with)
+        .expect_err("the default comparison keeps the injected errors and their types");
+}
+
+#[test]
+fn a_differently_named_422_keeps_its_body_type_compared() {
+    let mut value = exact();
+    add_rejection_types(&mut value);
+    value["operations"][1]["errors"] = json!([{
+        "status": 422,
+        "name": ["request", "invalid"],
+        "content": "json",
+        "body": {"ref": "ViolationReport"}
+    }]);
+
+    let errors = equivalent_ignoring_request_rejections(&document(value), &document(exact()))
+        .expect_err("a differently named 422 is an application error");
+    assert!(
+        errors.iter().any(|error| error.path.contains("errors")),
+        "{errors:?}"
+    );
+    assert!(
+        errors.iter().any(|error| error.path.contains("types")),
+        "{errors:?}"
+    );
+}
+
+#[test]
+fn a_type_shared_with_a_real_operation_stays_compared() {
+    let mut left = exact();
+    add_rejection_types(&mut left);
+    inject_request_rejection(&mut left, Some("ViolationReport"));
+    left["operations"][0]["responses"]
+        .as_array_mut()
+        .expect("responses is an array")
+        .push(json!({"status": 201, "content": "json", "body": {"ref": "ViolationReport"}}));
+
+    let mut right = exact();
+    add_rejection_types(&mut right);
+    right["operations"][0]["responses"]
+        .as_array_mut()
+        .expect("responses is an array")
+        .push(json!({"status": 201, "content": "json", "body": {"ref": "ViolationReport"}}));
+    right["types"]["Violation"]["fields"][0]["wire"] = json!("location");
+
+    let errors = equivalent_ignoring_request_rejections(&document(left), &document(right))
+        .expect_err("a type the rejection body shares with a real operation stays compared");
+    assert!(
+        errors.iter().any(|error| error.path.contains("types")),
+        "{errors:?}"
+    );
+}
+
+#[test]
+fn an_unrelated_unused_type_stays_a_difference() {
+    let mut left = exact();
+    add_rejection_types(&mut left);
+    inject_request_rejection(&mut left, Some("ViolationReport"));
+    left["types"]["UnusedOnlyLeft"] = json!({
+        "kind": "struct",
+        "openness": "reject",
+        "name": ["unused", "only", "left"],
+        "direction": "output",
+        "fields": []
+    });
+
+    let errors = equivalent_ignoring_request_rejections(&document(left), &document(exact()))
+        .expect_err("an unrelated unused type is still compared");
+    assert!(
+        errors.iter().any(|error| error.path.contains("unused")),
+        "{errors:?}"
+    );
+}
+
+#[test]
+fn an_unused_type_keeps_the_rejection_body_it_references() {
+    let unused = json!({
+        "kind": "struct",
+        "openness": "reject",
+        "name": ["unused"],
+        "direction": "output",
+        "fields": [
+            {
+                "wire": "report",
+                "ident": ["report"],
+                "ty": {"ref": "ViolationReport"},
+                "presence": "required"
+            }
+        ]
+    });
+
+    let mut left = exact();
+    add_rejection_types(&mut left);
+    inject_request_rejection(&mut left, Some("ViolationReport"));
+    left["types"]["Unused"] = unused.clone();
+
+    let mut right = exact();
+    add_rejection_types(&mut right);
+    right["types"]["Unused"] = unused;
+
+    equivalent_ignoring_request_rejections(&document(left), &document(right)).expect(
+        "a retained unused type keeps the rejection body it references, leaving no dangling ref",
+    );
+}
+
+#[test]
+fn mutually_recursive_request_rejection_types_terminate() {
+    let mut value = exact();
+    value["types"]["RejectionNode"] = json!({
+        "kind": "struct",
+        "openness": "reject",
+        "name": ["rejection", "node"],
+        "direction": "output",
+        "fields": [
+            {
+                "wire": "next",
+                "ident": ["next"],
+                "ty": {"kind": "nullable", "inner": {"ref": "RejectionNode"}},
+                "presence": "optional"
+            },
+            {
+                "wire": "detail",
+                "ident": ["detail"],
+                "ty": {"ref": "RejectionDetail"},
+                "presence": "optional"
+            }
+        ]
+    });
+    value["types"]["RejectionDetail"] = json!({
+        "kind": "struct",
+        "openness": "reject",
+        "name": ["rejection", "detail"],
+        "direction": "output",
+        "fields": [
+            {
+                "wire": "owner",
+                "ident": ["owner"],
+                "ty": {"kind": "nullable", "inner": {"ref": "RejectionNode"}},
+                "presence": "optional"
+            }
+        ]
+    });
+    inject_request_rejection(&mut value, Some("RejectionNode"));
+
+    equivalent_ignoring_request_rejections(&document(exact()), &document(value))
+        .expect("a mutually recursive rejection body terminates and is ignored");
+}
+
+#[test]
+fn a_422_success_response_is_not_a_request_rejection() {
+    let left = document(exact());
+    let mut value = exact();
+    value["operations"][1]["responses"]
+        .as_array_mut()
+        .expect("responses is an array")
+        .push(json!({"status": 422, "content": "empty"}));
+    let errors = equivalent_ignoring_request_rejections(&left, &document(value))
+        .expect_err("a 422 response is a success response, not an error");
+    assert!(
+        errors.iter().any(|error| error.path.contains("responses")),
+        "{errors:?}"
+    );
+}
+
+#[test]
+fn the_exact_fixture_round_trip_stays_equivalent() {
+    let original = document(exact());
+    let canonical = original
+        .to_canonical_json()
+        .expect("the exact fixture canonicalizes");
+    let round_trip = document(
+        serde_json::from_str(&canonical).expect("the canonical fixture is an IR document"),
+    );
+
+    equivalent(&original, &round_trip).expect("the fixture round trip stays equivalent");
+    equivalent_ignoring_request_rejections(&original, &round_trip)
+        .expect("the fixture round trip stays equivalent under the explicit policy");
 }

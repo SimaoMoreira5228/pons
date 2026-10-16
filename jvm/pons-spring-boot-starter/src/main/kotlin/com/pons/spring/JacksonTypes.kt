@@ -292,12 +292,10 @@ internal class JacksonTypes(
         }
         val declaredAccess = outputProperty?.let(::declaredAccess)
             ?: inputProperty?.let(::declaredAccess)
-        val access = when {
-            declaredAccess == JsonProperty.Access.READ_ONLY -> Access.ReadOnly
-            declaredAccess == JsonProperty.Access.WRITE_ONLY -> Access.WriteOnly
-            output && input -> null
-            output -> Access.ReadOnly
-            else -> Access.WriteOnly
+        val access = when (declaredAccess) {
+            JsonProperty.Access.READ_ONLY -> Access.ReadOnly
+            JsonProperty.Access.WRITE_ONLY -> Access.WriteOnly
+            else -> null
         }
         val fieldDirection = when {
             output && input -> Direction.Both

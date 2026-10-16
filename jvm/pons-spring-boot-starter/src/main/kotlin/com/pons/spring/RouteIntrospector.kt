@@ -58,6 +58,10 @@ import java.time.ZonedDateTime
 import java.util.Date
 import java.util.UUID
 
+private val frameworkControllers = setOf(
+    "org.springframework.boot.autoconfigure.web.servlet.error.BasicErrorController",
+)
+
 private val ignoredParameterTypes = setOf(
     "jakarta.servlet.ServletRequest",
     "jakarta.servlet.ServletResponse",
@@ -573,7 +577,8 @@ internal class RouteIntrospector(
 
     private fun ignored(handler: HandlerMethod): Boolean =
         AnnotatedElementUtils.hasAnnotation(handler.beanType, PonsIgnore::class.java) ||
-            AnnotatedElementUtils.hasAnnotation(handler.method, PonsIgnore::class.java)
+            AnnotatedElementUtils.hasAnnotation(handler.method, PonsIgnore::class.java) ||
+            handler.beanType.name in frameworkControllers
 
     private fun meta(handler: HandlerMethod): Meta {
         val annotation = AnnotatedElementUtils.findMergedAnnotation(
