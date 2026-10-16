@@ -6,7 +6,9 @@ license.workspace = true
 rust-version.workspace = true
 
 [dependencies]
+actix-service = "2.0.3"
 actix-web.workspace = true
+actix-ws = "0.4.1"
 futures-util.workspace = true
 pons-core = { path = "../pons-core" }
 pons-ir = { path = "../pons-ir" }

@@ -826,7 +826,14 @@ impl Document {
                         message: format!("response {} cannot carry a body", response.status),
                     });
                 }
-                if response.content == ContentKind::Stream {
+                if response.content == ContentKind::Stream
+                    || (operation
+                        .stream
+                        .as_ref()
+                        .is_some_and(|stream| matches!(stream.kind, StreamKind::Websocket { .. }))
+                        && response.status == ResponseStatus::Exact(101)
+                        && response.content == ContentKind::Empty)
+                {
                     stream_responses += 1;
                 }
                 if response.content == ContentKind::Bytes

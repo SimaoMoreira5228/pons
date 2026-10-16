@@ -1,3 +1,4 @@
+use std::collections::BTreeSet;
 use std::marker::PhantomData;
 
 use actix_web::FromRequest;
@@ -83,6 +84,63 @@ impl OperationCx {
     pub(crate) fn auth_requirement(&self) -> AuthRequirement {
         self.auth.clone()
     }
+}
+
+pub(crate) fn merge_auth_requirements(target: &mut AuthRequirement, source: &AuthRequirement) {
+    for (scheme, scopes) in &source.scopes {
+        let values = target.scopes.entry(scheme.clone()).or_default();
+        for scope in scopes {
+            if !values.contains(scope) {
+                values.push(scope.clone());
+            }
+        }
+    }
+    if says_something(source) {
+        target.optional &= source.optional;
+    }
+    let combined: Vec<BTreeSet<String>> = match (
+        target.alternatives.is_empty(),
+        source.alternatives.is_empty(),
+    ) {
+        (_, true) => target.alternatives.iter().map(|s| as_set(s)).collect(),
+        (true, false) => source.alternatives.iter().map(|s| as_set(s)).collect(),
+        (false, false) => target
+            .alternatives
+            .iter()
+            .flat_map(|left| {
+                source
+                    .alternatives
+                    .iter()
+                    .map(move |right| as_set(left).union(&as_set(right)).cloned().collect())
+            })
+            .collect(),
+    };
+    target.alternatives = canonical_alternatives(combined);
+}
+
+fn as_set(schemes: &[String]) -> BTreeSet<String> {
+    schemes.iter().cloned().collect()
+}
+
+fn says_something(source: &AuthRequirement) -> bool {
+    !source.alternatives.is_empty() || !source.scopes.is_empty() || source.optional
+}
+
+fn canonical_alternatives(alternatives: Vec<BTreeSet<String>>) -> Vec<Vec<String>> {
+    let mut sets = alternatives;
+    sets.sort();
+    sets.dedup();
+
+    sets.iter()
+        .enumerate()
+        .filter(|(index, set)| {
+            !sets
+                .iter()
+                .enumerate()
+                .any(|(other, candidate)| other != *index && candidate.is_subset(set))
+        })
+        .map(|(_, set)| set.iter().cloned().collect())
+        .collect()
 }
 
 pub struct SessionAuth;

@@ -211,6 +211,23 @@ impl OperationCx {
         });
     }
 
+    pub fn websocket<C: Schema, S: Schema>(&mut self) {
+        self.stream = Some(StreamDescription {
+            kind: StreamKind::Websocket {
+                client: C::schema(&mut self.types, Direction::Input),
+                server: S::schema(&mut self.types, Direction::Output),
+            },
+        });
+        self.responses.push(Response {
+            status: ResponseStatus::Exact(101),
+            content: ContentKind::Empty,
+            media_type: None,
+            body: None,
+            headers: Vec::new(),
+            ext: Default::default(),
+        });
+    }
+
     pub fn provide(&mut self, provides: CredentialProvision) {
         self.provides = Some(provides);
     }

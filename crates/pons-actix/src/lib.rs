@@ -1,7 +1,9 @@
 mod auth;
+mod compose;
 mod describe;
 mod error;
 mod handler;
+mod layer;
 mod metadata;
 mod ndjson;
 mod operation;
@@ -9,16 +11,18 @@ mod operation_cx;
 mod raw_bytes;
 mod request;
 mod response;
+mod router;
 pub mod routing;
 mod sse;
 mod validate;
+mod websocket;
 
-use std::collections::{BTreeMap, BTreeSet};
-use std::sync::Arc;
+use std::collections::BTreeSet;
 
-use actix_web::Route;
-use actix_web::dev::{ServiceFactory, ServiceRequest};
-use pons_core::{ErrorSpec, TypeCx};
+use pons_ir::{
+    ContentKind, Document, ErrorContent, ErrorResponse, Method, ResponseHeader, TypeKind, TypeRef,
+    ValidationError,
+};
 
 pub use actix_web::{body, http, web};
 pub use auth::{Auth, AuthSpec, SessionAuth};
@@ -30,196 +34,28 @@ pub use error::{
     Violation, ViolationReport, WithErrorHeader, WithOptionalErrorHeader, error_header,
 };
 pub use handler::DescribeHandler;
+pub use layer::DocumentedLayer;
 pub use metadata::OperationMeta;
 pub use ndjson::Ndjson;
-use operation::build;
 pub use pons_ir::Info;
-use pons_ir::{
-    AuthScheme, ContentKind, Diagnostic, Document, ErrorContent, ErrorResponse, Method,
-    ResponseHeader, TypeDef, TypeKind, TypeRef, ValidationError,
-};
 pub use raw_bytes::RawBytes;
 pub use request::{Form, Json, Path, Query};
 pub use response::{
     BytesResponse, JsonResponse, ProblemJsonResponse, ResponseSpec, TextResponse, WithResponse,
     WithUnknownStatus,
 };
+pub use router::Router;
 pub use routing::MethodRoute;
 pub use sse::{Sse, SseEvent};
+pub use websocket::{WebSocket, WebSocketUpgrade};
 
-struct RouteEntry {
-    path: String,
-    routes: Vec<Route>,
-}
-
-pub struct Router<S = ()> {
-    info: Info,
-    types: BTreeMap<String, TypeDef>,
-    carriers: Vec<TypeRef>,
-    auth_schemes: BTreeMap<String, AuthScheme>,
-    common_errors: Vec<ErrorResponse>,
-    operations: Vec<pons_ir::Operation>,
-    diagnostics: Vec<Diagnostic>,
-    routes: Vec<RouteEntry>,
-    state: Option<S>,
-}
-
-impl<S> Router<S> {
-    pub fn new(info: Info) -> Self {
-        Self {
-            info,
-            types: BTreeMap::new(),
-            carriers: Vec::new(),
-            auth_schemes: BTreeMap::new(),
-            common_errors: Vec::new(),
-            operations: Vec::new(),
-            diagnostics: Vec::new(),
-            routes: Vec::new(),
-            state: None,
-        }
-    }
-
-    pub fn route(mut self, path: &str, route: MethodRoute) -> Self {
-        for description in route.descriptions {
-            let mut built = build(path, description);
-            resolve_request_body(&mut built.operation);
-            self.types.extend(built.types);
-            self.carriers.extend(built.carriers);
-            self.operations.push(built.operation);
-        }
-        match self.routes.iter_mut().find(|entry| entry.path == path) {
-            Some(entry) => entry.routes.extend(route.routes),
-            None => self.routes.push(RouteEntry {
-                path: path.to_owned(),
-                routes: route.routes,
-            }),
-        }
-        self
-    }
-
-    pub fn auth_scheme(mut self, id: impl Into<String>, scheme: AuthScheme) -> Self {
-        self.auth_schemes.insert(id.into(), scheme);
-        self
-    }
-
-    pub fn common_error<E: ErrorSpec>(mut self) -> Self {
-        let mut types = TypeCx::new();
-        self.common_errors.extend(E::errors(&mut types));
-        let (definitions, diagnostics) = types.into_parts();
-        self.types.extend(definitions);
-        self.diagnostics.extend(diagnostics);
-        self
-    }
-
-    pub fn with_state<S2>(self, state: S2) -> Router<S2> {
-        Router {
-            info: self.info,
-            types: self.types,
-            carriers: self.carriers,
-            auth_schemes: self.auth_schemes,
-            common_errors: self.common_errors,
-            operations: self.operations,
-            diagnostics: self.diagnostics,
-            routes: self.routes,
-            state: Some(state),
-        }
-    }
-
-    pub fn document(&self) -> Document {
-        let mut operations = self.operations.clone();
-        self.settle(&mut operations);
-        let mut document = Document {
-            ir_version: pons_ir::IR_VERSION.to_owned(),
-            info: self.info.clone(),
-            types: self.types.clone(),
-            auth_schemes: self.auth_schemes.clone(),
-            common_errors: self.common_errors.clone(),
-            operations,
-            ext: BTreeMap::new(),
-            diagnostics: self.diagnostics.clone(),
-        };
-        prune_unreferenced_types(&mut document, &self.carriers);
-        document
-    }
-
-    pub fn try_lower_document(
-        self,
-        lower: impl FnOnce(Document) -> Result<Document, Vec<ValidationError>>,
-    ) -> Result<Document, Vec<ValidationError>> {
-        let mut document = lower(self.into_document_value())?;
-        document.canonicalize();
-        document.validate()?;
-        Ok(document)
-    }
-
-    pub fn into_document(self) -> Result<Document, Vec<ValidationError>> {
-        checked(self.into_document_value())
-    }
-
-    fn into_document_value(mut self) -> Document {
-        let mut operations = std::mem::take(&mut self.operations);
-        self.settle(&mut operations);
-        let mut document = Document {
-            ir_version: pons_ir::IR_VERSION.to_owned(),
-            info: self.info,
-            types: self.types,
-            auth_schemes: self.auth_schemes,
-            common_errors: self.common_errors,
-            operations,
-            ext: BTreeMap::new(),
-            diagnostics: self.diagnostics,
-        };
-        prune_unreferenced_types(&mut document, &self.carriers);
-        document
-    }
-
-    fn settle(&self, operations: &mut [pons_ir::Operation]) {
-        reuse_inherited_slots(&self.common_errors, operations);
-        declare_degraded_headers(&self.common_errors, operations);
-    }
-}
-
-impl<S: 'static> Router<S> {
-    pub fn into_actix(
-        mut self,
-    ) -> Result<
-        actix_web::App<
-            impl ServiceFactory<
-                ServiceRequest,
-                Config = (),
-                Response = actix_web::dev::ServiceResponse,
-                Error = actix_web::Error,
-                InitError = (),
-            > + 'static,
-        >,
-        Vec<ValidationError>,
-    > {
-        let state = self.state.take();
-        let routes = std::mem::take(&mut self.routes);
-        let document = checked(self.into_document_value())?;
-        let mut app = actix_web::App::new();
-        for entry in routes {
-            let mut resource = web::resource(&entry.path);
-            for route in entry.routes {
-                resource = resource.route(route);
-            }
-            app = app.service(resource);
-        }
-        let app = app.app_data(web::Data::new(Arc::new(document)));
-        Ok(match state {
-            Some(state) => app.app_data(web::Data::new(state)),
-            None => app,
-        })
-    }
-}
-
-fn checked(mut document: Document) -> Result<Document, Vec<ValidationError>> {
+pub(crate) fn checked(mut document: Document) -> Result<Document, Vec<ValidationError>> {
     document.canonicalize();
     document.validate()?;
     Ok(document)
 }
 
-fn prune_unreferenced_types(document: &mut Document, carriers: &[TypeRef]) {
+pub(crate) fn prune_unreferenced_types(document: &mut Document, carriers: &[TypeRef]) {
     let mut reachable = BTreeSet::new();
     let mut pending = root_references(document);
     pending.extend_from_slice(carriers);
@@ -331,7 +167,10 @@ fn inline_references(ty: &TypeRef) -> Vec<TypeRef> {
     }
 }
 
-fn reuse_inherited_slots(common: &[ErrorResponse], operations: &mut [pons_ir::Operation]) {
+pub(crate) fn reuse_inherited_slots(
+    common: &[ErrorResponse],
+    operations: &mut [pons_ir::Operation],
+) {
     if common.is_empty() {
         return;
     }
@@ -464,7 +303,7 @@ fn same_headers(inherited: &[ResponseHeader], declared: &[ResponseHeader]) -> bo
         })
 }
 
-fn resolve_request_body(operation: &mut pons_ir::Operation) {
+pub(crate) fn resolve_request_body(operation: &mut pons_ir::Operation) {
     let Some(body) = &operation.body else {
         return;
     };
@@ -526,7 +365,10 @@ fn declare_framework_rejections(operation: &mut pons_ir::Operation) {
     );
 }
 
-fn declare_degraded_headers(common: &[ErrorResponse], operations: &mut [pons_ir::Operation]) {
+pub(crate) fn declare_degraded_headers(
+    common: &[ErrorResponse],
+    operations: &mut [pons_ir::Operation],
+) {
     let exact = pons_ir::ErrorStatus::Exact(crate::error::DEGRADED);
     for operation in operations {
         let header_wrapped = operation
