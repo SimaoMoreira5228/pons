@@ -4,15 +4,16 @@ use pons_axum::extract::{Multipart, State};
 use pons_axum::http::StatusCode;
 use pons_axum::routing::{delete, get, get_with, head, post, post_with};
 use pons_axum::{
-    Auth, DescribeRequest, DocumentedLayer, Header, HeaderSpec, Ndjson, NoContent, OperationCx,
-    OperationMeta, OptionalHeader, RawBytes, Router, SessionAuth, WithHeader, WithOptionalHeader,
-    WithStatus,
+    Auth, AuthSpec, DescribeRequest, DocumentedLayer, Header, HeaderSpec, Ndjson, NoContent,
+    OperationCx, OperationMeta, OptionalHeader, RawBytes, Router, SessionAuth, WithHeader,
+    WithOptionalHeader, WithStatus,
 };
 use pons_axum::{Form, Path, Query};
 use pons_core::Schema;
 use pons_ir::{
-    AuthScheme, ContentKind, CredentialLocator, CredentialProvision, Field, Info, InlineType,
-    ObjectOpenness, OpaqueWire, Operation, PathSegment, ResponseStatus, TypeKind, TypeRef,
+    ApiKeyLocation, AuthScheme, ContentKind, CredentialLocator, CredentialProvision, Field, Info,
+    InlineType, ObjectOpenness, OpaqueWire, Operation, PathSegment, ResponseStatus, TypeKind,
+    TypeRef,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -262,6 +263,14 @@ async fn maybe_session(_session: MaybeSession) -> axum::Json<User> {
     })
 }
 
+struct TenantAuth;
+
+impl AuthSpec for TenantAuth {
+    fn apply(cx: &mut OperationCx) {
+        cx.require_all(["tenant"]);
+    }
+}
+
 async fn response_headers() -> WithStatus<201, WithHeader<TraceId, axum::Json<User>>> {
     WithStatus::new(WithHeader::new(
         axum::Json(User {
@@ -487,6 +496,17 @@ async fn require_authorization(
     }
 }
 
+async fn require_tenant(
+    request: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> axum::response::Response {
+    if request.headers().contains_key("x-tenant") {
+        next.run(request).await
+    } else {
+        StatusCode::UNAUTHORIZED.into_response()
+    }
+}
+
 static LAYER_TRACE: std::sync::Mutex<Vec<&'static str>> = std::sync::Mutex::new(Vec::new());
 
 async fn trace_layer_a(
@@ -532,9 +552,27 @@ fn built(router: pons_axum::Router<()>) -> axum::Router<()> {
 }
 
 fn get_status(app: &mut axum::Router<()>, path: &str, authorized: bool) -> StatusCode {
+    let header = authorized.then_some(("authorization", "Bearer token"));
+    request_status(app, path, header)
+}
+
+fn status_with_header(
+    app: &mut axum::Router<()>,
+    path: &str,
+    name: &str,
+    value: &str,
+) -> StatusCode {
+    request_status(app, path, Some((name, value)))
+}
+
+fn request_status(
+    app: &mut axum::Router<()>,
+    path: &str,
+    header: Option<(&str, &str)>,
+) -> StatusCode {
     let mut builder = pons_axum::http::Request::builder().uri(path);
-    if authorized {
-        builder = builder.header("authorization", "Bearer token");
+    if let Some((name, value)) = header {
+        builder = builder.header(name, value);
     }
     let request: pons_axum::extract::Request = builder.body(axum::body::Body::empty()).unwrap();
     block_on(app.call(request)).unwrap().status()
@@ -1115,83 +1153,168 @@ fn documented_layer_applies_auth_to_the_group() {
 }
 
 #[test]
-fn documented_layer_applies_auth_to_routes_added_after_it() {
-    fn router() -> Router<AppState> {
-        DocumentedLayer::new(axum::middleware::from_fn(noop_layer), SessionAuth)
-            .layer(Router::<AppState>::new(info()).route(
-                "/before",
-                get_with(list_users, OperationMeta::new("session.before")),
-            ))
+fn a_group_layer_covers_only_its_group() {
+    fn router() -> Router<()> {
+        let group = DocumentedLayer::new(
+            axum::middleware::from_fn(require_authorization),
+            SessionAuth,
+        )
+        .layer(
+            Router::<AppState>::new(info())
+                .route(
+                    "/group/first",
+                    get_with(list_users, OperationMeta::new("group.first")),
+                )
+                .route(
+                    "/group/second",
+                    get_with(list_users, OperationMeta::new("group.second")),
+                ),
+        );
+        Router::<AppState>::new(info())
+            .merge(group)
             .route(
-                "/after",
-                get_with(list_users, OperationMeta::new("session.after")),
+                "/open",
+                get_with(list_users, OperationMeta::new("group.open")),
             )
+            .auth_scheme("session", AuthScheme::Bearer { format: None })
+            .with_state::<()>(AppState)
     }
-    let document = router()
-        .auth_scheme("session", AuthScheme::Bearer { format: None })
-        .into_document()
-        .unwrap();
-    assert_eq!(document.operations.len(), 2);
-    for operation in &document.operations {
+
+    let document = router().into_document().unwrap();
+    for (path, authenticated) in [("group", true), ("open", false)] {
+        let operation = operation(&document, path);
+        let expected = if authenticated {
+            vec![vec!["session".to_owned()]]
+        } else {
+            Vec::new()
+        };
         assert_eq!(
             operation.auth.alternatives,
-            vec![vec!["session".to_owned()]]
-        );
-        assert!(!operation.auth.optional);
-    }
-    let snapshot = router().document();
-    assert_eq!(snapshot.operations.len(), 2);
-    for operation in &snapshot.operations {
-        assert_eq!(
-            operation.auth.alternatives,
-            vec![vec!["session".to_owned()]]
+            expected,
+            "{} must be documented as authenticated only inside its group",
+            operation.id.last().unwrap().join("_")
         );
     }
+
+    let mut app = built(router());
+    for path in ["/group/first", "/group/second"] {
+        assert_eq!(get_status(&mut app, path, false), StatusCode::UNAUTHORIZED);
+        assert_eq!(get_status(&mut app, path, true), StatusCode::OK);
+    }
+    assert_eq!(
+        get_status(&mut app, "/open", false),
+        StatusCode::OK,
+        "the layer on the group must not run for a sibling route"
+    );
 }
 
 #[test]
-fn documented_layer_enforces_auth_on_routes_added_after_it() {
+fn a_global_layer_covers_every_route() {
     fn router() -> Router<()> {
         DocumentedLayer::new(
             axum::middleware::from_fn(require_authorization),
             SessionAuth,
         )
-        .layer(Router::<AppState>::new(info()).route(
-            "/before",
-            get_with(list_users, OperationMeta::new("session.before")),
-        ))
-        .route(
-            "/after",
-            get_with(list_users, OperationMeta::new("session.after")),
+        .layer(
+            Router::<AppState>::new(info())
+                .route(
+                    "/first",
+                    get_with(list_users, OperationMeta::new("global.first")),
+                )
+                .route(
+                    "/second",
+                    get_with(list_users, OperationMeta::new("global.second")),
+                ),
         )
         .auth_scheme("session", AuthScheme::Bearer { format: None })
         .with_state::<()>(AppState)
     }
 
     let document = router().into_document().unwrap();
-    assert_eq!(document.operations.len(), 2);
-    for id in ["before", "after"] {
-        let operation = document
-            .operations
-            .iter()
-            .find(|operation| operation.id.last().unwrap().join("_") == id)
-            .unwrap();
+    for operation in &document.operations {
         assert_eq!(
             operation.auth.alternatives,
-            vec![vec!["session".to_owned()]],
-            "/{id} must be documented as authenticated"
+            vec![vec!["session".to_owned()]]
         );
     }
 
     let mut app = built(router());
-    for path in ["/before", "/after"] {
+    for path in ["/first", "/second"] {
         assert_eq!(get_status(&mut app, path, false), StatusCode::UNAUTHORIZED);
         assert_eq!(get_status(&mut app, path, true), StatusCode::OK);
     }
 }
 
 #[test]
-fn pending_layers_are_applied_once_each_in_registration_order() {
+fn merged_and_nested_groups_keep_their_own_layers() {
+    fn router() -> Router<()> {
+        let api = DocumentedLayer::new(
+            axum::middleware::from_fn(require_authorization),
+            SessionAuth,
+        )
+        .layer(Router::<AppState>::new(info()).route(
+            "/users",
+            get_with(list_users, OperationMeta::new("api.users")),
+        ));
+        let teams = DocumentedLayer::new(axum::middleware::from_fn(require_tenant), TenantAuth)
+            .layer(Router::<AppState>::new(info()).route(
+                "/teams",
+                get_with(list_users, OperationMeta::new("teams.list")),
+            ));
+        Router::<AppState>::new(info())
+            .nest("/api", api)
+            .merge(teams)
+            .route(
+                "/open",
+                get_with(list_users, OperationMeta::new("open.list")),
+            )
+            .auth_scheme("session", AuthScheme::Bearer { format: None })
+            .auth_scheme(
+                "tenant",
+                AuthScheme::ApiKey {
+                    location: ApiKeyLocation::Header,
+                    name: "x-tenant".into(),
+                },
+            )
+            .with_state::<()>(AppState)
+    }
+
+    let document = router().into_document().unwrap();
+    assert_eq!(
+        operation(&document, "api").path,
+        vec![literal("api"), literal("users")]
+    );
+    assert_eq!(
+        operation(&document, "api").auth.alternatives,
+        vec![vec!["session".to_owned()]]
+    );
+    assert_eq!(operation(&document, "teams").path, vec![literal("teams")]);
+    assert_eq!(
+        operation(&document, "teams").auth.alternatives,
+        vec![vec!["tenant".to_owned()]]
+    );
+    assert!(operation(&document, "open").auth.alternatives.is_empty());
+
+    let mut app = built(router());
+    assert_eq!(
+        get_status(&mut app, "/api/users", false),
+        StatusCode::UNAUTHORIZED
+    );
+    assert_eq!(get_status(&mut app, "/api/users", true), StatusCode::OK);
+    assert_eq!(
+        status_with_header(&mut app, "/teams", "authorization", "Bearer token"),
+        StatusCode::UNAUTHORIZED,
+        "the session layer on the nested group must not run for a merged sibling"
+    );
+    assert_eq!(
+        status_with_header(&mut app, "/teams", "x-tenant", "acme"),
+        StatusCode::OK
+    );
+    assert_eq!(get_status(&mut app, "/open", false), StatusCode::OK);
+}
+
+#[test]
+fn layers_keep_their_registration_order_within_a_group() {
     fn router() -> Router<AppState> {
         DocumentedLayer::new(axum::middleware::from_fn(trace_layer_b), SessionAuth)
             .layer(
@@ -1201,10 +1324,6 @@ fn pending_layers_are_applied_once_each_in_registration_order() {
                         get_with(list_users, OperationMeta::new("session.traced")),
                     ),
                 ),
-            )
-            .route(
-                "/traced-after",
-                get_with(list_users, OperationMeta::new("session.traced_after")),
             )
             .auth_scheme("session", AuthScheme::Bearer { format: None })
     }
@@ -1218,22 +1337,189 @@ fn pending_layers_are_applied_once_each_in_registration_order() {
                     ),
                 ),
             )
-            .route(
-                "/doubled-after",
-                get_with(list_users, OperationMeta::new("session.doubled_after")),
-            )
             .auth_scheme("session", AuthScheme::Bearer { format: None })
     }
 
     LAYER_TRACE.lock().unwrap().clear();
     let mut app = built(router().with_state::<()>(AppState));
-    assert_eq!(get_status(&mut app, "/traced-after", true), StatusCode::OK);
+    assert_eq!(get_status(&mut app, "/traced", true), StatusCode::OK);
     assert_eq!(LAYER_TRACE.lock().unwrap().as_slice(), ["b", "a"]);
 
     LAYER_TRACE.lock().unwrap().clear();
     let mut app = built(doubled().with_state::<()>(AppState));
-    assert_eq!(get_status(&mut app, "/doubled-after", true), StatusCode::OK);
+    assert_eq!(get_status(&mut app, "/doubled", true), StatusCode::OK);
     assert_eq!(LAYER_TRACE.lock().unwrap().as_slice(), ["a", "a"]);
+}
+
+#[test]
+fn a_route_added_after_a_layer_is_not_covered() {
+    fn router() -> Router<()> {
+        DocumentedLayer::new(
+            axum::middleware::from_fn(require_authorization),
+            SessionAuth,
+        )
+        .layer(Router::<AppState>::new(info()).route(
+            "/before",
+            get_with(list_users, OperationMeta::new("scoped.before")),
+        ))
+        .route(
+            "/after",
+            get_with(list_users, OperationMeta::new("scoped.after")),
+        )
+        .auth_scheme("session", AuthScheme::Bearer { format: None })
+        .with_state::<()>(AppState)
+    }
+
+    let document = router().into_document().unwrap();
+    assert_eq!(
+        operation(&document, "before").auth.alternatives,
+        vec![vec!["session".to_owned()]]
+    );
+    assert!(
+        operation(&document, "after").auth.alternatives.is_empty(),
+        "a route added after the layer is outside the layer's scope"
+    );
+
+    let mut app = built(router());
+    assert_eq!(
+        get_status(&mut app, "/before", false),
+        StatusCode::UNAUTHORIZED
+    );
+    assert_eq!(get_status(&mut app, "/before", true), StatusCode::OK);
+    assert_eq!(
+        get_status(&mut app, "/after", false),
+        StatusCode::OK,
+        "the layer must not run for a route added after it"
+    );
+}
+
+#[test]
+fn nesting_prefixes_paths_and_keeps_path_types() {
+    fn router() -> Router<()> {
+        let nested = Router::<AppState>::new(info())
+            .route("/users/{id}", get(get_user))
+            .route("/", get(list_users));
+        Router::<AppState>::new(info())
+            .nest("/api", nested)
+            .nest(
+                "/v1/",
+                Router::<AppState>::new(info()).route("/health", get(health)),
+            )
+            .with_state::<()>(AppState)
+    }
+
+    let document = router().into_document().unwrap();
+    let user = document
+        .operations
+        .iter()
+        .find(|operation| {
+            operation
+                .path
+                .iter()
+                .any(|segment| matches!(segment, PathSegment::Param { param, .. } if param == "id"))
+        })
+        .unwrap();
+    assert_eq!(user.path.len(), 3);
+    assert_eq!(user.path[0], literal("api"));
+    assert_eq!(user.path[1], literal("users"));
+    let PathSegment::Param { param, ty } = &user.path[2] else {
+        panic!();
+    };
+    assert_eq!(param, "id");
+    assert!(matches!(
+        ty,
+        TypeRef::Inline(InlineType::Int { bits: 64, .. })
+    ));
+    let root = document
+        .operations
+        .iter()
+        .find(|operation| operation.path == vec![literal("api")])
+        .expect("a nested root route is served at the prefix itself");
+    assert_eq!(root.method, pons_ir::Method::Get);
+    assert!(
+        document
+            .operations
+            .iter()
+            .any(|operation| operation.path == vec![literal("v1"), literal("health")])
+    );
+
+    let mut app = built(router());
+    assert_eq!(get_status(&mut app, "/api/users/1", false), StatusCode::OK);
+    assert_eq!(get_status(&mut app, "/api", false), StatusCode::OK);
+    assert_eq!(get_status(&mut app, "/v1/health", false), StatusCode::OK);
+}
+
+#[test]
+fn a_nest_prefix_the_document_cannot_carry_is_refused() {
+    for (prefix, expected) in [
+        ("/api/{tenant}", "contains a parameter"),
+        ("/api/{*rest}", "contains a wildcard"),
+        ("/", "use Router::merge"),
+    ] {
+        let router = Router::<()>::new(info()).nest(
+            prefix,
+            Router::<()>::new(info()).route("/health", get(health)),
+        );
+        let document = router.document();
+        assert!(
+            document
+                .diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic.message.contains(expected)),
+            "the prefix {prefix:?} must be refused with a message that names the reason"
+        );
+    }
+    assert!(
+        Router::<()>::new(info())
+            .nest(
+                "/api/{tenant}",
+                Router::<()>::new(info()).route("/health", get(health))
+            )
+            .into_document()
+            .is_err()
+    );
+}
+
+#[test]
+fn merging_conflicting_auth_schemes_fails_validation() {
+    let errors = Router::<()>::new(info())
+        .auth_scheme("session", AuthScheme::Bearer { format: None })
+        .merge(Router::<()>::new(info()).auth_scheme(
+            "session",
+            AuthScheme::ApiKey {
+                location: ApiKeyLocation::Header,
+                name: "x-session".into(),
+            },
+        ))
+        .into_document()
+        .unwrap_err();
+    assert!(
+        errors
+            .iter()
+            .any(|error| error.to_string().contains("auth scheme session")),
+        "{errors:?}"
+    );
+}
+
+#[test]
+fn merging_conflicting_operation_ids_fails_validation() {
+    let errors = Router::<()>::new(info())
+        .route(
+            "/first",
+            get_with(health, OperationMeta::new("duplicate.operation")),
+        )
+        .merge(Router::<()>::new(info()).route(
+            "/second",
+            get_with(health, OperationMeta::new("duplicate.operation")),
+        ))
+        .into_document()
+        .unwrap_err();
+    assert!(
+        errors
+            .iter()
+            .any(|error| error.to_string().contains("duplicate operation id")),
+        "{errors:?}"
+    );
 }
 
 #[test]

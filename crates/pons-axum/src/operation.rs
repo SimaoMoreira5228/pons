@@ -270,6 +270,58 @@ fn unescape(segment: &str) -> String {
     unescaped
 }
 
+pub(crate) fn literal_prefix(path: &str) -> Result<Vec<PathSegment>, String> {
+    if !path.starts_with('/') {
+        return Err(format!("the nest prefix {path:?} must start with '/'"));
+    }
+    if path == "/" {
+        return Err("nesting at the root is a merge, so use Router::merge instead".to_owned());
+    }
+    let raw: Vec<&str> = path.split('/').skip(1).collect();
+    let mut segments = Vec::with_capacity(raw.len());
+    for (index, segment) in raw.iter().enumerate() {
+        match Segment::of(segment) {
+            Segment::Param { wildcard: true, .. } => {
+                return Err(format!(
+                    "the nest prefix {path:?} contains a wildcard; a group is described only under a literal prefix, so match the remaining segments on the routes inside the group"
+                ));
+            }
+            Segment::Param { .. } => {
+                return Err(format!(
+                    "the nest prefix {path:?} contains a parameter; a group is described only under a literal prefix, so put the parameter on the routes inside the group"
+                ));
+            }
+            Segment::Empty if index + 1 < raw.len() => {
+                return Err(format!(
+                    "the nest prefix {path:?} has an empty segment at position {index}, so it cannot be described as a path"
+                ));
+            }
+            Segment::Empty => segments.push(PathSegment::Literal { lit: String::new() }),
+            Segment::Literal(lit) => segments.push(PathSegment::Literal { lit: unescape(lit) }),
+        }
+    }
+    Ok(segments)
+}
+
+pub(crate) fn nested_path(prefix: &[PathSegment], inner: &[PathSegment]) -> Vec<PathSegment> {
+    let trailing_slash =
+        matches!(prefix.last(), Some(PathSegment::Literal { lit }) if lit.is_empty());
+    let base = if trailing_slash {
+        &prefix[..prefix.len() - 1]
+    } else {
+        prefix
+    };
+    let mut path = base.to_vec();
+    if inner.is_empty() {
+        if trailing_slash {
+            path.push(PathSegment::Literal { lit: String::new() });
+        }
+    } else {
+        path.extend_from_slice(inner);
+    }
+    path
+}
+
 fn string_type() -> TypeRef {
     TypeRef::Inline(pons_ir::InlineType::String {
         format: None,
