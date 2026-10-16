@@ -6,13 +6,14 @@ use std::convert::Infallible;
 use axum::extract::FromRequestParts;
 use pons_axum::routing::{get_with, post_with};
 use pons_axum::{
-    Auth, DescribeRequest, Info, Json, OperationCx, OperationMeta, Path, Query, Router,
+    Auth, AuthSpec, DescribeRequest, Header, HeaderSpec, Info, Json, NoContent, OperationCx,
+    OperationMeta, OptionalHeader, Path, Query, Router, WithStatus,
 };
-use pons_ir::{AuthScheme, CredentialLocator};
+use pons_ir::{ApiKeyLocation, AuthScheme, CredentialLocator};
 
 pub use model::{
-    AccountLocked, InvalidCredentials, LoginRequest, Notification, RoleFilter, Session, User,
-    UsersGetQuery,
+    AccountLocked, CreateUser, Delivery, InvalidCredentials, LoginRequest, Notification,
+    RateLimited, RoleFilter, Session, User, UsersGetQuery,
 };
 
 struct SessionGuard;
@@ -32,6 +33,46 @@ impl DescribeRequest for SessionGuard {
     fn describe(_: &mut OperationCx) {}
 }
 
+struct ProfileScope;
+
+impl AuthSpec for ProfileScope {
+    fn apply(cx: &mut OperationCx) {
+        cx.require_scopes("session", ["profile:read"]);
+    }
+}
+
+struct OptionalSession;
+
+impl AuthSpec for OptionalSession {
+    fn apply(cx: &mut OperationCx) {
+        cx.require_all(["session"]);
+        cx.optional_auth();
+    }
+}
+
+struct SessionOrApiKey;
+
+impl AuthSpec for SessionOrApiKey {
+    fn apply(cx: &mut OperationCx) {
+        cx.require_any(["session"]);
+        cx.require_any(["api_key"]);
+    }
+}
+
+struct Trace;
+
+impl HeaderSpec for Trace {
+    type Value = String;
+    const NAME: &'static str = "Trace";
+}
+
+struct Tenant;
+
+impl HeaderSpec for Tenant {
+    type Value = String;
+    const NAME: &'static str = "Tenant";
+}
+
 async fn login(
     Json(request): Json<LoginRequest>,
 ) -> Result<axum::Json<Session>, InvalidCredentials> {
@@ -39,11 +80,12 @@ async fn login(
     Ok(axum::Json(Session {
         token: "token".into(),
         expires_at: "2026-01-01T00:00:00Z".into(),
+        refresh_token: None,
     }))
 }
 
 async fn get_user(
-    _session: Auth<SessionGuard>,
+    _session: Auth<SessionGuard, ProfileScope>,
     Path(id): Path<i64>,
     Query(query): Query<UsersGetQuery>,
 ) -> axum::Json<User> {
@@ -51,11 +93,37 @@ async fn get_user(
     axum::Json(User {
         id,
         name: "Ada".into(),
+        nickname: None,
     })
 }
 
-async fn latest_notification() -> axum::Json<Notification> {
+async fn create_user(
+    _session: Auth<SessionGuard, OptionalSession>,
+    Header(_trace): Header<Trace>,
+    OptionalHeader(_tenant): OptionalHeader<Tenant>,
+    Json(request): Json<CreateUser>,
+) -> Result<WithStatus<201, axum::Json<User>>, RateLimited> {
+    Ok(WithStatus::<201, _>::new(axum::Json(User {
+        id: 1,
+        name: request.name,
+        nickname: None,
+    })))
+}
+
+async fn delete_user(Path(_id): Path<i64>) -> NoContent {
+    NoContent
+}
+
+async fn latest_notification(
+    _session: Auth<SessionGuard, SessionOrApiKey>,
+) -> axum::Json<Notification> {
     axum::Json(Notification::Follow { user_id: 1 })
+}
+
+async fn latest_delivery() -> axum::Json<Delivery> {
+    axum::Json(Delivery::Push {
+        device: "phone".into(),
+    })
 }
 
 pub fn router() -> Router {
@@ -72,6 +140,13 @@ pub fn router() -> Router {
             format: Some("jwt".into()),
         },
     )
+    .auth_scheme(
+        "api_key",
+        AuthScheme::ApiKey {
+            location: ApiKeyLocation::Header,
+            name: "X-API-Key".into(),
+        },
+    )
     .common_error::<AccountLocked>()
     .route(
         "/auth/login",
@@ -84,7 +159,17 @@ pub fn router() -> Router {
                     CredentialLocator::Body {
                         pointer: "/token".into(),
                     },
-                ),
+                )
+                .expires_at(CredentialLocator::Body {
+                    pointer: "/expires_at".into(),
+                }),
+        ),
+    )
+    .route(
+        "/users",
+        post_with(
+            create_user,
+            OperationMeta::new("users.create").summary("Create a user."),
         ),
     )
     .route(
@@ -92,13 +177,22 @@ pub fn router() -> Router {
         get_with(
             get_user,
             OperationMeta::new("users.get").summary("Read a user."),
-        ),
+        )
+        .delete(delete_user)
+        .with_meta(OperationMeta::new("users.delete").summary("Delete a user.")),
     )
     .route(
         "/notifications/latest",
         get_with(
             latest_notification,
             OperationMeta::new("notifications.latest").summary("Read the latest notification."),
+        ),
+    )
+    .route(
+        "/notifications/delivery",
+        get_with(
+            latest_delivery,
+            OperationMeta::new("notifications.delivery").summary("Read the latest delivery."),
         ),
     )
 }
