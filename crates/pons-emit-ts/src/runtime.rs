@@ -19,6 +19,10 @@ const MODULES: &[(&str, &str)] = &[
         "transport.ts",
         include_str!("../../../runtime/ts/transport.ts"),
     ),
+    (
+        "websocket.ts",
+        include_str!("../../../runtime/ts/websocket.ts"),
+    ),
 ];
 
 fn normalize(source: &str) -> String {

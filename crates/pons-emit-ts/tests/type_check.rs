@@ -452,6 +452,7 @@ fn the_check_covers_the_vendored_runtime_sources() {
         "runtime/stream.ts",
         "runtime/credentials.ts",
         "runtime/transport.ts",
+        "runtime/websocket.ts",
     ] {
         assert!(
             checked.contains(&module.to_string()),

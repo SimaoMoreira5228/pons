@@ -229,7 +229,7 @@ pub fn emit_with_options(document: &Document, options: TsOptions) -> Result<Emit
         operation.stream.as_ref().is_some_and(|stream| {
             !matches!(
                 &stream.kind,
-                StreamKind::Sse { .. } | StreamKind::Ndjson { .. }
+                StreamKind::Sse { .. } | StreamKind::Ndjson { .. } | StreamKind::Websocket { .. }
             )
         }) || operation.stream.is_none()
             && operation
@@ -238,7 +238,18 @@ pub fn emit_with_options(document: &Document, options: TsOptions) -> Result<Emit
                 .any(|response| response.content == pons_ir::ContentKind::Stream)
     }) {
         return Err(EmitError(
-            "the TypeScript emitter supports SSE and NDJSON streams only".into(),
+            "the TypeScript emitter supports SSE, NDJSON, and WebSocket streams only".into(),
+        ));
+    }
+    if document.operations.iter().any(|operation| {
+        operation.body.is_some()
+            && operation
+                .stream
+                .as_ref()
+                .is_some_and(|stream| matches!(stream.kind, StreamKind::Websocket { .. }))
+    }) {
+        return Err(EmitError(
+            "a WebSocket operation cannot declare a request body, because the upgrade request does not carry one".into(),
         ));
     }
     let api_key_headers: BTreeMap<String, &str> = document
@@ -2302,8 +2313,56 @@ mod tests {
             client: pons_ir::TypeRef::Inline(pons_ir::InlineType::Any),
             server: pons_ir::TypeRef::Inline(pons_ir::InlineType::Any),
         };
+        let files = super::emit(&document).unwrap();
+        assert!(file(&files, "runtime/websocket.ts").contains("export async function websocket"));
+        assert!(file(&files, "operations/events.ts").contains("WebSocketConnection<"));
+
+        document.operations[stream_index]
+            .stream
+            .as_mut()
+            .unwrap()
+            .kind = StreamKind::Bytes {
+            content_type: "application/octet-stream".into(),
+        };
         let error = super::emit(&document).unwrap_err();
-        assert!(error.0.contains("SSE and NDJSON streams only"));
+        assert!(error.0.contains("SSE, NDJSON, and WebSocket streams only"));
+    }
+
+    #[test]
+    fn rejects_a_websocket_request_body() {
+        let mut document: Document =
+            serde_json::from_str(include_str!("../../../fixtures/login.json")).unwrap();
+        let stream_index = document
+            .operations
+            .iter()
+            .position(|operation| operation.stream.is_some())
+            .unwrap();
+        document.operations[stream_index]
+            .stream
+            .as_mut()
+            .unwrap()
+            .kind = StreamKind::Websocket {
+            client: pons_ir::TypeRef::Inline(pons_ir::InlineType::Any),
+            server: pons_ir::TypeRef::Inline(pons_ir::InlineType::Any),
+        };
+        document.operations[stream_index].responses[0].content = pons_ir::ContentKind::Empty;
+        document.operations[stream_index].responses[0].status = pons_ir::ResponseStatus::Exact(101);
+        document.operations[stream_index].responses[0]
+            .headers
+            .clear();
+        document.operations[stream_index].body = Some(pons_ir::Body {
+            ty: pons_ir::TypeRef::Inline(pons_ir::InlineType::Any),
+            content: pons_ir::ContentKind::Json,
+            required: true,
+            media_type: None,
+            ext: Default::default(),
+        });
+        let error = super::emit(&document).unwrap_err();
+        assert!(
+            error.0.contains("cannot declare a request body"),
+            "{}",
+            error.0
+        );
     }
 
     fn fixture() -> Document {
@@ -2475,7 +2534,7 @@ mod tests {
         "[key: string]: unknown };\n",
         "\n"
     );
-    const CLIENT_WITHOUT_DOCS: u64 = 0x9704_38bb_e1f6_bc61;
+    const CLIENT_WITHOUT_DOCS: u64 = 0xfe23_265c_668c_2b42;
 
     #[test]
     fn a_document_that_documents_nothing_emits_the_bytes_it_emitted_before() {

@@ -56,7 +56,7 @@ impl Node {
 }
 
 fn operation_type_names(document: &Document) -> Vec<Vec<String>> {
-    let mut stream_operations = Vec::with_capacity(document.operations.len());
+    let mut counts = Vec::with_capacity(document.operations.len());
     let mut candidates = Vec::new();
     for operation in &document.operations {
         let id = operation.id.iter().flatten().cloned().collect::<Vec<_>>();
@@ -66,22 +66,26 @@ fn operation_type_names(document: &Document) -> Vec<Vec<String>> {
             format!("{name}Response"),
             format!("{name}Error"),
         ]);
-        let stream_name = match operation.stream.as_ref().map(|stream| &stream.kind) {
-            Some(StreamKind::Sse { .. }) => Some("Event"),
-            Some(StreamKind::Ndjson { .. }) => Some("Item"),
-            _ => None,
-        };
-        stream_operations.push(stream_name.is_some());
-        if let Some(stream_name) = stream_name {
-            candidates.push(format!("{name}{stream_name}"));
-            candidates.push(format!("{name}StreamError"));
+        let mut extra = Vec::new();
+        match operation.stream.as_ref().map(|stream| &stream.kind) {
+            Some(StreamKind::Sse { .. }) => extra.push(format!("{name}Event")),
+            Some(StreamKind::Ndjson { .. }) => extra.push(format!("{name}Item")),
+            Some(StreamKind::Websocket { .. }) => {
+                extra.push(format!("{name}ClientMessage"));
+                extra.push(format!("{name}ServerMessage"));
+            }
+            _ => {}
         }
+        if !extra.is_empty() {
+            extra.push(format!("{name}StreamError"));
+        }
+        counts.push(3 + extra.len());
+        candidates.extend(extra);
     }
     let mut names = unique_names(candidates, &[]).into_iter();
-    stream_operations
+    counts
         .into_iter()
-        .map(|stream| {
-            let count = if stream { 5 } else { 3 };
+        .map(|count| {
             let allocated = names.by_ref().take(count).collect::<Vec<_>>();
             debug_assert_eq!(allocated.len(), count);
             allocated
@@ -179,22 +183,33 @@ pub(super) fn emit(
             .path
             .iter()
             .any(|segment| matches!(segment, PathSegment::Param { .. }));
-        namespace.streams |= operation.stream.is_some();
-        namespace.wraps_status |= operation.responses.iter().any(|response| {
-            matches!(
-                response.status,
-                ResponseStatus::Default | ResponseStatus::Unknown
-            )
-        });
-        namespace.declares_headers |= operation
-            .responses
-            .iter()
-            .any(|response| !response.headers.is_empty())
-            || (operation.errors_inherit
-                && document
-                    .common_errors
-                    .iter()
-                    .any(|error| !error.headers.is_empty()));
+        let websocket = operation
+            .stream
+            .as_ref()
+            .is_some_and(|stream| matches!(stream.kind, StreamKind::Websocket { .. }));
+        namespace.streams |= matches!(
+            operation.stream.as_ref().map(|stream| &stream.kind),
+            Some(StreamKind::Sse { .. } | StreamKind::Ndjson { .. })
+        );
+        namespace.websockets |= websocket;
+        namespace.uses_request |= !websocket;
+        if !websocket {
+            namespace.wraps_status |= operation.responses.iter().any(|response| {
+                matches!(
+                    response.status,
+                    ResponseStatus::Default | ResponseStatus::Unknown
+                )
+            });
+            namespace.declares_headers |= operation
+                .responses
+                .iter()
+                .any(|response| !response.headers.is_empty());
+        }
+        namespace.declares_headers |= operation.errors_inherit
+            && document
+                .common_errors
+                .iter()
+                .any(|error| !error.headers.is_empty());
         let mut node = &mut namespace.node;
         for parent in rest {
             let segment = camel(parent);
@@ -239,6 +254,8 @@ struct Namespace {
     encodes_path: bool,
     carries_path_values: bool,
     streams: bool,
+    websockets: bool,
+    uses_request: bool,
     wraps_status: bool,
     declares_headers: bool,
     is_operation: bool,
@@ -252,7 +269,10 @@ fn namespace_file(
     error_strategy: ErrorStrategy,
     runtime: Runtime,
 ) -> String {
-    let mut members = vec!["request".to_owned()];
+    let mut members = Vec::new();
+    if namespace.uses_request {
+        members.push("request".to_owned());
+    }
     if error_strategy == ErrorStrategy::Throw {
         members.push("requestOrThrow".into());
     }
@@ -261,6 +281,9 @@ fn namespace_file(
     }
     if namespace.carries_path_values {
         members.push("stringifyCarrier".into());
+    }
+    if namespace.websockets {
+        members.push("websocket".into());
     }
     members.push("type ConfiguredClient".into());
     let mut output = String::new();
@@ -282,11 +305,16 @@ fn namespace_file(
         "import type {{ {} }} from \"../errors.js\";\n",
         declared.join(", ")
     ));
+    let runtime_specifier = crate::runtime::specifier(runtime, "\"../runtime.js\"");
     output.push_str(&format!(
-        "import {{ {} }} from {};\n",
+        "import {{ {} }} from {runtime_specifier};\n",
         members.join(", "),
-        crate::runtime::specifier(runtime, "\"../runtime.js\"")
     ));
+    if namespace.websockets {
+        output.push_str(&format!(
+            "import type {{ WebSocketConnection, WebSocketFailure }} from {runtime_specifier};\n"
+        ));
+    }
     if let Some(module) = namespace.validation_module {
         let names = namespace
             .imports
@@ -342,7 +370,7 @@ fn client_file(
     }
     let runtime = crate::runtime::specifier(options.runtime, "\"./runtime.js\"");
     output.push_str(&format!(
-        "import type {{ ConfiguredClient, CredentialValue, OpaqueCodecRegistry }} from {runtime};\n"
+        "import type {{ ConfiguredClient, CredentialValue, OpaqueCodecRegistry, WebSocketConstructor }} from {runtime};\n"
     ));
     output.push_str(&format!(
         "export type {{ OpaqueCodec, OpaqueCodecRegistry, OpaqueWire }} from {runtime};\n"
@@ -389,7 +417,7 @@ fn option_types(opaque_required: bool) -> String {
     let mut output = String::new();
     output.push_str("export type AuthAttachment = { headers?: Record<string, string>; query?: Record<string, string>; cookies?: Record<string, string> };\nexport type AuthAdapter = (context: { scheme: string; scopes: readonly string[]; method: string; url: URL; headers: Headers }) => AuthAttachment | Promise<AuthAttachment>;\n/** Scope and lifetime captured with a credential. `expiresAt` is a Unix millisecond timestamp; `host`, `path`, `secure`, and `origin` bind the value to the response that issued it. */\nexport type CredentialMetadata = { expiresAt?: number | undefined; path?: string | undefined; secure?: boolean | undefined; host?: string | undefined; origin?: string | undefined };\nexport type StoredCredential = { value: string } & CredentialMetadata;\n/** A store returns a `{ value, ...metadata }` record, never a bare string, and must persist the metadata it is given in `set` so that expiry and origin scope survive a new client. A record with a non-string `value` or a metadata field of the wrong type is rejected. */\nexport type TokenStore = { get(): StoredCredential | undefined | Promise<StoredCredential | undefined>; set(value: string, metadata?: CredentialMetadata): void | Promise<void>; clear(): void | Promise<void> };\nexport type CredentialSource = string | (() => string | undefined | Promise<string | undefined>) | TokenStore;\nexport type RequestInterceptor = (context: { url: URL; init: RequestInit }) => void | Promise<void>;\nexport type ResponseInterceptor = (context: { response: Response; url: URL; init: RequestInit }) => void | Promise<void>;\nexport type Interceptors = { request?: RequestInterceptor; response?: ResponseInterceptor };\nexport type AuthSchemeDefinition = { kind: string; location?: string | undefined; name?: string | undefined; adapter?: string | undefined };\nexport type RetryOptions = { attempts?: number; backoffMs?: number; maxBackoffMs?: number; jitterMs?: number };\nexport type CallOptions = { headers?: HeadersInit; signal?: AbortSignal; timeout?: number; retry?: RetryOptions | false };\n");
     output.push_str(&format!(
-        "export type ClientOptions = {{ baseUrl: string; headers?: HeadersInit | (() => HeadersInit | Promise<HeadersInit>); auth?: Record<string, CredentialSource>; authAdapters?: Record<string, AuthAdapter>; opaqueCodecs{}: OpaqueCodecRegistry; fetch?: typeof fetch; signal?: AbortSignal; timeout?: number; retry?: RetryOptions; interceptors?: Interceptors }};\n\n",
+        "export type ClientOptions = {{ baseUrl: string; headers?: HeadersInit | (() => HeadersInit | Promise<HeadersInit>); auth?: Record<string, CredentialSource>; authAdapters?: Record<string, AuthAdapter>; opaqueCodecs{}: OpaqueCodecRegistry; fetch?: typeof fetch; webSocket?: WebSocketConstructor; signal?: AbortSignal; timeout?: number; retry?: RetryOptions; interceptors?: Interceptors }};\n\n",
         if opaque_required { "" } else { "?" },
     ));
     output
@@ -462,6 +490,34 @@ fn operation_function(
             "options",
         )
     };
+    if let Some(StreamKind::Websocket {
+        client: client_message,
+        server: server_message,
+    }) = operation.stream.as_ref().map(|stream| &stream.kind)
+    {
+        let client_name = &declaration_names[3];
+        let server_name = &declaration_names[4];
+        let spec = websocket_spec(
+            operation,
+            client_message,
+            server_message,
+            options,
+            validation,
+            &subject,
+            preserve_wide_integers,
+            call_options,
+        )?;
+        let declarations = format!(
+            "export type {args_name} = {{ {args} }};\n{stream_types}export type {success_name} = {success};\nexport type {error_name} = {failure};\n",
+        );
+        let call = format!("websocket<{client_name}, {server_name}>(configured, {{ {spec} }})");
+        let function = if options.errors == ErrorStrategy::Throw {
+            format!("{args_type} requestOrThrow<{success_name}, {error_name}>({call})")
+        } else {
+            format!("{args_type} {call}")
+        };
+        return Ok((declarations, function));
+    }
     let mut spec = vec![
         format!("method: {method:?}"),
         format!("path: {}", path_expression(operation)),
@@ -677,6 +733,22 @@ fn response_type(
     names: &BTreeMap<String, String>,
     options: &TsOptions,
 ) -> Result<(String, String), EmitError> {
+    if let Some(StreamKind::Websocket {
+        client: client_message,
+        server: server_message,
+    }) = operation.stream.as_ref().map(|stream| &stream.kind)
+    {
+        let client_name = &declaration_names[3];
+        let server_name = &declaration_names[4];
+        let failure_name = &declaration_names[5];
+        let response = format!("WebSocketConnection<{client_name}, {server_name}>");
+        let declarations = format!(
+            "export type {client_name} = {};\nexport type {server_name} = {};\nexport type {failure_name} = WebSocketFailure;\n",
+            types::type_ref(client_message, document, names, options)?,
+            types::type_ref(server_message, document, names, options)?,
+        );
+        return Ok((response, declarations));
+    }
     if let Some(StreamKind::Sse { events }) = operation.stream.as_ref().map(|stream| &stream.kind) {
         let event_name = &declaration_names[3];
         let failure_name = &declaration_names[4];
@@ -945,6 +1017,54 @@ fn content_name(content: ContentKind) -> &'static str {
         ContentKind::Stream => "stream",
         ContentKind::Empty => "empty",
     }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn websocket_spec(
+    operation: &Operation,
+    client_message: &TypeRef,
+    server_message: &TypeRef,
+    options: &TsOptions,
+    validation: &mut validation::Backend,
+    subject: &str,
+    preserve_wide_integers: bool,
+    call_options: &str,
+) -> Result<String, EmitError> {
+    let mut spec = vec![format!("path: {}", path_expression(operation))];
+    if operation
+        .path
+        .iter()
+        .any(|segment| matches!(segment, PathSegment::Param { .. }))
+    {
+        spec.push(String::from("pathValues: args.path"));
+    }
+    if operation.query.is_some() {
+        spec.push(String::from("query: args.query"));
+    }
+    if !operation.headers.is_empty() {
+        spec.push(String::from("headers: args.headers"));
+    }
+    if !operation.auth.alternatives.is_empty() {
+        spec.push(format!("auth: {}", auth_requirement(&operation.auth)));
+    }
+    spec.push(format!(
+        "inputs: {}",
+        request_input_descriptor(operation, options)?
+    ));
+    spec.push(format!(
+        "client: {{ schema: {} }}",
+        type_ref_json(client_message, options)?
+    ));
+    let validate = validator(Some(server_message), validation, subject)?;
+    spec.push(format!(
+        "server: {{ schema: {}{validate} }}",
+        type_ref_json(server_message, options)?
+    ));
+    if preserve_wide_integers {
+        spec.push(String::from("preserveWideIntegers: true"));
+    }
+    spec.push(format!("options: {call_options}"));
+    Ok(spec.join(", "))
 }
 
 fn response_descriptors(

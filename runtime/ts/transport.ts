@@ -819,7 +819,7 @@ function mediaTypeMatches(actual: string, expected: string): boolean {
   });
 }
 
-function preflightPath(
+export function preflightPath(
   values: Record<string, unknown> | undefined,
   descriptors: Array<{ name: string; required: boolean; schema: unknown }>,
   opaque: OpaqueContext,
@@ -839,13 +839,13 @@ function preflightPath(
   return output;
 }
 
-function preflightQuery(value: unknown, schema: unknown, opaque: OpaqueContext): unknown {
+export function preflightQuery(value: unknown, schema: unknown, opaque: OpaqueContext): unknown {
   if (schema == null) return value;
   if (value === undefined) throw new WirePolicyError("missing request query");
   return encodeWire(value, schema, opaque);
 }
 
-function preflightHeaders(
+export function preflightHeaders(
   values: Record<string, unknown> | undefined,
   descriptors: Array<{ name: string; required: boolean; schema: unknown }>,
   opaque: OpaqueContext,

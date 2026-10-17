@@ -924,6 +924,7 @@ fn runtime_package_writes_no_runtime_and_imports_the_package_instead() {
             "runtime/stream.ts",
             "runtime/transport.ts",
             "runtime/validate.ts",
+            "runtime/websocket.ts",
             "runtime/wire.ts",
             "types.ts",
         ]
@@ -968,7 +969,7 @@ fn runtime_package_writes_no_runtime_and_imports_the_package_instead() {
     );
     assert!(
         file(&package, "client.ts").contains(
-            "import type { ConfiguredClient, CredentialValue, OpaqueCodecRegistry } from \
+            "import type { ConfiguredClient, CredentialValue, OpaqueCodecRegistry, WebSocketConstructor } from \
              \"@pons/runtime\";"
         ) && file(&package, "client.ts").contains(
             "export type { OpaqueCodec, OpaqueCodecRegistry, OpaqueWire } from \"@pons/runtime\";"

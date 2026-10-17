@@ -4,3 +4,4 @@ export * from "./validate.js";
 export * from "./stream.js";
 export * from "./credentials.js";
 export * from "./transport.js";
+export * from "./websocket.js";
