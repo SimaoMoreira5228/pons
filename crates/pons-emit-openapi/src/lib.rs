@@ -1,4 +1,5 @@
 mod operations;
+mod responses;
 mod schemas;
 mod security;
 
@@ -1435,18 +1436,6 @@ mod tests {
                 .0
                 .contains("custom auth scheme")
         );
-
-        let mut document = fixture();
-        let operation = document
-            .operations
-            .iter_mut()
-            .find(|operation| operation.stream.is_some())
-            .unwrap();
-        operation.stream.as_mut().unwrap().kind = StreamKind::Websocket {
-            client: string(),
-            server: string(),
-        };
-        assert!(super::emit(&document).unwrap_err().0.contains("WebSocket"));
 
         let mut document = fixture();
         document

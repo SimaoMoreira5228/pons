@@ -605,45 +605,48 @@ const WIDE_INTEGER_LOSSY: Levels = Levels {
 #[derive(Clone, Copy)]
 enum Expected {
     Coverage(Levels),
-    Refused(&'static [&'static str]),
+    Refused(&'static str),
 }
 
 struct Row {
     file: &'static str,
     carries: &'static str,
-    strict: Expected,
-    lossy: Expected,
+    strict: [Expected; 2],
+    lossy: [Expected; 2],
 }
 
-const NO_WEB_SOCKET: [&str; 2] = [
-    "the TypeScript emitter supports SSE and NDJSON streams only",
-    "OpenAPI paths cannot describe WebSocket operations",
-];
+const TS_REFUSES_WEBSOCKET: &str = "the TypeScript emitter supports SSE and NDJSON streams only";
 
 const FIXTURES: [Row; 4] = [
     Row {
         file: "login.json",
         carries: "opaque",
-        strict: Expected::Coverage(PRESERVED_LEVELS),
-        lossy: Expected::Coverage(PRESERVED_LEVELS),
+        strict: [Expected::Coverage(PRESERVED_LEVELS); 2],
+        lossy: [Expected::Coverage(PRESERVED_LEVELS); 2],
     },
     Row {
         file: "exact.json",
         carries: "exact",
-        strict: Expected::Coverage(EVERY_SUBJECT_EXACT),
-        lossy: Expected::Coverage(EVERY_SUBJECT_EXACT),
+        strict: [Expected::Coverage(EVERY_SUBJECT_EXACT); 2],
+        lossy: [Expected::Coverage(EVERY_SUBJECT_EXACT); 2],
     },
     Row {
         file: "lossy.json",
         carries: "lossy",
-        strict: Expected::Coverage(PRESERVED_LEVELS),
-        lossy: Expected::Coverage(WIDE_INTEGER_LOSSY),
+        strict: [Expected::Coverage(PRESERVED_LEVELS); 2],
+        lossy: [Expected::Coverage(WIDE_INTEGER_LOSSY); 2],
     },
     Row {
         file: "unsupported.json",
         carries: "unsupported",
-        strict: Expected::Refused(&NO_WEB_SOCKET),
-        lossy: Expected::Refused(&NO_WEB_SOCKET),
+        strict: [
+            Expected::Refused(TS_REFUSES_WEBSOCKET),
+            Expected::Coverage(PRESERVED_LEVELS),
+        ],
+        lossy: [
+            Expected::Refused(TS_REFUSES_WEBSOCKET),
+            Expected::Coverage(PRESERVED_LEVELS),
+        ],
     },
 ];
 
@@ -684,12 +687,12 @@ fn every_target_classifies_every_fixture_the_same_way() {
             let mode = if lossy { "--lossy" } else { "--strict" };
             for (index, target) in BUILT_INS.iter().enumerate() {
                 let at = format!("{} ({}) {target} {mode}", row.file, row.carries);
-                match (expected, coverage_in(target, &input, lossy)) {
+                match (expected[index], coverage_in(target, &input, lossy)) {
                     (Expected::Coverage(levels), Ok(reported)) => {
                         assert_eq!(coverage_levels(&reported), levels.levels(), "{at}");
                     }
-                    (Expected::Refused(messages), Err(message)) => {
-                        assert_eq!(message, messages[index], "{at}");
+                    (Expected::Refused(message), Err(actual)) => {
+                        assert_eq!(actual, message, "{at}");
                     }
                     (Expected::Coverage(_), Err(message)) => {
                         panic!("{at} refused a document it must describe: {message}");

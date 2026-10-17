@@ -1,11 +1,9 @@
 use std::collections::BTreeMap;
 
-use pons_ir::{
-    ContentKind, ErrorContent, ErrorStatus, Operation, PathSegment, Presence, ResponseHeader,
-    ResponseStatus, TypeRef, is_valid_media_type,
-};
+use pons_ir::{ContentKind, Operation, PathSegment, Presence, TypeRef};
 use serde_json::{Map, Value, json};
 
+use crate::responses::{media_content, media_type};
 use crate::schemas::{Place, WireForm};
 use crate::{Builder, EmitError};
 
@@ -200,120 +198,6 @@ impl Builder<'_> {
         }
         Ok(Value::Object(encoding))
     }
-
-    fn responses(&self, operation: &Operation) -> Result<Value, EmitError> {
-        let mut responses = Map::new();
-        for response in &operation.responses {
-            let media = media_type(
-                response.content,
-                operation.stream.as_ref(),
-                response.media_type.as_deref(),
-            )?;
-            let mut value = json!({"description":"Response"});
-            match response.content {
-                ContentKind::Empty => {}
-                ContentKind::Stream => {
-                    let media = media.ok_or_else(|| {
-                        EmitError("stream response is missing its stream description".into())
-                    })?;
-                    value["content"] = media_content(media, self.stream_schema(operation)?);
-                }
-                ContentKind::Bytes => {
-                    let media = media.ok_or_else(|| {
-                        EmitError("byte response is missing its media type".into())
-                    })?;
-                    value["content"] = media_content(media, json!({}));
-                }
-                _ => {
-                    let body = response.body.as_ref().ok_or_else(|| {
-                        EmitError(format!(
-                            "response {} content {:?} is missing its body",
-                            response.status, response.content
-                        ))
-                    })?;
-                    let media = media.ok_or_else(|| {
-                        EmitError(format!(
-                            "response {} content {:?} has no media type",
-                            response.status, response.content
-                        ))
-                    })?;
-                    value["content"] = media_content(media, self.type_schema(body)?);
-                }
-            }
-            add_response_headers(self, &response.headers, &mut value, "response")?;
-            value["x-pons"] = json!({"status":response.status,"body":response.body,"content":response.content,"media_type":response.media_type,"ext":response.ext});
-            responses.insert(success_status(response.status), value);
-        }
-        let errors = if operation.errors_inherit {
-            operation
-                .errors
-                .iter()
-                .chain(&self.document.common_errors)
-                .collect::<Vec<_>>()
-        } else {
-            operation.errors.iter().collect::<Vec<_>>()
-        };
-        for error in errors {
-            let status = error_status(&error.status);
-            let description = error
-                .doc
-                .as_ref()
-                .and_then(|doc| doc.description.as_deref().or(doc.summary.as_deref()))
-                .unwrap_or("Error response");
-            let mut value = json!({"description":description});
-            if error.content != ErrorContent::Empty {
-                let body = error.body.as_ref().ok_or_else(|| {
-                    EmitError(format!("error {:?} is missing its body", error.name))
-                })?;
-                let media = error
-                    .media_type
-                    .clone()
-                    .unwrap_or_else(|| error_media_type(error.content).into());
-                value["content"] = media_content(media, self.type_schema(body)?);
-            }
-            add_response_headers(self, &error.headers, &mut value, "error response")?;
-            if let Some(retryable) = error.retryable {
-                value["x-pons-retryable"] = json!(retryable);
-            }
-            value["x-pons"] = json!({"name":error.name,"body":error.body,"headers":error.headers,"content":error.content,"media_type":error.media_type,"doc":error.doc,"ext":error.ext});
-            responses.insert(status, value);
-        }
-        if responses.is_empty() {
-            return Err(EmitError(format!(
-                "the operation {} declares no responses and no errors, so every status the client sees would be a protocol error",
-                operation_id(operation)
-            )));
-        }
-        Ok(Value::Object(responses))
-    }
-
-    fn stream_schema(&self, operation: &Operation) -> Result<Value, EmitError> {
-        let Some(stream) = &operation.stream else {
-            return Err(EmitError(
-                "stream response is missing its stream description".into(),
-            ));
-        };
-        let mut schema = match &stream.kind {
-            pons_ir::StreamKind::Sse { events } => {
-                let events = events
-                    .iter()
-                    .map(|event| {
-                        Ok(json!({"event":event.event,"schema":self.type_schema(&event.data)?}))
-                    })
-                    .collect::<Result<Vec<_>, EmitError>>()?;
-                json!({"type":"string","x-pons-events":events})
-            }
-            pons_ir::StreamKind::Ndjson { item } => self.type_schema(item)?,
-            pons_ir::StreamKind::Bytes { .. } => json!({}),
-            pons_ir::StreamKind::Websocket { .. } => {
-                return Err(EmitError(
-                    "OpenAPI paths cannot describe WebSocket operations".into(),
-                ));
-            }
-        };
-        schema["x-pons-stream"] = json!(stream.kind);
-        Ok(schema)
-    }
 }
 
 fn openapi_path(operation: &Operation) -> Result<String, EmitError> {
@@ -405,138 +289,13 @@ fn add_parameter_doc(parameter: &mut Value, doc: Option<&pons_ir::Doc>) {
     }
 }
 
-fn media_type(
-    content: ContentKind,
-    stream: Option<&pons_ir::StreamDescription>,
-    override_type: Option<&str>,
-) -> Result<Option<String>, EmitError> {
-    if let Some(pons_ir::StreamKind::Bytes { content_type }) = stream.map(|stream| &stream.kind)
-        && !is_valid_media_type(content_type)
-    {
-        return Err(EmitError(format!(
-            "invalid byte stream content type {content_type:?}"
-        )));
-    }
-    if content == ContentKind::Stream
-        && let Some(value) = override_type
-        && let Some(expected) = stream.and_then(|stream| stream.kind.media_type())
-        && !pons_ir::media_type_matches(value, expected)
-    {
-        return Err(EmitError(format!(
-            "response media type {value:?} does not match stream kind media type {expected:?}"
-        )));
-    }
-    if let Some(value) = override_type {
-        if !is_valid_media_type(value) {
-            return Err(EmitError(format!("invalid media type {value:?}")));
-        }
-        return Ok(Some(value.into()));
-    }
-    Ok(Some(match content {
-        ContentKind::Json => "application/json".into(),
-        ContentKind::ProblemJson => "application/problem+json".into(),
-        ContentKind::Form => "application/x-www-form-urlencoded".into(),
-        ContentKind::Multipart => "multipart/form-data".into(),
-        ContentKind::Text => "text/plain".into(),
-        ContentKind::Bytes => "application/octet-stream".into(),
-        ContentKind::Stream => {
-            let Some(kind) = stream.map(|stream| &stream.kind) else {
-                return Err(EmitError(
-                    "stream response is missing its stream description".into(),
-                ));
-            };
-            let Some(content_type) = kind.media_type() else {
-                return Err(EmitError(
-                    "OpenAPI paths cannot describe WebSocket operations".into(),
-                ));
-            };
-            content_type.into()
-        }
-        ContentKind::Empty => return Ok(None),
-    }))
-}
-
-fn error_media_type(content: ErrorContent) -> &'static str {
-    match content {
-        ErrorContent::Json => "application/json",
-        ErrorContent::ProblemJson => "application/problem+json",
-        ErrorContent::Text => "text/plain",
-        ErrorContent::Empty => unreachable!(),
-    }
-}
-
-fn media_content(media: String, schema: Value) -> Value {
-    let mut content = Map::new();
-    content.insert(media, json!({"schema":schema}));
-    Value::Object(content)
-}
-
-fn operation_id(operation: &Operation) -> String {
+pub(super) fn operation_id(operation: &Operation) -> String {
     operation
         .id
         .iter()
         .map(|part| part.join("_"))
         .collect::<Vec<_>>()
         .join(".")
-}
-
-fn add_response_headers(
-    builder: &Builder<'_>,
-    headers: &[ResponseHeader],
-    value: &mut Value,
-    kind: &str,
-) -> Result<(), EmitError> {
-    if headers.is_empty() {
-        return Ok(());
-    }
-    let mut response_headers = Map::new();
-    for header in headers {
-        if header.wire.eq_ignore_ascii_case("content-type") {
-            return Err(EmitError(format!(
-                "{kind} header {} is defined by the response content",
-                header.wire
-            )));
-        }
-        let schema = builder.type_schema(&header.ty)?;
-        let mut entry = json!({
-            "required": header.presence == Presence::Required,
-            "x-pons": {"presence": header.presence, "ext": header.ext}
-        });
-
-        match builder.wire_form(&header.ty, Place::Header)? {
-            Some(WireForm::Json) => {
-                entry["content"] = media_content("application/json".into(), schema);
-            }
-            Some(WireForm::Text) => {
-                entry["schema"] = schema;
-            }
-            None => {
-                return Err(EmitError(format!(
-                    "{kind} header {} has no header encoding this emitter can state, because the client reads it in a shape no keyword names",
-                    header.wire
-                )));
-            }
-        }
-        response_headers.insert(header.wire.clone(), entry);
-    }
-    value["headers"] = Value::Object(response_headers);
-    Ok(())
-}
-
-fn success_status(status: ResponseStatus) -> String {
-    match status {
-        ResponseStatus::Exact(status) => status.to_string(),
-        ResponseStatus::Class(class) => format!("{class}XX"),
-        ResponseStatus::Default | ResponseStatus::Unknown => "default".into(),
-    }
-}
-
-fn error_status(status: &ErrorStatus) -> String {
-    match status {
-        ErrorStatus::Exact(status) => status.to_string(),
-        ErrorStatus::Class(class) => format!("{class}XX"),
-        ErrorStatus::Default => "default".into(),
-    }
 }
 
 #[cfg(test)]
