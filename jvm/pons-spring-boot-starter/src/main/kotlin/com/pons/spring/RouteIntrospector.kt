@@ -214,7 +214,7 @@ internal class RouteIntrospector(
                     val required = annotation.required && !shape.nullable && !hasDefault
                     queryFields += IrField(
                         wire = name,
-                        ident = words(name),
+                        ident = words(name.removePrefix("X-")),
                         ty = parameterRef(parameter, shape, Direction.Input),
                         presence = if (required) Presence.Required else Presence.Optional,
                         default = if (hasDefault) {
@@ -231,7 +231,7 @@ internal class RouteIntrospector(
                     val required = annotation.required && !shape.nullable
                     headers += HeaderParameter(
                         wire = name,
-                        ident = words(name),
+                        ident = words(name.removePrefix("X-")),
                         ty = parameterRef(parameter, shape, Direction.Input),
                         presence = if (required) Presence.Required else Presence.Optional,
                     )

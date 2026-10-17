@@ -59,8 +59,8 @@ class UserController {
     @PonsAuth(scheme = "session", optional = true)
     @PonsErrors(RateLimited::class)
     fun create(
-        @RequestHeader("Trace") trace: String,
-        @RequestHeader("Tenant", required = false, defaultValue = "") tenant: String,
+        @RequestHeader("X-Trace") trace: String,
+        @RequestHeader("X-Tenant", required = false, defaultValue = "") tenant: String,
         @RequestBody request: CreateUser,
     ): User = User(id = 1, name = request.name, nickname = tenant.ifEmpty { trace })
 

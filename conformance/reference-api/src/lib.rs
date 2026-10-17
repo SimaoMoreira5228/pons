@@ -63,14 +63,14 @@ struct Trace;
 
 impl HeaderSpec for Trace {
     type Value = String;
-    const NAME: &'static str = "Trace";
+    const NAME: &'static str = "X-Trace";
 }
 
 struct Tenant;
 
 impl HeaderSpec for Tenant {
     type Value = String;
-    const NAME: &'static str = "Tenant";
+    const NAME: &'static str = "X-Tenant";
 }
 
 async fn login(
