@@ -1223,3 +1223,44 @@ console.log(value.day, instant);
 "#,
     );
 }
+
+#[test]
+fn the_client_options_are_named_as_the_design_names_them() {
+    let document: Document = serde_json::from_value(fixture()).unwrap();
+    let files = files(&document);
+    type_checks(
+        &files,
+        r#"
+import { createClient, type CallOptions, type ClientOptions, type RetryOptions } from "./client.js";
+
+const retry: RetryOptions = { attempts: 2, backoffMs: 10, maxBackoffMs: 100, jitterMs: 5 };
+const options: ClientOptions = {
+  baseUrl: "https://api.example.test",
+  timeoutMs: 1_000,
+  codecs: {},
+  retry,
+  transport: {
+    onRequest: async ({ url, init }) => {
+      url.searchParams.set("trace", "1");
+      init.headers = { "X-Trace": "1" };
+    },
+    onResponse: ({ response, url, init }) => {
+      console.log(response.status, url.host, init.method);
+    },
+  },
+};
+const call: CallOptions = { timeoutMs: 50, retry: { attempts: 1 } };
+export const client = createClient(options);
+export const loggedIn = client.auth.login({ body: { email: "person@example.test" } }, call);
+// @ts-expect-error the timeout option is spelled timeoutMs
+const oldTimeout: ClientOptions = { baseUrl: "https://api.example.test", timeout: 1_000 };
+// @ts-expect-error the codec registry is spelled codecs
+const oldCodecs: ClientOptions = { baseUrl: "https://api.example.test", opaqueCodecs: {} };
+// @ts-expect-error a call option is the same name as the client option
+const oldCall: CallOptions = { timeout: 50 };
+// @ts-expect-error the hooks live under transport
+const oldHooks: ClientOptions = { baseUrl: "https://api.example.test", interceptors: { request: () => {} } };
+console.log(oldTimeout, oldCodecs, oldCall, oldHooks);
+"#,
+    );
+}
