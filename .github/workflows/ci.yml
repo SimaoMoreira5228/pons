@@ -74,6 +74,18 @@ jobs:
         working-directory: jvm
         run: ./gradlew build --console=plain
 
+  go-emitter:
+    name: go emitter
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.27.x'
+          cache: false
+      - name: Test the emitter
+        run: ./emitters/go/test.sh
+
   conformance:
     name: conformance
     runs-on: ubuntu-latest

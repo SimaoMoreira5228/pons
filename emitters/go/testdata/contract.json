@@ -1,0 +1,114 @@
+{
+  "ir_version": "0.2",
+  "info": {
+    "title": "Go Emitter Fixture",
+    "version": "1.0.0",
+    "servers": ["https://api.example.test"]
+  },
+  "types": {
+    "fixture::Status": {
+      "kind": "enum",
+      "name": ["status"],
+      "direction": "both",
+      "repr": {"kind": "string"},
+      "variants": [
+        {"wire": "active", "ident": ["active"], "payload": {"kind": "unit"}},
+        {"wire": "suspended", "ident": ["suspended"], "payload": {"kind": "unit"}}
+      ]
+    },
+    "fixture::UserHandle": {
+      "kind": "newtype",
+      "name": ["user", "handle"],
+      "direction": "both",
+      "inner": {"kind": "string"}
+    },
+    "fixture::Problem": {
+      "kind": "struct",
+      "openness": "reject",
+      "name": ["problem"],
+      "direction": "output",
+      "fields": [
+        {"wire": "code", "ident": ["code"], "ty": {"kind": "string"}, "presence": "required"},
+        {"wire": "message", "ident": ["message"], "ty": {"kind": "string"}, "presence": "required"}
+      ]
+    },
+    "fixture::User": {
+      "kind": "struct",
+      "openness": "reject",
+      "name": ["user"],
+      "direction": "output",
+      "fields": [
+        {"wire": "id", "ident": ["id"], "ty": {"kind": "int", "bits": 64, "signed": true, "wire": "number"}, "presence": "required"},
+        {"wire": "score", "ident": ["score"], "ty": {"kind": "int", "bits": 64, "signed": false, "wire": "number"}, "presence": "required"},
+        {"wire": "handle", "ident": ["handle"], "ty": {"ref": "fixture::UserHandle"}, "presence": "required"},
+        {"wire": "email", "ident": ["email"], "ty": {"kind": "nullable", "inner": {"kind": "string", "format": "email"}}, "presence": "required"},
+        {"wire": "nickname", "ident": ["nickname"], "ty": {"kind": "string"}, "presence": "optional"},
+        {"wire": "status", "ident": ["status"], "ty": {"ref": "fixture::Status"}, "presence": "required"},
+        {"wire": "tags", "ident": ["tags"], "ty": {"kind": "array", "item": {"kind": "string"}}, "presence": "required"},
+        {"wire": "labels", "ident": ["labels"], "ty": {"kind": "map", "key": {"kind": "string"}, "value": {"kind": "string"}}, "presence": "required"}
+      ]
+    },
+    "fixture::CreateUser": {
+      "kind": "struct",
+      "openness": "reject",
+      "name": ["create", "user"],
+      "direction": "input",
+      "fields": [
+        {"wire": "name", "ident": ["name"], "ty": {"kind": "string"}, "presence": "required"},
+        {"wire": "handle", "ident": ["handle"], "ty": {"ref": "fixture::UserHandle"}, "presence": "required"},
+        {"wire": "status", "ident": ["status"], "ty": {"ref": "fixture::Status"}, "presence": "required"},
+        {"wire": "nickname", "ident": ["nickname"], "ty": {"kind": "string"}, "presence": "optional"},
+        {"wire": "tags", "ident": ["tags"], "ty": {"kind": "array", "item": {"kind": "string"}}, "presence": "optional"}
+      ]
+    },
+    "fixture::UserQuery": {
+      "kind": "struct",
+      "openness": "reject",
+      "name": ["user", "query"],
+      "direction": "input",
+      "fields": [
+        {"wire": "limit", "ident": ["limit"], "ty": {"kind": "int", "bits": 32, "signed": true, "wire": "number"}, "presence": "optional"},
+        {"wire": "status", "ident": ["status"], "ty": {"ref": "fixture::Status"}, "presence": "optional"},
+        {"wire": "search", "ident": ["search"], "ty": {"kind": "string"}, "presence": "optional"}
+      ]
+    }
+  },
+  "auth_schemes": {
+    "session": {"kind": "bearer", "format": "jwt"},
+    "tenant": {"kind": "api_key", "in": "header", "name": "X-Tenant"}
+  },
+  "operations": [
+    {
+      "id": [["users"], ["get"]],
+      "method": "GET",
+      "path": [{"lit": "users"}, {"param": "id", "ty": {"kind": "string"}}],
+      "query": {"ref": "fixture::UserQuery"},
+      "headers": [
+        {"wire": "X-Request-ID", "ident": ["request", "id"], "ty": {"kind": "string"}, "presence": "optional"}
+      ],
+      "responses": [{"status": 200, "content": "json", "body": {"ref": "fixture::User"}}],
+      "errors": [
+        {"status": 404, "name": ["not", "found", "error"], "content": "json", "body": {"ref": "fixture::Problem"}}
+      ],
+      "auth": {"alternatives": [["session"]], "optional": false},
+      "semantics": {"safe": true, "idempotent": true}
+    },
+    {
+      "id": [["users"], ["create"]],
+      "method": "POST",
+      "path": [{"lit": "users"}],
+      "body": {"ty": {"ref": "fixture::CreateUser"}, "content": "json", "required": true},
+      "responses": [{"status": 201, "content": "json", "body": {"ref": "fixture::User"}}],
+      "auth": {"alternatives": [["session"]], "optional": false},
+      "semantics": {"safe": false, "idempotent": false}
+    },
+    {
+      "id": [["users"], ["list"]],
+      "method": "GET",
+      "path": [{"lit": "users"}],
+      "responses": [{"status": 200, "content": "json", "body": {"kind": "array", "item": {"ref": "fixture::User"}}}],
+      "auth": {"alternatives": [["tenant"]], "optional": false},
+      "semantics": {"safe": true, "idempotent": true}
+    }
+  ]
+}
