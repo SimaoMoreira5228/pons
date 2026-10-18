@@ -615,8 +615,6 @@ struct Row {
     lossy: [Expected; 2],
 }
 
-const TS_REFUSES_WEBSOCKET: &str = "the TypeScript emitter supports SSE and NDJSON streams only";
-
 const FIXTURES: [Row; 4] = [
     Row {
         file: "login.json",
@@ -639,14 +637,8 @@ const FIXTURES: [Row; 4] = [
     Row {
         file: "unsupported.json",
         carries: "unsupported",
-        strict: [
-            Expected::Refused(TS_REFUSES_WEBSOCKET),
-            Expected::Coverage(PRESERVED_LEVELS),
-        ],
-        lossy: [
-            Expected::Refused(TS_REFUSES_WEBSOCKET),
-            Expected::Coverage(PRESERVED_LEVELS),
-        ],
+        strict: [Expected::Coverage(PRESERVED_LEVELS); 2],
+        lossy: [Expected::Coverage(PRESERVED_LEVELS); 2],
     },
 ];
 
