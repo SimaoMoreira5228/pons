@@ -2537,7 +2537,7 @@ mod tests {
         "[key: string]: unknown };\n",
         "\n"
     );
-    const CLIENT_WITHOUT_DOCS: u64 = 0xa7a7_dff4_c84a_0433;
+    const CLIENT_WITHOUT_DOCS: u64 = 0x8e78_b447_958f_a184;
 
     #[test]
     fn a_document_that_documents_nothing_emits_the_bytes_it_emitted_before() {

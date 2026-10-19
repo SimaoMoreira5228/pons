@@ -497,7 +497,10 @@ async function fetchWithRetry(
   signal: AbortSignal | undefined,
 ): Promise<Response> {
   const configuredAttempts = options?.attempts ?? 1;
-  const attempts = idempotent && Number.isFinite(configuredAttempts) ? Math.max(1, Math.floor(configuredAttempts)) : 1;
+  const forced = options?.force === true;
+  const attempts = (idempotent || forced) && Number.isFinite(configuredAttempts)
+    ? Math.max(1, Math.floor(configuredAttempts))
+    : 1;
   let attempt = 0;
   while (true) {
     let response: Response;

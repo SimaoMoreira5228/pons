@@ -1233,7 +1233,7 @@ fn the_client_options_are_named_as_the_design_names_them() {
         r#"
 import { createClient, type CallOptions, type ClientOptions, type RetryOptions } from "./client.js";
 
-const retry: RetryOptions = { attempts: 2, backoffMs: 10, maxBackoffMs: 100, jitterMs: 5 };
+const retry: RetryOptions = { attempts: 2, backoffMs: 10, maxBackoffMs: 100, jitterMs: 5, force: true };
 const options: ClientOptions = {
   baseUrl: "https://api.example.test",
   timeoutMs: 1_000,
@@ -1258,9 +1258,11 @@ const oldTimeout: ClientOptions = { baseUrl: "https://api.example.test", timeout
 const oldCodecs: ClientOptions = { baseUrl: "https://api.example.test", opaqueCodecs: {} };
 // @ts-expect-error a call option is the same name as the client option
 const oldCall: CallOptions = { timeout: 50 };
+// @ts-expect-error force is a boolean, not the string the caller typed
+const wrongForce: RetryOptions = { force: "yes" };
 // @ts-expect-error the hooks live under transport
 const oldHooks: ClientOptions = { baseUrl: "https://api.example.test", interceptors: { request: () => {} } };
-console.log(oldTimeout, oldCodecs, oldCall, oldHooks);
+console.log(oldTimeout, oldCodecs, oldCall, oldHooks, wrongForce);
 "#,
     );
 }
