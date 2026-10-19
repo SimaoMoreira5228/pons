@@ -4,12 +4,9 @@ import com.pons.ir.AuthRequirement
 import com.pons.ir.AuthScheme
 import com.pons.ir.Diagnostic
 import com.pons.ir.DiagnosticSeverity
-import com.pons.ir.OAuthFlow
-import com.pons.ir.OAuthFlowKind
 import org.springframework.core.annotation.AnnotatedElementUtils
 import org.springframework.web.method.HandlerMethod
 import java.lang.reflect.AnnotatedElement
-import java.net.URI
 
 private val securityAnnotations = setOf(
     "org.springframework.security.access.prepost.PreAuthorize",
@@ -153,104 +150,9 @@ internal fun authScheme(annotation: PonsAuthScheme, diagnostics: MutableList<Dia
                 AuthScheme.CookieSessionScheme(annotation.cookie)
             }
         }
-        PonsAuthKind.OAUTH2 -> oauth2Scheme(annotation, diagnostics)
         PonsAuthKind.CUSTOM -> AuthScheme.CustomScheme(
             description = annotation.description.ifEmpty { annotation.id },
             adapter = annotation.adapter.ifEmpty { null },
         )
     }
-}
-
-private fun oauth2Scheme(
-    annotation: PonsAuthScheme,
-    diagnostics: MutableList<Diagnostic>,
-): AuthScheme? {
-    if (annotation.flows.isEmpty()) {
-        diagnostics += Diagnostic(
-            severity = DiagnosticSeverity.Error,
-            code = "SPRING-E024",
-            message = "the oauth2 scheme ${annotation.id} needs at least one flow",
-        )
-        return null
-    }
-    val kinds = mutableSetOf<PonsOAuthFlowKind>()
-    val flows = mutableListOf<OAuthFlow>()
-    for (flow in annotation.flows) {
-        if (!kinds.add(flow.kind)) {
-            diagnostics += Diagnostic(
-                severity = DiagnosticSeverity.Error,
-                code = "SPRING-E026",
-                message = "the oauth2 scheme ${annotation.id} declares the ${flow.kind} flow more than once",
-            )
-            return null
-        }
-        flows += oauthFlow(annotation.id, flow, diagnostics) ?: return null
-    }
-    return AuthScheme.OAuth2Scheme(flows.sortedBy { it.kind })
-}
-
-private fun oauthFlow(
-    scheme: String,
-    flow: PonsOAuthFlow,
-    diagnostics: MutableList<Diagnostic>,
-): OAuthFlow? {
-    val authorization = flow.authorizationUrl.takeIf { it.isNotEmpty() }
-    val token = flow.tokenUrl.takeIf { it.isNotEmpty() }
-    val complete = when (flow.kind) {
-        PonsOAuthFlowKind.AUTHORIZATION_CODE -> authorization != null && token != null
-        PonsOAuthFlowKind.IMPLICIT -> authorization != null && token == null
-        PonsOAuthFlowKind.CLIENT_CREDENTIALS, PonsOAuthFlowKind.PASSWORD -> authorization == null && token != null
-    }
-    if (!complete) {
-        diagnostics += Diagnostic(
-            severity = DiagnosticSeverity.Error,
-            code = "SPRING-E025",
-            message = "the ${flow.kind} flow of oauth2 scheme $scheme needs ${requiredUrls(flow.kind)}",
-        )
-        return null
-    }
-    for ((kind, url) in listOf("authorization" to authorization, "token" to token)) {
-        if (url != null && !absoluteHttps(url)) {
-            diagnostics += Diagnostic(
-                severity = DiagnosticSeverity.Error,
-                code = "SPRING-E027",
-                message = "the $kind URL of the ${flow.kind} flow of oauth2 scheme $scheme must be an absolute HTTPS URL",
-            )
-            return null
-        }
-    }
-    val scopes = linkedMapOf<String, String>()
-    for (scope in flow.scopes) {
-        if (scope.name.isEmpty()) {
-            diagnostics += Diagnostic(
-                severity = DiagnosticSeverity.Error,
-                code = "SPRING-E028",
-                message = "the ${flow.kind} flow of oauth2 scheme $scheme declares a scope without a name",
-            )
-            return null
-        }
-        scopes[scope.name] = scope.description
-    }
-    return OAuthFlow(
-        kind = when (flow.kind) {
-            PonsOAuthFlowKind.AUTHORIZATION_CODE -> OAuthFlowKind.AuthorizationCode
-            PonsOAuthFlowKind.CLIENT_CREDENTIALS -> OAuthFlowKind.ClientCredentials
-            PonsOAuthFlowKind.IMPLICIT -> OAuthFlowKind.Implicit
-            PonsOAuthFlowKind.PASSWORD -> OAuthFlowKind.Password
-        },
-        authorizationUrl = authorization,
-        tokenUrl = token,
-        scopes = scopes.toSortedMap(),
-    )
-}
-
-private fun requiredUrls(kind: PonsOAuthFlowKind): String = when (kind) {
-    PonsOAuthFlowKind.AUTHORIZATION_CODE -> "an authorization URL and a token URL"
-    PonsOAuthFlowKind.IMPLICIT -> "an authorization URL and no token URL"
-    PonsOAuthFlowKind.CLIENT_CREDENTIALS, PonsOAuthFlowKind.PASSWORD -> "a token URL and no authorization URL"
-}
-
-private fun absoluteHttps(url: String): Boolean {
-    val uri = runCatching { URI(url) }.getOrNull() ?: return false
-    return uri.scheme == "https" && !uri.host.isNullOrEmpty()
 }

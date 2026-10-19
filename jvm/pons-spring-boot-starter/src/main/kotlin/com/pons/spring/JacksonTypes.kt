@@ -506,20 +506,25 @@ internal class JacksonTypes(
             ?.using?.java == ToStringSerializer::class.java
 
     private fun openness(beanType: Class<*>, direction: Direction): ObjectOpenness {
-        val ignore = classInfo(beanType).getAnnotation(JsonIgnoreProperties::class.java)
-        val declared = ignore != null
-        val openAnnotation = ignore?.ignoreUnknown == true
-        if (direction == Direction.Output) {
-            return if (declared && !openAnnotation) ObjectOpenness.Reject else ObjectOpenness.PreserveOpaque
-        }
+        if (direction == Direction.Output) return ObjectOpenness.PreserveOpaque
+        val ignoreUnknown = classInfo(beanType)
+            .getAnnotation(JsonIgnoreProperties::class.java)
+            ?.ignoreUnknown == true
         val failOnUnknown = mapper.deserializationConfig.isEnabled(
             DeserializationFeature.FAIL_ON_UNKNOWN_PROPERTIES,
         )
-        val rejects = if (declared) !openAnnotation else failOnUnknown
+        val open = ignoreUnknown || !failOnUnknown
         if (direction == Direction.Both) {
-            return if (declared && rejects) ObjectOpenness.Reject else ObjectOpenness.PreserveOpaque
+            if (!open) {
+                diagnostics += Diagnostic(
+                    severity = DiagnosticSeverity.Warning,
+                    code = "SPRING-W008",
+                    message = "the type ${beanType.name} rejects unknown input members but also has an output direction; it is recorded as preserve_opaque",
+                )
+            }
+            return ObjectOpenness.PreserveOpaque
         }
-        return if (rejects) ObjectOpenness.Reject else ObjectOpenness.PreserveOpaque
+        return if (open) ObjectOpenness.PreserveOpaque else ObjectOpenness.Reject
     }
 
     private fun skipsNull(beanType: Class<*>): Boolean {

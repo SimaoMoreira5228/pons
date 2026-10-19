@@ -602,43 +602,37 @@ const WIDE_INTEGER_LOSSY: Levels = Levels {
     unsupported: &[],
 };
 
-#[derive(Clone, Copy)]
-enum Expected {
-    Coverage(Levels),
-    Refused(&'static str),
-}
-
 struct Row {
     file: &'static str,
     carries: &'static str,
-    strict: [Expected; 2],
-    lossy: [Expected; 2],
+    strict: [Levels; 2],
+    lossy: [Levels; 2],
 }
 
 const FIXTURES: [Row; 4] = [
     Row {
         file: "login.json",
         carries: "opaque",
-        strict: [Expected::Coverage(PRESERVED_LEVELS); 2],
-        lossy: [Expected::Coverage(PRESERVED_LEVELS); 2],
+        strict: [PRESERVED_LEVELS; 2],
+        lossy: [PRESERVED_LEVELS; 2],
     },
     Row {
         file: "exact.json",
         carries: "exact",
-        strict: [Expected::Coverage(EVERY_SUBJECT_EXACT); 2],
-        lossy: [Expected::Coverage(EVERY_SUBJECT_EXACT); 2],
+        strict: [EVERY_SUBJECT_EXACT; 2],
+        lossy: [EVERY_SUBJECT_EXACT; 2],
     },
     Row {
         file: "lossy.json",
         carries: "lossy",
-        strict: [Expected::Coverage(PRESERVED_LEVELS); 2],
-        lossy: [Expected::Coverage(WIDE_INTEGER_LOSSY); 2],
+        strict: [PRESERVED_LEVELS; 2],
+        lossy: [WIDE_INTEGER_LOSSY; 2],
     },
     Row {
         file: "unsupported.json",
         carries: "unsupported",
-        strict: [Expected::Coverage(PRESERVED_LEVELS); 2],
-        lossy: [Expected::Coverage(PRESERVED_LEVELS); 2],
+        strict: [PRESERVED_LEVELS; 2],
+        lossy: [PRESERVED_LEVELS; 2],
     },
 ];
 
@@ -679,20 +673,10 @@ fn every_target_classifies_every_fixture_the_same_way() {
             let mode = if lossy { "--lossy" } else { "--strict" };
             for (index, target) in BUILT_INS.iter().enumerate() {
                 let at = format!("{} ({}) {target} {mode}", row.file, row.carries);
-                match (expected[index], coverage_in(target, &input, lossy)) {
-                    (Expected::Coverage(levels), Ok(reported)) => {
-                        assert_eq!(coverage_levels(&reported), levels.levels(), "{at}");
-                    }
-                    (Expected::Refused(message), Err(actual)) => {
-                        assert_eq!(actual, message, "{at}");
-                    }
-                    (Expected::Coverage(_), Err(message)) => {
-                        panic!("{at} refused a document it must describe: {message}");
-                    }
-                    (Expected::Refused(_), Ok(reported)) => {
-                        panic!("{at} described a document it cannot: {reported}");
-                    }
-                }
+                let reported = coverage_in(target, &input, lossy).unwrap_or_else(|message| {
+                    panic!("{at} refused a document it must describe: {message}")
+                });
+                assert_eq!(coverage_levels(&reported), expected[index].levels(), "{at}");
             }
         }
     }
