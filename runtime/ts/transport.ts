@@ -119,7 +119,7 @@ export async function request<T, E>(
   const provides = spec.provides;
   const callOptions = spec.options;
   const idempotent = spec.idempotent === true;
-  const configuredTimeout = callOptions?.timeout ?? client.timeout;
+  const configuredTimeout = callOptions?.timeoutMs ?? client.timeoutMs;
   const timeoutMs = typeof configuredTimeout === "number" && Number.isFinite(configuredTimeout)
     ? Math.min(Math.max(configuredTimeout, 0), MAX_TIMER_DELAY)
     : undefined;
@@ -312,11 +312,11 @@ export async function request<T, E>(
           : encodedBody as BodyInit;
       }
     }
-    if (client.interceptors?.request) {
+    if (client.transport?.onRequest) {
       try {
-        await client.interceptors.request({ url, init });
+        await client.transport.onRequest({ url, init });
       } catch (cause) {
-        return err({ kind: "interceptor", phase: "request", cause });
+        return err({ kind: "transport", phase: "request", cause });
       }
     }
     init.redirect = "manual";
@@ -361,11 +361,11 @@ export async function request<T, E>(
     const response = redirectResult.response;
     const finalUrl = redirectResult.url;
     const finalInit = redirectResult.init;
-    if (client.interceptors?.response) {
+    if (client.transport?.onResponse) {
       try {
-        await client.interceptors.response({ response, url: finalUrl, init: finalInit });
+        await client.transport.onResponse({ response, url: finalUrl, init: finalInit });
       } catch (cause) {
-        return err({ kind: "interceptor", phase: "response", cause });
+        return err({ kind: "transport", phase: "response", cause });
       }
     }
     const responseContent = response.headers.get("content-type") ?? "";
@@ -497,7 +497,10 @@ async function fetchWithRetry(
   signal: AbortSignal | undefined,
 ): Promise<Response> {
   const configuredAttempts = options?.attempts ?? 1;
-  const attempts = idempotent && Number.isFinite(configuredAttempts) ? Math.max(1, Math.floor(configuredAttempts)) : 1;
+  const forced = options?.force === true;
+  const attempts = (idempotent || forced) && Number.isFinite(configuredAttempts)
+    ? Math.max(1, Math.floor(configuredAttempts))
+    : 1;
   let attempt = 0;
   while (true) {
     let response: Response;
