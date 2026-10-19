@@ -1125,21 +1125,18 @@ mod tests {
         assert!(transport.contains("kind: \"auth_adapter\""));
         assert!(transport.contains("attachment.headers"));
         assert!(client.contains("signal?: AbortSignal"));
-        assert!(client.contains("timeoutMs?: number"));
+        assert!(client.contains("timeout?: number"));
         assert!(client.contains("export type CallOptions"));
         assert!(client.contains("headers?: HeadersInit"));
         assert!(transport.contains("callOptions?.headers"));
-        assert!(transport.contains("callOptions?.timeoutMs ?? client.timeoutMs"));
+        assert!(transport.contains("callOptions?.timeout ?? client.timeout"));
         assert!(transport.contains("callOptions?.signal ?? client.signal"));
         assert!(auth.contains("options?: CallOptions"));
-        assert!(client.contains("export type Transport"));
-        assert!(client.contains("export type TransportRequestHook"));
-        assert!(client.contains("export type TransportResponseHook"));
+        assert!(client.contains("export type RequestInterceptor"));
+        assert!(client.contains("export type ResponseInterceptor"));
         assert!(client.contains("headers?: HeadersInit |"));
-        assert!(client.contains("transport?: Transport"));
-        assert!(transport.contains("client.transport?.onRequest"));
-        assert!(transport.contains("client.transport?.onResponse"));
-        assert!(transport.contains("kind: \"transport\""));
+        assert!(transport.contains("client.interceptors?.request"));
+        assert!(transport.contains("client.interceptors?.response"));
         assert!(client.contains("export type RetryOptions"));
         assert!(client.contains("retry?: RetryOptions | false"));
         assert!(transport.contains("fetchWithRetry"));
@@ -2537,7 +2534,7 @@ mod tests {
         "[key: string]: unknown };\n",
         "\n"
     );
-    const CLIENT_WITHOUT_DOCS: u64 = 0x8e78_b447_958f_a184;
+    const CLIENT_WITHOUT_DOCS: u64 = 0xfe23_265c_668c_2b42;
 
     #[test]
     fn a_document_that_documents_nothing_emits_the_bytes_it_emitted_before() {
