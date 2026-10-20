@@ -10,6 +10,16 @@ pub use pons_derive::{ApiError, Schema};
 pub use pons_ir as ir;
 pub use serde_json;
 
+#[cfg(any(
+    feature = "bytes",
+    feature = "chrono",
+    feature = "rust_decimal",
+    feature = "serde_json",
+    feature = "time",
+    feature = "uuid"
+))]
+mod foreign;
+
 pub trait Schema {
     fn schema(cx: &mut TypeCx, direction: Direction) -> TypeRef;
 }
@@ -318,12 +328,6 @@ fn string_schema() -> TypeRef {
 impl Schema for () {
     fn schema(_: &mut TypeCx, _: Direction) -> TypeRef {
         TypeRef::Inline(InlineType::Null)
-    }
-}
-
-impl Schema for serde_json::Value {
-    fn schema(_: &mut TypeCx, _: Direction) -> TypeRef {
-        TypeRef::Inline(InlineType::Any)
     }
 }
 
