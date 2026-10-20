@@ -436,3 +436,39 @@ fn the_exact_fixture_round_trip_stays_equivalent() {
     equivalent_ignoring_request_rejections(&original, &round_trip)
         .expect("the fixture round trip stays equivalent under the explicit policy");
 }
+
+#[test]
+fn pagination_descriptors_are_compared() {
+    let mut value = exact();
+    {
+        let operation = value["operations"]
+            .as_array_mut()
+            .expect("operations are an array")
+            .iter_mut()
+            .find(|operation| operation.get("query").is_some())
+            .expect("the fixture has a query operation");
+        operation["semantics"]["pagination"] = json!({
+            "request": {"kind": "cursor", "field": "limit"},
+            "items": "/items",
+            "next": "/next"
+        });
+    }
+    let left = document(value.clone());
+    equivalent(&left, &left).expect("a document is equivalent to itself");
+
+    value["operations"]
+        .as_array_mut()
+        .expect("operations are an array")
+        .iter_mut()
+        .find(|operation| operation.get("query").is_some())
+        .expect("the fixture has a query operation")["semantics"]["pagination"]["next"] =
+        json!("/next_cursor");
+    let right = document(value);
+    let errors = equivalent(&left, &right).expect_err("the next locator differs");
+    assert!(
+        errors
+            .iter()
+            .any(|error| error.path.contains("semantics/pagination")),
+        "{errors:?}"
+    );
+}

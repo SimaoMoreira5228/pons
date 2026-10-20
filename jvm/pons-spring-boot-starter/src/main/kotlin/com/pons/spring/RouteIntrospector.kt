@@ -12,17 +12,14 @@ import com.pons.ir.Direction
 import com.pons.ir.Doc
 import com.pons.ir.Field as IrField
 import com.pons.ir.FieldDefault
-import com.pons.ir.FieldFormat
 import com.pons.ir.HeaderParameter
 import com.pons.ir.InlineType
-import com.pons.ir.IntegerWire
 import com.pons.ir.Method as IrMethod
 import com.pons.ir.OperationSemantics
 import com.pons.ir.Origin
 import com.pons.ir.PathSegment
 import com.pons.ir.Presence
 import com.pons.ir.Response as IrResponse
-import com.pons.ir.ResponseHeader
 import com.pons.ir.ResponseStatus as IrResponseStatus
 import com.pons.ir.TypeRef
 import kotlinx.serialization.json.JsonPrimitive
@@ -484,48 +481,7 @@ internal class RouteIntrospector(
                 content = if (empty) ContentKind.Empty else content,
                 mediaType = if (empty) null else mediaType,
                 body = body,
-                headers = responseHeaders(handler),
             ),
-        )
-    }
-
-    private fun responseHeaders(handler: HandlerMethod): List<ResponseHeader> {
-        val seen = mutableSetOf<String>()
-        return handler.method.getAnnotationsByType(PonsResponseHeader::class.java)
-            .mapNotNull { annotation ->
-                if (annotation.name.isEmpty()) {
-                    diagnostics += Diagnostic(
-                        severity = DiagnosticSeverity.Error,
-                        code = "SPRING-E029",
-                        message = "a response header on ${handler} has no name",
-                    )
-                    null
-                } else if (!seen.add(annotation.name.lowercase())) {
-                    diagnostics += Diagnostic(
-                        severity = DiagnosticSeverity.Error,
-                        code = "SPRING-E030",
-                        message = "the response header ${annotation.name} is declared more than once on ${handler}",
-                    )
-                    null
-                } else {
-                    ResponseHeader(
-                        wire = annotation.name,
-                        ty = headerType(annotation.type),
-                        presence = if (annotation.required) Presence.Required else Presence.Optional,
-                    )
-                }
-            }
-            .sortedWith(compareBy({ it.wire.lowercase() }, { it.wire }))
-    }
-
-    private fun headerType(type: PonsHeaderType): TypeRef = when (type) {
-        PonsHeaderType.STRING -> TypeRef.Inline(InlineType.StringType())
-        PonsHeaderType.INTEGER -> TypeRef.Inline(
-            InlineType.IntType(bits = 64, signed = true, wire = IntegerWire.Number),
-        )
-        PonsHeaderType.BOOLEAN -> TypeRef.Inline(InlineType.BoolType)
-        PonsHeaderType.DATE_TIME -> TypeRef.Inline(
-            InlineType.StringType(format = FieldFormat.DateTime),
         )
     }
 

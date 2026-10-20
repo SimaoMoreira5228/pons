@@ -106,7 +106,7 @@ export async function websocket<Client, Server>(
 ): Promise<Result<WebSocketConnection<Client, Server>, ClientFailure>> {
   const callOptions = spec.options;
   const parentSignal = callOptions?.signal ?? client.signal;
-  const configuredTimeout = callOptions?.timeoutMs ?? client.timeoutMs;
+  const configuredTimeout = callOptions?.timeout ?? client.timeout;
   const timeoutMs = typeof configuredTimeout === "number" && Number.isFinite(configuredTimeout)
     ? Math.min(Math.max(configuredTimeout, 0), MAX_TIMER_DELAY)
     : undefined;

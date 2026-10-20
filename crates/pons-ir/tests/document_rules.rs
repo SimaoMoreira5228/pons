@@ -2275,19 +2275,174 @@ fn an_opaque_value_must_name_a_codec() {
     refuses(&document, "opaque codec cannot be empty");
 }
 
+fn paginated(request: Value, pagination: Value) -> Document {
+    serde_json::from_value(json!({
+        "ir_version": "0.2",
+        "info": {"title": "Example", "version": "1"},
+        "types": {
+            "EventQuery": {
+                "kind": "struct", "name": ["event", "query"], "direction": "input", "openness": "reject",
+                "fields": [
+                    {"wire": "cursor", "ident": ["cursor"], "ty": {"kind": "string"}, "presence": "optional"},
+                    {"wire": "offset", "ident": ["offset"], "ty": {"kind": "int", "bits": 32, "signed": false, "wire": "number"}, "presence": "optional"},
+                    {"wire": "limit", "ident": ["limit"], "ty": {"kind": "int", "bits": 16, "signed": false, "wire": "number"}, "presence": "optional"}
+                ]
+            },
+            "EventPage": {
+                "kind": "struct", "name": ["event", "page"], "direction": "output", "openness": "reject",
+                "fields": [
+                    {"wire": "items", "ident": ["items"], "ty": {"kind": "array", "item": {"kind": "string"}}, "presence": "required"},
+                    {"wire": "next", "ident": ["next"], "ty": {"kind": "nullable", "inner": {"kind": "string"}}, "presence": "optional"}
+                ]
+            }
+        },
+        "operations": [{
+            "id": [["events"], ["list"]],
+            "method": "GET",
+            "path": [{"lit": "events"}],
+            "query": request,
+            "responses": [{"status": 200, "content": "json", "body": {"ref": "EventPage"}}],
+            "auth": {"alternatives": [], "optional": false},
+            "semantics": {"safe": true, "idempotent": true, "pagination": pagination}
+        }]
+    }))
+    .unwrap()
+}
+
 #[test]
-fn semantics_refuse_a_pagination_the_ir_does_not_model() {
-    let mut raw: Value = serde_json::from_str(fixture_json()).unwrap();
-    raw["operations"][1]["semantics"]["pagination"] = json!({
-        "request": {"from": "query", "name": "cursor"},
-        "items": "/items",
-        "next": "/next_cursor"
-    });
-    let error = pons_ir::decode(&serde_json::to_vec(&raw).unwrap()).unwrap_err();
-    assert_eq!(
-        error.to_string(),
-        "operations[1].semantics.pagination: unknown field `pagination`, expected `safe` or `idempotent`"
+fn a_cursor_page_records_its_request_field_and_locators() {
+    let cursor = paginated(
+        json!({"ref": "EventQuery"}),
+        json!({
+            "request": {"kind": "cursor", "field": "cursor"},
+            "items": "/items",
+            "next": "/next",
+            "page_size": {"field": "limit", "default": 20, "maximum": 100}
+        }),
     );
+    cursor.validate().unwrap();
+
+    let offset = paginated(
+        json!({"ref": "EventQuery"}),
+        json!({
+            "request": {"kind": "offset", "field": "offset"},
+            "items": "/items"
+        }),
+    );
+    offset.validate().unwrap();
+}
+
+#[test]
+fn a_page_fields_must_name_the_operation_query_or_body() {
+    let missing = paginated(
+        json!({"ref": "EventQuery"}),
+        json!({
+            "request": {"kind": "cursor", "field": "after"},
+            "items": "/items"
+        }),
+    );
+    refuses(
+        &missing,
+        "pagination field \"after\" is not declared on the operation query or body",
+    );
+
+    let missing_size = paginated(
+        json!({"ref": "EventQuery"}),
+        json!({
+            "request": {"kind": "offset", "field": "offset"},
+            "items": "/items",
+            "page_size": {"field": "per_page"}
+        }),
+    );
+    refuses(
+        &missing_size,
+        "pagination field \"per_page\" is not declared on the operation query or body",
+    );
+}
+
+#[test]
+fn pagination_locators_are_json_pointers() {
+    let bad_items = paginated(
+        json!({"ref": "EventQuery"}),
+        json!({
+            "request": {"kind": "cursor", "field": "cursor"},
+            "items": "items"
+        }),
+    );
+    refuses(
+        &bad_items,
+        "pagination item locator: a JSON pointer must be empty or start with '/'",
+    );
+
+    let bad_next = paginated(
+        json!({"ref": "EventQuery"}),
+        json!({
+            "request": {"kind": "cursor", "field": "cursor"},
+            "items": "/items",
+            "next": "/next~2"
+        }),
+    );
+    refuses(
+        &bad_next,
+        "pagination next locator: a JSON pointer has an invalid escape",
+    );
+
+    let empty = paginated(
+        json!({"ref": "EventQuery"}),
+        json!({
+            "request": {"kind": "cursor", "field": "cursor"},
+            "items": ""
+        }),
+    );
+    empty.validate().unwrap();
+}
+
+#[test]
+fn a_page_size_default_cannot_exceed_its_maximum() {
+    let invalid = paginated(
+        json!({"ref": "EventQuery"}),
+        json!({
+            "request": {"kind": "offset", "field": "offset"},
+            "items": "/items",
+            "page_size": {"field": "limit", "default": 50, "maximum": 10}
+        }),
+    );
+    refuses(&invalid, "pagination page size default 50 exceeds its maximum 10");
+
+    let zero = paginated(
+        json!({"ref": "EventQuery"}),
+        json!({
+            "request": {"kind": "offset", "field": "offset"},
+            "items": "/items",
+            "page_size": {"field": "limit", "default": 0}
+        }),
+    );
+    refuses(&zero, "pagination page size default must be positive");
+}
+
+#[test]
+fn a_pagination_field_can_live_on_the_request_body() {
+    let mut document = paginated(
+        json!({"ref": "EventQuery"}),
+        json!({
+            "request": {"kind": "offset", "field": "offset"},
+            "items": "/items"
+        }),
+    );
+    {
+        let operation = &mut document.operations[0];
+        operation.method = pons_ir::Method::Post;
+        operation.query = None;
+        operation.body = Some(
+            serde_json::from_value(json!({
+                "ty": {"ref": "EventQuery"},
+                "content": "json",
+                "required": true
+            }))
+            .unwrap(),
+        );
+    }
+    document.validate().unwrap();
 }
 
 #[test]

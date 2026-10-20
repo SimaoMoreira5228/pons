@@ -1935,3 +1935,55 @@ fn operation_documentation_and_deprecation_are_reported() {
     assert_eq!(change.level, ChangeLevel::Info);
     assert_eq!(change.detail, "operation documentation changed");
 }
+
+#[test]
+fn pagination_descriptors_are_classified_when_added_removed_or_rewritten() {
+    let old: Document = serde_json::from_value(fixture()).unwrap();
+    let mut added = old.clone();
+    let operation = added
+        .operations
+        .iter_mut()
+        .find(|operation| operation.query.is_some())
+        .unwrap();
+    operation.semantics.pagination = Some(
+        serde_json::from_value(serde_json::json!({
+            "request": {"kind": "cursor", "field": "limit"},
+            "items": "/items",
+            "next": "/next"
+        }))
+        .unwrap(),
+    );
+    added.validate().unwrap();
+
+    let change = change_at(
+        &old,
+        &added,
+        "operations.events.watch.semantics.pagination",
+    );
+    assert_eq!(change.level, ChangeLevel::NonBreaking);
+    assert_eq!(change.detail, "pagination descriptor added");
+
+    let change = change_at(
+        &added,
+        &old,
+        "operations.events.watch.semantics.pagination",
+    );
+    assert_eq!(change.level, ChangeLevel::Breaking);
+    assert_eq!(change.detail, "pagination descriptor removed");
+
+    let mut rewritten = added.clone();
+    let operation = rewritten
+        .operations
+        .iter_mut()
+        .find(|operation| operation.query.is_some())
+        .unwrap();
+    operation.semantics.pagination.as_mut().unwrap().request =
+        serde_json::from_value(serde_json::json!({"kind": "offset", "field": "limit"})).unwrap();
+    let change = change_at(
+        &added,
+        &rewritten,
+        "operations.events.watch.semantics.pagination",
+    );
+    assert_eq!(change.level, ChangeLevel::Breaking);
+    assert_eq!(change.detail, "pagination request encoding changed");
+}

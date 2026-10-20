@@ -1021,13 +1021,11 @@ mod tests {
         );
         let mut paginated: serde_json::Value =
             serde_json::from_str(include_str!("../../../fixtures/login.json")).unwrap();
-        paginated["operations"][1]["semantics"]["pagination"] =
-            serde_json::json!({ "kind": "opaque" });
-        let refused = pons_ir::decode(paginated.to_string().as_bytes()).unwrap_err();
-        assert!(
-            refused.to_string().contains("semantics.pagination"),
-            "{refused}"
-        );
+        paginated["operations"][1]["semantics"]["pagination"] = serde_json::json!({
+            "request": {"kind": "cursor", "field": "limit"},
+            "items": "/items"
+        });
+        pons_ir::decode(paginated.to_string().as_bytes()).unwrap();
         let mut supported = manifest;
         supported.capabilities.opaque = true;
         assert!(
