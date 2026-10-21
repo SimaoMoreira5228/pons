@@ -1,9 +1,14 @@
 mod config;
+mod contract;
 mod emit;
+mod example;
 mod export;
 mod file;
 mod init;
+mod live;
+mod mutate;
 mod options;
+mod pattern;
 
 use std::env;
 use std::ffi::OsString;
@@ -17,7 +22,7 @@ use pons_plugin::EmitMode;
 
 use options::{EmitArgs, validation_backend};
 
-const HELP: &str = "Usage: pons <command> [arguments]\n\nCommands:\n  init [path]                                  Write a starter pons.toml (default pons.toml)\n  export                                       Run the [frontend] command and write project.ir\n  check <ir.json>                              Validate an IR document\n  fmt <ir.json>                                Rewrite an IR document in canonical form\n  diff <old.json> <new.json>                   Classify changes between two IR documents\n  emit --target <name> [ir.json] [output-dir] [--strict|--lossy] [--errors <neverthrow|throw>] [--validation <backend>] [--coverage <relative-file>] [--dump-request <relative-file>]\n                                                Generate files (built-in: ts, openapi)\n      --strict                                 Reject unsupported/lossy coverage; opaque is allowed on ts/openapi, and on a plugin that declares it (default)\n      --lossy                                  Emit non-exact coverage with warnings\n      --errors <neverthrow|throw>              TypeScript target only: neverthrow (default), throw\n      --validation <backend>                   TypeScript target only: none, builtin, zod, valibot, arktype, typebox, yup, superstruct\n      --coverage <relative-file>               Write emitter coverage as JSON\n      --dump-request <relative-file>           Write the emit request as JSON, and run no emitter\n\n  A document and an output directory may come from pons.toml, so \"emit --target ts\" is enough\n  there. A flag beats the file, and the file beats the default.\n\n  pons.toml names the frontend that produces the IR:\n    [frontend]\n    kind = \"axum\"        # axum or spring\n    command = \"cargo pons export\"\n  A missing command defaults to \"cargo pons export\" for axum and \"./gradlew ponsExport\"\n  for spring. export writes project.ir, and no server starts.\n\nExit codes:\n  0  success, and a diff that found nothing to report\n  1  diff only: the contract changed, but nothing in it is breaking\n  2  diff only: the new contract has a breaking change\n  3  diff only: the new contract is invalid\n  4  the arguments are wrong, and so is a pons.toml that does not parse or that names a key its\n     table does not hold and a value its option does not take\n  5  the tool could not do its job: an unreadable or malformed document, a\n     check/fmt validation failure, a frontend/init failure, or an emit failure\n";
+const HELP: &str = "Usage: pons <command> [arguments]\n\nCommands:\n  init [path]                                  Write a starter pons.toml (default pons.toml)\n  export                                       Run the [frontend] command and write project.ir\n  check <ir.json>                              Validate an IR document\n  fmt <ir.json>                                Rewrite an IR document in canonical form\n  diff <old.json> <new.json>                   Classify changes between two IR documents\n  test <ir.json> --base-url <url> [--timeout <seconds>]\n                                                Generate requests and check them against a running server\n                                                (default timeout: 10 seconds)\n  emit --target <name> [ir.json] [output-dir] [--strict|--lossy] [--errors <neverthrow|throw>] [--validation <backend>] [--coverage <relative-file>] [--dump-request <relative-file>]\n                                                Generate files (built-in: ts, openapi)\n      --strict                                 Reject unsupported/lossy coverage; opaque is allowed on ts/openapi, and on a plugin that declares it (default)\n      --lossy                                  Emit non-exact coverage with warnings\n      --errors <neverthrow|throw>              TypeScript target only: neverthrow (default), throw\n      --validation <backend>                   TypeScript target only: none, builtin, zod, valibot, arktype, typebox, yup, superstruct\n      --coverage <relative-file>               Write emitter coverage as JSON\n      --dump-request <relative-file>           Write the emit request as JSON, and run no emitter\n\n  A document and an output directory may come from pons.toml, so \"emit --target ts\" is enough\n  there. A flag beats the file, and the file beats the default.\n\n  pons.toml names the frontend that produces the IR:\n    [frontend]\n    kind = \"axum\"        # axum or spring\n    command = \"cargo pons export\"\n  A missing command defaults to \"cargo pons export\" for axum and \"./gradlew ponsExport\"\n  for spring. export writes project.ir, and no server starts.\n\nExit codes:\n  0  success, and a diff that found nothing to report\n  1  diff only: the contract changed, but nothing in it is breaking\n  2  diff only: the new contract has a breaking change\n  3  diff only: the new contract is invalid\n  4  the arguments are wrong, and so is a pons.toml that does not parse or that names a key its\n     table does not hold and a value its option does not take\n  5  the tool could not do its job: an unreadable or malformed document, a\n     check/fmt validation failure, a frontend/init failure, an emit failure, or\n     a test operation that did not match the contract or could not reach the server\n";
 
 fn main() -> ExitCode {
     match run(env::args_os().skip(1).collect()) {
@@ -74,6 +79,9 @@ fn run(args: Vec<OsString>) -> Result<(), CliError> {
             )));
         }
         return export::run();
+    }
+    if command == "test" {
+        return contract::run(&args[1..]);
     }
     if command == "diff" {
         if args.len() != 3 {
