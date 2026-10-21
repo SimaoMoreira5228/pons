@@ -901,7 +901,7 @@ if (unexpected.failure.kind !== "unexpected_http" || unexpected.failure.status !
             "auth_adapter",
             "auth_source",
             "opaque_codec",
-            "interceptor",
+            "transport",
             "protocol",
             "unexpected_http",
             "auth",

@@ -17,7 +17,10 @@ pub use coverage::{CoverageLevel, canonical_coverage, coverage_subjects, strict_
 pub use diff::{Change, ChangeLevel, Diff, Validity};
 pub use document::{DecodeError, Document, Info, ValidationError, decode};
 pub use equivalence::{EquivalenceError, equivalent, equivalent_ignoring_request_rejections};
-pub use ext::RESERVED_PREFIX as EXT_RESERVED_PREFIX;
+pub use ext::{
+    ALIAS as EXT_ALIAS, OPEN_VARIANT as EXT_OPEN_VARIANT, RESERVED_PREFIX as EXT_RESERVED_PREFIX,
+    validate_extension_key,
+};
 pub use media::{is_valid_media_type, media_type_matches};
 pub use operation::{
     ApiKeyLocation, AuthRequirement, AuthScheme, Body, ContentKind, CredentialLocator,
@@ -33,8 +36,8 @@ pub use reported_coverage::{
 };
 pub use types::{
     Access, ByteEncoding, DecimalWire, Diagnostic, DiagnosticSeverity, Direction, Doc, EnumRepr,
-    Field, FieldDefault, FieldFormat, InlineType, IntegerWire, Name, NamedRef, ObjectOpenness,
-    OpaqueWire, Presence, TypeDef, TypeKind, TypeRef, Variant, VariantPayload,
+    Fidelity, Field, FieldDefault, FieldFormat, InlineType, IntegerWire, Name, NamedRef,
+    ObjectOpenness, OpaqueWire, Presence, TypeDef, TypeKind, TypeRef, Variant, VariantPayload,
 };
 pub use value::validate_value;
 pub use violation::{IntegerProblem, Violation};

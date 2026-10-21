@@ -93,7 +93,11 @@ internal class ErrorIntrospector(
         }
         val body = unwrap(ResolvableType.forMethodReturnType(method))
         val bodyType = body.resolve()
+        val declared = bodyType
+            ?.let { AnnotatedElementUtils.findMergedAnnotation(it, PonsError::class.java) }
+            ?.takeIf { it.headers.isNotEmpty() }
         val content = when {
+            declared != null -> errorContent(declared.content)
             bodyType == null || bodyType == Void::class.java || bodyType == Unit::class.java ->
                 ErrorContent.Empty
             bodyType == ProblemDetail::class.java -> ErrorContent.ProblemJson
@@ -116,6 +120,8 @@ internal class ErrorIntrospector(
             name = name,
             content = content,
             body = bodyRef,
+            headers = declared?.let { errorHeaders(it.headers) }.orEmpty(),
+            retryable = declared?.retryable,
         )
     }
 
@@ -147,27 +153,32 @@ internal class ErrorIntrospector(
             )
             return null
         }
-        val content = when (annotation.content) {
-            PonsErrorContent.JSON -> ErrorContent.Json
-            PonsErrorContent.PROBLEM_JSON -> ErrorContent.ProblemJson
-            PonsErrorContent.TEXT -> ErrorContent.Text
-            PonsErrorContent.EMPTY -> ErrorContent.Empty
-        }
+        val content = errorContent(annotation.content)
         return ErrorResponse(
             status = ErrorStatus.Exact(annotation.status),
             name = typeName(beanType),
             content = content,
             body = if (content == ErrorContent.Empty) null else types.named(beanType, Direction.Output),
-            headers = annotation.headers.map { header ->
-                ResponseHeader(
-                    wire = header.name,
-                    ty = TypeRef.Inline(InlineType.StringType()),
-                    presence = if (header.required) Presence.Required else Presence.Optional,
-                )
-            },
+            headers = errorHeaders(annotation.headers),
             retryable = annotation.retryable,
         )
     }
+
+    private fun errorContent(content: PonsErrorContent): ErrorContent = when (content) {
+        PonsErrorContent.JSON -> ErrorContent.Json
+        PonsErrorContent.PROBLEM_JSON -> ErrorContent.ProblemJson
+        PonsErrorContent.TEXT -> ErrorContent.Text
+        PonsErrorContent.EMPTY -> ErrorContent.Empty
+    }
+
+    private fun errorHeaders(headers: Array<PonsErrorHeader>): List<ResponseHeader> =
+        headers.map { header ->
+            ResponseHeader(
+                wire = header.name,
+                ty = TypeRef.Inline(InlineType.StringType()),
+                presence = if (header.required) Presence.Required else Presence.Optional,
+            )
+        }.sortedWith(compareBy({ it.wire.lowercase() }, { it.wire }))
 
     private fun unwrap(type: ResolvableType): ResolvableType {
         val raw = type.resolve()

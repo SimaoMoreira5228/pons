@@ -2,6 +2,7 @@ package com.pons.spring.testapp
 
 import com.fasterxml.jackson.annotation.JsonFormat
 import com.fasterxml.jackson.annotation.JsonIgnore
+import com.fasterxml.jackson.annotation.JsonIgnoreProperties
 import com.fasterxml.jackson.annotation.JsonInclude
 import com.fasterxml.jackson.annotation.JsonProperty
 import com.fasterxml.jackson.annotation.JsonSubTypes
@@ -13,8 +14,14 @@ import com.pons.spring.PonsAuth
 import com.pons.spring.PonsAuthKind
 import com.pons.spring.PonsAuthScheme
 import com.pons.spring.PonsError
+import com.pons.spring.PonsErrorHeader
 import com.pons.spring.PonsErrors
+import com.pons.spring.PonsHeaderType
+import com.pons.spring.PonsOAuthFlow
+import com.pons.spring.PonsOAuthFlowKind
+import com.pons.spring.PonsOAuthScope
 import com.pons.spring.PonsOperation
+import com.pons.spring.PonsResponseHeader
 import com.pons.spring.Provides
 import org.springframework.context.annotation.Bean
 import org.springframework.context.annotation.Configuration
@@ -37,6 +44,23 @@ import java.time.Instant
 @Configuration(proxyBeanMethods = false)
 @EnableWebMvc
 @PonsAuthScheme(id = "session", kind = PonsAuthKind.BEARER, format = "jwt")
+@PonsAuthScheme(
+    id = "oauth",
+    kind = PonsAuthKind.OAUTH2,
+    flows = [
+        PonsOAuthFlow(
+            kind = PonsOAuthFlowKind.AUTHORIZATION_CODE,
+            authorizationUrl = "https://auth.example.test/authorize",
+            tokenUrl = "https://auth.example.test/token",
+            scopes = [PonsOAuthScope(name = "profile:read", description = "Read the profile")],
+        ),
+        PonsOAuthFlow(
+            kind = PonsOAuthFlowKind.CLIENT_CREDENTIALS,
+            tokenUrl = "https://auth.example.test/token",
+            scopes = [PonsOAuthScope(name = "profile:read", description = "Read the profile")],
+        ),
+    ],
+)
 class TestApplication {
     @Bean
     fun objectMapper(): ObjectMapper = jacksonObjectMapper()
@@ -61,6 +85,7 @@ data class LoginRequest(
     val rememberMe: Boolean = false,
 )
 
+@JsonIgnoreProperties(ignoreUnknown = false)
 data class Session(
     val token: String,
     val expiresAt: Instant,
@@ -102,7 +127,10 @@ data class SmsNotification(val number: String) : Notification()
 @PonsError(status = 401)
 data class InvalidCredentials(val code: String = "invalid_credentials")
 
-@PonsError(status = 423)
+@PonsError(
+    status = 423,
+    headers = [PonsErrorHeader(name = "Retry-After", required = true)],
+)
 data class AccountLocked(
     val code: String = "locked",
     val retryAfterSecs: Int,
@@ -137,6 +165,8 @@ class UserController {
     @GetMapping("/{id}", produces = [MediaType.APPLICATION_JSON_VALUE])
     @PonsOperation(name = "users.get", summary = "Read a user.")
     @PonsAuth(scheme = "session")
+    @PonsResponseHeader(name = "X-Request-Id", required = true)
+    @PonsResponseHeader(name = "Cache-Control", type = PonsHeaderType.STRING)
     fun get(
         @PathVariable id: Long,
         @RequestParam(required = false) verbose: Boolean?,
@@ -153,6 +183,7 @@ class UserController {
 
 @RestController
 @RequestMapping("/notifications")
+@PonsAuth(scheme = "oauth", scopes = ["profile:read"])
 class NotificationController {
     @GetMapping("/latest", produces = [MediaType.APPLICATION_JSON_VALUE])
     @PonsOperation(name = "notifications.latest", summary = "Read the latest notification.")

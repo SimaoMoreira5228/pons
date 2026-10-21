@@ -372,12 +372,28 @@
     "Diagnostic": {
       "type": "object",
       "properties": {
+        "capability": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "code": {
           "type": "string"
         },
         "ext": {
           "type": "object",
           "additionalProperties": true
+        },
+        "fidelity": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Fidelity"
+            },
+            {
+              "type": "null"
+            }
+          ]
         },
         "message": {
           "type": "string"
@@ -622,6 +638,15 @@
             "default"
           ]
         }
+      ]
+    },
+    "Fidelity": {
+      "type": "string",
+      "enum": [
+        "exact",
+        "opaque",
+        "lossy",
+        "unsupported"
       ]
     },
     "Field": {

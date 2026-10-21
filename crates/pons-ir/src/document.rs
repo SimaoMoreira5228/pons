@@ -234,6 +234,10 @@ fn scan_opaque_references(
 }
 
 impl Document {
+    pub fn extension_namespaces(&self) -> BTreeSet<String> {
+        crate::ext::document_namespaces(self)
+    }
+
     pub fn canonicalize(&mut self) {
         self.types
             .values_mut()

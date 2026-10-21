@@ -430,7 +430,15 @@ if (Object.getPrototypeOf(value) !== null) throw new Error("enum prototype was c
 fn opaque_values_require_a_runtime_codec_in_strict_mode() {
     let document = opaque_document();
     let strict = emit_with_strategy(&document, EmitMode::Strict, ErrorStrategy::Throw).unwrap();
-    assert!(strict.warnings.is_empty());
+    assert_eq!(
+        strict.warnings,
+        vec![
+            "TypeScript does not understand the extension namespace test.example.source/v1, so the \
+             emitted client ignores it"
+                .to_owned()
+        ],
+        "the fixture carries one extension namespace the client cannot read"
+    );
     let strict_client = strict
         .files
         .iter()
@@ -439,7 +447,7 @@ fn opaque_values_require_a_runtime_codec_in_strict_mode() {
     assert!(
         strict_client
             .content
-            .contains("opaqueCodecs: OpaqueCodecRegistry")
+            .contains("codecs: OpaqueCodecRegistry")
     );
     assert!(strict_client.content.contains("required: true"));
     let strict_codec = strict
@@ -467,11 +475,7 @@ fn opaque_values_require_a_runtime_codec_in_strict_mode() {
         .iter()
         .find(|file| file.path == "client.ts")
         .unwrap();
-    assert!(
-        client
-            .content
-            .contains("opaqueCodecs?: OpaqueCodecRegistry")
-    );
+    assert!(client.content.contains("codecs?: OpaqueCodecRegistry"));
     let codec = output
         .files
         .iter()
@@ -499,11 +503,7 @@ fn orphan_opaque_type_does_not_require_a_runtime_codec_in_strict_mode() {
         .iter()
         .find(|file| file.path == "client.ts")
         .unwrap();
-    assert!(
-        client
-            .content
-            .contains("opaqueCodecs?: OpaqueCodecRegistry")
-    );
+    assert!(client.content.contains("codecs?: OpaqueCodecRegistry"));
     assert!(client.content.contains("required: false"));
 }
 
@@ -528,11 +528,7 @@ fn unowned_common_error_opaque_does_not_require_a_runtime_codec_in_strict_mode()
         .iter()
         .find(|file| file.path == "client.ts")
         .unwrap();
-    assert!(
-        client
-            .content
-            .contains("opaqueCodecs?: OpaqueCodecRegistry")
-    );
+    assert!(client.content.contains("codecs?: OpaqueCodecRegistry"));
     assert!(client.content.contains("required: false"));
 
     let mut inherited = raw;
@@ -544,7 +540,7 @@ fn unowned_common_error_opaque_does_not_require_a_runtime_codec_in_strict_mode()
         .iter()
         .find(|file| file.path == "client.ts")
         .unwrap();
-    assert!(client.content.contains("opaqueCodecs: OpaqueCodecRegistry"));
+    assert!(client.content.contains("codecs: OpaqueCodecRegistry"));
     assert!(client.content.contains("required: true"));
 }
 
@@ -570,7 +566,7 @@ const codec = {
 };
 const client = createClient({
   baseUrl: "http://example.test",
-  opaqueCodecs: { "example.codec": codec },
+  codecs: { "example.codec": codec },
   fetch: async (_url, init) => {
     const body = JSON.parse(String(init?.body));
     if (body.email !== "encoded:person@example.test") throw new Error("request was not encoded");
@@ -635,13 +631,13 @@ const codec = {
     return `decoded:${String(value)}`;
   },
 };
-const opaqueCodecs: Record<string, typeof codec> = {};
-Object.defineProperty(opaqueCodecs, "__proto__", { value: codec, enumerable: true });
-if (!Object.hasOwn(opaqueCodecs, "__proto__")) throw new Error("test registry is not an own map");
+const codecs: Record<string, typeof codec> = {};
+Object.defineProperty(codecs, "__proto__", { value: codec, enumerable: true });
+if (!Object.hasOwn(codecs, "__proto__")) throw new Error("test registry is not an own map");
 
 const client = createClient({
   baseUrl: "http://example.test",
-  opaqueCodecs,
+  codecs,
   fetch: async (_url, init) => {
     const body = JSON.parse(String(init?.body));
     if (body.email !== "encoded:person@example.test") throw new Error("prototype codec was not used to encode");
@@ -662,7 +658,7 @@ Object.defineProperty(poisonedPrototype, "__proto__", {
 let fetched = false;
 const missing = createClient({
   baseUrl: "http://example.test",
-  opaqueCodecs: Object.create(poisonedPrototype),
+  codecs: Object.create(poisonedPrototype),
   fetch: async () => {
     fetched = true;
     throw new Error("request should not be sent");
@@ -692,7 +688,7 @@ import { createClient } from "./client.ts";
 const calls: string[] = [];
 const client = createClient({
   baseUrl: "http://example.test",
-  opaqueCodecs: {
+  codecs: {
     "flatten.codec": {
       encode(value: unknown, wire: string) {
         calls.push(`encode:${wire}`);
@@ -751,7 +747,7 @@ import { createClient } from "./client.ts";
 const calls: string[] = [];
 const client = createClient({
   baseUrl: "http://example.test",
-  opaqueCodecs: {
+  codecs: {
     "flatten.codec": {
       encode(value: unknown, wire: string) {
         calls.push(`encode:${wire}`);
@@ -808,7 +804,7 @@ import { createClient } from "./client.ts";
 const calls: string[] = [];
 const client = createClient({
   baseUrl: "http://example.test",
-  opaqueCodecs: {
+  codecs: {
     "flatten.codec": {
       encode(value: unknown, wire: string) {
         calls.push(`encode:${wire}`);
@@ -867,7 +863,7 @@ import { createClient } from "./client.ts";
 const calls: string[] = [];
 const client = createClient({
   baseUrl: "http://example.test",
-  opaqueCodecs: {
+  codecs: {
     "flatten.codec": {
       encode(value: unknown, wire: string) {
         calls.push(`flatten:encode:${wire}`);
@@ -907,7 +903,7 @@ if (calls.join(",") !== "flatten:encode:json,sibling:encode:json,flatten:decode:
 let fetched = false;
 const missing = createClient({
   baseUrl: "http://example.test",
-  opaqueCodecs: {
+  codecs: {
     "flatten.codec": {
       encode: (value: unknown) => value,
       decode: (value: unknown) => value,
@@ -958,7 +954,7 @@ const sent: string[] = [];
 let calls = 0;
 const client = createClient({
   baseUrl: "http://example.test",
-  opaqueCodecs: {
+  codecs: {
     "auth.codec": {
       encode: (value: unknown) => value,
       decode: (value: unknown) => `decoded:${String(value)}`,
@@ -1081,7 +1077,7 @@ import { createClient } from "./client.ts";
 
 const client = createClient({
   baseUrl: "https://example.test",
-  opaqueCodecs: {
+  codecs: {
     "example.codec": {
       encode: (value: unknown) => value,
       decode: (value: unknown) => `decoded:${String(value)}`,
@@ -2503,7 +2499,7 @@ await client.events.watch({ path: { cursor: "cursor" }, query: {}, headers: {} }
 }
 
 #[test]
-fn revalidates_cookie_api_key_origin_after_request_interceptors() {
+fn revalidates_cookie_api_key_origin_after_transport_request_hooks() {
     let mut document: pons_ir::Document =
         serde_json::from_str(include_str!("../../../fixtures/login.json")).unwrap();
     document.auth_schemes.insert(
@@ -2528,8 +2524,8 @@ import { createClient } from "./client.ts";
 let calls = 0;
 const client = createClient({
   baseUrl: "https://example.test",
-  interceptors: {
-    request: async ({ url }) => {
+  transport: {
+    onRequest: async ({ url }) => {
       if (url.pathname === "/auth/login") return;
       url.hostname = "idp.test";
     },
@@ -2789,7 +2785,7 @@ if (calls !== 1) throw new Error("cross-origin cookie reached fetch");
 }
 
 #[test]
-fn revalidates_captured_bearer_origin_after_request_interceptors() {
+fn revalidates_captured_bearer_origin_after_transport_request_hooks() {
     let mut document: pons_ir::Document =
         serde_json::from_str(include_str!("../../../fixtures/login.json")).unwrap();
     document.operations[0].provides.as_mut().unwrap().value = CredentialLocator::Header {
@@ -2806,8 +2802,8 @@ import { createClient } from "./client.ts";
 let calls = 0;
 const client = createClient({
   baseUrl: "https://example.test",
-  interceptors: {
-    request: async ({ url }) => {
+  transport: {
+    onRequest: async ({ url }) => {
       if (url.pathname === "/auth/login") return;
       url.hostname = "idp.test";
     },
@@ -2840,7 +2836,7 @@ if (calls !== 1) throw new Error("captured bearer reached a rewritten host");
 }
 
 #[test]
-fn revalidates_cookie_scope_after_request_interceptors() {
+fn revalidates_cookie_scope_after_transport_request_hooks() {
     let mut document: pons_ir::Document =
         serde_json::from_str(include_str!("../../../fixtures/login.json")).unwrap();
     document.auth_schemes.insert(
@@ -2869,8 +2865,8 @@ import { createClient } from "./client.ts";
 let calls = 0;
 const client = createClient({
   baseUrl: "https://example.test",
-  interceptors: {
-    request: async ({ url }) => {
+  transport: {
+    onRequest: async ({ url }) => {
       if (url.pathname === "/auth/login") return;
       url.protocol = "http:";
       url.pathname = "/events/watch";
@@ -2902,7 +2898,7 @@ if (calls !== 1) throw new Error("rewritten request reached fetch");
 }
 
 #[test]
-fn revalidates_cookie_origin_after_request_interceptors() {
+fn revalidates_cookie_origin_after_transport_request_hooks() {
     let mut document: pons_ir::Document =
         serde_json::from_str(include_str!("../../../fixtures/login.json")).unwrap();
     document.auth_schemes.insert(
@@ -2925,8 +2921,8 @@ import { createClient } from "./client.ts";
 let calls = 0;
 const client = createClient({
   baseUrl: "https://example.test",
-  interceptors: {
-    request: async ({ url }) => {
+  transport: {
+    onRequest: async ({ url }) => {
       if (url.pathname === "/auth/login") return;
       url.hostname = "idp.test";
     },
@@ -2957,7 +2953,7 @@ if (calls !== 1) throw new Error("cross-origin request reached fetch");
 }
 
 #[test]
-fn snapshots_cookie_scope_before_interceptor_revalidation() {
+fn snapshots_cookie_scope_before_transport_revalidation() {
     let mut document: pons_ir::Document =
         serde_json::from_str(include_str!("../../../fixtures/login.json")).unwrap();
     document.auth_schemes.insert(
@@ -2991,8 +2987,8 @@ let started!: () => void;
 const entered = new Promise<void>((resolve) => { started = resolve; });
 const client = createClient({
   baseUrl: "https://example.test",
-  interceptors: {
-    request: async ({ url }) => {
+  transport: {
+    onRequest: async ({ url }) => {
       if (url.pathname === "/auth/login") return;
       started();
       await gate;
@@ -3086,8 +3082,8 @@ const client = createClient({
       return {};
     },
   },
-  interceptors: {
-    request: async ({ url }) => {
+  transport: {
+    onRequest: async ({ url }) => {
       if (url.pathname === "/auth/login") return;
       url.protocol = "http:";
       url.pathname = "/events/watch";
@@ -3648,7 +3644,7 @@ await client.events.watch({ path: { cursor: "cursor" }, query: {}, headers: {} }
 }
 
 #[test]
-fn revalidates_custom_auth_origin_after_request_interceptors() {
+fn revalidates_custom_auth_origin_after_transport_request_hooks() {
     let mut document: pons_ir::Document =
         serde_json::from_str(include_str!("../../../fixtures/login.json")).unwrap();
     document.auth_schemes.insert(
@@ -3673,8 +3669,8 @@ const client = createClient({
   authAdapters: {
     adapter: async () => ({ headers: { "X-Secret": "secret" } }),
   },
-  interceptors: {
-    request: async ({ url }) => {
+  transport: {
+    onRequest: async ({ url }) => {
       if (url.pathname === "/auth/login") return;
       url.hostname = "idp.test";
     },
@@ -4715,7 +4711,7 @@ const codecCalls: string[] = [];
 let sent = "";
 const client = createClient({
   baseUrl: "https://example.test",
-  opaqueCodecs: {
+  codecs: {
     "trace.codec": {
       encode(value: unknown, wire: string) {
         codecCalls.push(`encode:${String(value)}`);

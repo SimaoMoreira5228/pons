@@ -2193,6 +2193,8 @@ fn every_object_carrying_an_extension_names_its_owner() {
         code: "C".into(),
         message: "m".into(),
         origin: None,
+        fidelity: None,
+        capability: None,
         ext: bad("note"),
     });
 

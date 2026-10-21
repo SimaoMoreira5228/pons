@@ -567,6 +567,8 @@ fn set_diagnostics(diagnostics: &mut Vec<Diagnostic>, severity: Option<Diagnosti
         code: "type.x".into(),
         message: "unresolved".into(),
         origin: None,
+        fidelity: None,
+        capability: None,
         ext: BTreeMap::new(),
     }));
 }
@@ -643,6 +645,8 @@ fn a_reworded_diagnostic_is_a_change_and_not_a_removal() {
             code: "type.x".into(),
             message: "the field is unresolved".into(),
             origin: None,
+            fidelity: None,
+            capability: None,
             ext: BTreeMap::new(),
         });
     assert!(errored.validate().is_err());
@@ -688,6 +692,8 @@ fn diagnostic_severity_transitions_key_on_the_transition() {
                 code: "type.x".into(),
                 message: "unresolved".into(),
                 origin: None,
+                fidelity: None,
+                capability: None,
                 ext: BTreeMap::new(),
             });
         document
