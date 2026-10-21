@@ -334,8 +334,6 @@ pub(crate) fn push_diagnostic(
         code: code.to_owned(),
         message,
         origin: None,
-        fidelity: None,
-        capability: None,
         ext: Default::default(),
     });
 }

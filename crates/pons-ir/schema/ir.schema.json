@@ -372,28 +372,12 @@
     "Diagnostic": {
       "type": "object",
       "properties": {
-        "capability": {
-          "type": [
-            "string",
-            "null"
-          ]
-        },
         "code": {
           "type": "string"
         },
         "ext": {
           "type": "object",
           "additionalProperties": true
-        },
-        "fidelity": {
-          "anyOf": [
-            {
-              "$ref": "#/$defs/Fidelity"
-            },
-            {
-              "type": "null"
-            }
-          ]
         },
         "message": {
           "type": "string"
@@ -638,15 +622,6 @@
             "default"
           ]
         }
-      ]
-    },
-    "Fidelity": {
-      "type": "string",
-      "enum": [
-        "exact",
-        "opaque",
-        "lossy",
-        "unsupported"
       ]
     },
     "Field": {
@@ -1353,16 +1328,6 @@
         "idempotent": {
           "type": "boolean"
         },
-        "pagination": {
-          "anyOf": [
-            {
-              "$ref": "#/$defs/Pagination"
-            },
-            {
-              "type": "null"
-            }
-          ]
-        },
         "safe": {
           "type": "boolean"
         }
@@ -1400,108 +1365,6 @@
         }
       },
       "additionalProperties": false
-    },
-    "PageSize": {
-      "type": "object",
-      "properties": {
-        "default": {
-          "type": [
-            "integer",
-            "null"
-          ],
-          "format": "uint32",
-          "minimum": 0
-        },
-        "field": {
-          "type": "string"
-        },
-        "maximum": {
-          "type": [
-            "integer",
-            "null"
-          ],
-          "format": "uint32",
-          "minimum": 0
-        }
-      },
-      "additionalProperties": false,
-      "required": [
-        "field"
-      ]
-    },
-    "Pagination": {
-      "type": "object",
-      "properties": {
-        "ext": {
-          "type": "object",
-          "additionalProperties": true
-        },
-        "items": {
-          "type": "string"
-        },
-        "next": {
-          "type": [
-            "string",
-            "null"
-          ]
-        },
-        "page_size": {
-          "anyOf": [
-            {
-              "$ref": "#/$defs/PageSize"
-            },
-            {
-              "type": "null"
-            }
-          ]
-        },
-        "request": {
-          "$ref": "#/$defs/PaginationRequest"
-        }
-      },
-      "additionalProperties": false,
-      "required": [
-        "request",
-        "items"
-      ]
-    },
-    "PaginationRequest": {
-      "oneOf": [
-        {
-          "type": "object",
-          "properties": {
-            "field": {
-              "type": "string"
-            },
-            "kind": {
-              "type": "string",
-              "const": "cursor"
-            }
-          },
-          "additionalProperties": false,
-          "required": [
-            "kind",
-            "field"
-          ]
-        },
-        {
-          "type": "object",
-          "properties": {
-            "field": {
-              "type": "string"
-            },
-            "kind": {
-              "type": "string",
-              "const": "offset"
-            }
-          },
-          "additionalProperties": false,
-          "required": [
-            "kind",
-            "field"
-          ]
-        }
-      ]
     },
     "PathSegment": {
       "anyOf": [

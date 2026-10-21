@@ -324,34 +324,6 @@ impl Document {
         found
     }
 
-    pub(super) fn struct_field_named(
-        &self,
-        ty: &TypeRef,
-        wire: &str,
-        visited: &mut BTreeSet<String>,
-    ) -> bool {
-        let TypeRef::Named(named) = ty else {
-            return false;
-        };
-        if named.variant.is_some() || !visited.insert(named.id.clone()) {
-            return false;
-        }
-        let found = match self.types.get(&named.id).map(|found| &found.definition) {
-            Some(TypeKind::Struct {
-                fields, flattened, ..
-            }) => {
-                fields.iter().any(|field| field.wire == wire)
-                    || flattened
-                        .iter()
-                        .any(|member| self.struct_field_named(member, wire, visited))
-            }
-            Some(TypeKind::Newtype { inner }) => self.struct_field_named(inner, wire, visited),
-            _ => false,
-        };
-        visited.remove(&named.id);
-        found
-    }
-
     pub(super) fn is_byte_type(&self, ty: &TypeRef, visited: &mut BTreeSet<String>) -> bool {
         match ty {
             TypeRef::Inline(InlineType::Bytes { .. }) => true,

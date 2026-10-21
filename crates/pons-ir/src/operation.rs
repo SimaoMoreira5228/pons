@@ -6,7 +6,6 @@ use std::borrow::Cow;
 
 use schemars::{JsonSchema, Schema, SchemaGenerator};
 
-use crate::pagination::Pagination;
 use crate::types::{Diagnostic, Doc, Name, Presence, TypeRef};
 
 pub fn operation_path(id: &[Name]) -> String {
@@ -742,8 +741,6 @@ fn find_line_separator(name: &str) -> Option<char> {
 pub struct OperationSemantics {
     pub safe: bool,
     pub idempotent: bool,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub pagination: Option<Pagination>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]

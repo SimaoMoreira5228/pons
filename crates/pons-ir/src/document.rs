@@ -234,10 +234,6 @@ fn scan_opaque_references(
 }
 
 impl Document {
-    pub fn extension_namespaces(&self) -> BTreeSet<String> {
-        crate::ext::document_namespaces(self)
-    }
-
     pub fn canonicalize(&mut self) {
         self.types
             .values_mut()
@@ -637,26 +633,6 @@ impl Document {
                     message: rejection.message(),
                 });
             }
-            if let Some(pagination) = &operation.semantics.pagination {
-                if let Err(message) = pagination.validate() {
-                    errors.push(ValidationError::InvalidValue {
-                        path: owner.clone(),
-                        message,
-                    });
-                }
-                for field in std::iter::once(pagination.request.field())
-                    .chain(pagination.page_size.iter().map(|size| size.field.as_str()))
-                {
-                    if !self.request_field_declared(operation, field) {
-                        errors.push(ValidationError::InvalidValue {
-                            path: owner.clone(),
-                            message: format!(
-                                "pagination field {field:?} is not declared on the operation query or body"
-                            ),
-                        });
-                    }
-                }
-            }
             self.visit_operation_refs(&owner, operation, &mut errors);
             if let Some(stream) = &operation.stream
                 && let Err(message) = stream.kind.validate()
@@ -982,18 +958,6 @@ impl Document {
         } else {
             Err(errors)
         }
-    }
-
-    fn request_field_declared(&self, operation: &Operation, wire: &str) -> bool {
-        if operation.query.as_ref().is_some_and(|query| {
-            crate::query::query_fields(self, query)
-                .is_ok_and(|fields| fields.iter().any(|field| field.wire == wire))
-        }) {
-            return true;
-        }
-        operation.body.as_ref().is_some_and(|body| {
-            self.struct_field_named(&body.ty, wire, &mut BTreeSet::new())
-        })
     }
 
     fn validate_credential_carriers(&self, errors: &mut Vec<ValidationError>) {

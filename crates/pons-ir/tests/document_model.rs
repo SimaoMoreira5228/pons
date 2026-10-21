@@ -378,8 +378,6 @@ fn error_diagnostics_block_document_validation() {
         code: "PONS-E999".into(),
         message: "unsupported boundary".into(),
         origin: None,
-        fidelity: None,
-        capability: None,
         ext: BTreeMap::new(),
     });
     assert!(

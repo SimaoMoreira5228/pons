@@ -2,8 +2,6 @@ use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use pons_plugin::PluginPin;
-
 use crate::CliError;
 use crate::options;
 
@@ -20,8 +18,7 @@ pub(crate) const OUT_DIR: &str = "out_dir";
 const TOP_LEVEL: &[&str] = &[EMIT_TABLE, FRONTEND_TABLE, "plugins", DOCUMENT_TABLE];
 const PROJECT: &[&str] = &[DOCUMENT, NAME];
 const FRONTEND: &[&str] = &[KIND, COMMAND];
-const PLUGINS: &[&str] = &["search", "pin"];
-const PIN: &[&str] = &["path", "sha256"];
+const PLUGINS: &[&str] = &["search"];
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum FrontendKind {
@@ -76,7 +73,6 @@ pub(crate) struct Config {
     frontend: Option<Frontend>,
     targets: BTreeMap<String, toml::Table>,
     search: Vec<PathBuf>,
-    pins: BTreeMap<String, PluginPin>,
 }
 
 impl Config {
@@ -109,10 +105,6 @@ impl Config {
 
     pub(crate) fn search(&self) -> &[PathBuf] {
         &self.search
-    }
-
-    pub(crate) fn pin(&self, target: &str) -> Option<&PluginPin> {
-        self.pins.get(target)
     }
 }
 
@@ -194,7 +186,6 @@ pub(crate) fn load(file: PathBuf) -> Result<Config, CliError> {
         frontend: None,
         targets: BTreeMap::new(),
         search: Vec::new(),
-        pins: BTreeMap::new(),
     };
     for (key, value) in &parsed {
         match key.as_str() {
@@ -203,11 +194,7 @@ pub(crate) fn load(file: PathBuf) -> Result<Config, CliError> {
                     project(&config.file, value)?.map(|document| under(&directory, document))
             }
             FRONTEND_TABLE => config.frontend = Some(frontend(&config.file, value)?),
-            "plugins" => {
-                let plugins = plugins(&config.file, value, &directory)?;
-                config.search = plugins.search;
-                config.pins = plugins.pins;
-            }
+            "plugins" => config.search = plugins(&config.file, value, &directory)?,
             EMIT_TABLE => config.targets = targets(&config.file, value, &directory)?,
             other => return Err(unknown_key(&config.file, "", other, TOP_LEVEL)),
         }
@@ -296,112 +283,31 @@ fn frontend(file: &Path, value: &toml::Value) -> Result<Frontend, CliError> {
     })
 }
 
-struct Plugins {
-    search: Vec<PathBuf>,
-    pins: BTreeMap<String, PluginPin>,
-}
-
-fn plugins(file: &Path, value: &toml::Value, directory: &Path) -> Result<Plugins, CliError> {
+fn plugins(file: &Path, value: &toml::Value, directory: &Path) -> Result<Vec<PathBuf>, CliError> {
     let table = table(file, "plugins", value)?;
     check_keys(file, "plugins", table, PLUGINS)?;
-    let search = match table.get("search") {
-        None => Vec::new(),
-        Some(value) => {
-            let Some(entries) = value.as_array() else {
-                return Err(config_error(
-                    file,
-                    "plugins",
-                    &format!("search is {}; it is an array of directories", kind(value)),
-                ));
-            };
-            let mut search = Vec::new();
-            for entry in entries {
-                let Some(entry) = entry.as_str() else {
-                    return Err(config_error(
-                        file,
-                        "plugins",
-                        &format!("search holds {}; it is a path to a directory", kind(entry)),
-                    ));
-                };
-                search.push(under(directory, PathBuf::from(entry)));
-            }
-            search
-        }
+    let Some(value) = table.get("search") else {
+        return Ok(Vec::new());
     };
-    let pins = match table.get("pin") {
-        None => BTreeMap::new(),
-        Some(value) => pins(file, value, directory)?,
+    let Some(entries) = value.as_array() else {
+        return Err(config_error(
+            file,
+            "plugins",
+            &format!("search is {}; it is an array of directories", kind(value)),
+        ));
     };
-    Ok(Plugins { search, pins })
-}
-
-fn pins(
-    file: &Path,
-    value: &toml::Value,
-    directory: &Path,
-) -> Result<BTreeMap<String, PluginPin>, CliError> {
-    let pins_table = table(file, "plugins.pin", value)?;
-    let mut pins = BTreeMap::new();
-    for (target, value) in pins_table {
-        let name = format!("plugins.pin.{target}");
-        if target.is_empty()
-            || !target
-                .bytes()
-                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
-        {
+    let mut search = Vec::new();
+    for entry in entries {
+        let Some(entry) = entry.as_str() else {
             return Err(config_error(
                 file,
-                "plugins.pin",
-                &format!("{target:?} cannot be a target name; a name is letters, digits, - and _"),
+                "plugins",
+                &format!("search holds {}; it is a path to a directory", kind(entry)),
             ));
-        }
-        let pin_table = table(file, &name, value)?;
-        check_keys(file, &name, pin_table, PIN)?;
-        let path = match pin_table.get("path") {
-            None => {
-                return Err(config_error(
-                    file,
-                    &name,
-                    "has no path; it is the executable to pin",
-                ));
-            }
-            Some(value) => value.as_str().ok_or_else(|| {
-                config_error(
-                    file,
-                    &name,
-                    &format!("path is {}; it is a path to an executable", kind(value)),
-                )
-            })?,
         };
-        let path = under(directory, PathBuf::from(path));
-        if !path.is_file() {
-            return Err(config_error(
-                file,
-                &name,
-                &format!("path {} is not a file", path.display()),
-            ));
-        }
-        let checksum = match pin_table.get("sha256") {
-            None => {
-                return Err(config_error(
-                    file,
-                    &name,
-                    "has no sha256; it is the checksum of the pinned executable",
-                ));
-            }
-            Some(value) => value.as_str().ok_or_else(|| {
-                config_error(
-                    file,
-                    &name,
-                    &format!("sha256 is {}; it is 64 hexadecimal characters", kind(value)),
-                )
-            })?,
-        };
-        let pin =
-            PluginPin::new(path, checksum).map_err(|error| config_error(file, &name, &error))?;
-        pins.insert(target.clone(), pin);
+        search.push(under(directory, PathBuf::from(entry)));
     }
-    Ok(pins)
+    Ok(search)
 }
 
 fn targets(

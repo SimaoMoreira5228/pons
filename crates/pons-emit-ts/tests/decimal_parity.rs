@@ -46,14 +46,7 @@ fn a_decimal_that_crosses_the_wire_as_a_string_is_exact() {
     let output = emit_with_mode(&priced_document("string"), EmitMode::Strict).unwrap();
     assert!(types_of(&output).contains("\"amount\": string"));
     assert!(output.coverage.lossy.is_empty());
-    assert_eq!(
-        output.warnings,
-        vec![
-            "TypeScript does not understand the extension namespace test.example.source/v1, so the \
-             emitted client ignores it"
-                .to_owned()
-        ]
-    );
+    assert!(output.warnings.is_empty());
 }
 
 #[test]
@@ -75,9 +68,6 @@ fn a_decimal_on_the_number_wire_is_a_number_to_both_targets() {
     assert_eq!(
         output.warnings,
         vec![
-            "TypeScript does not understand the extension namespace test.example.source/v1, so the \
-             emitted client ignores it"
-                .to_owned(),
             "TypeScript emits decimals that cross the wire as numbers at types.Price.fields[0].ty"
                 .to_owned()
         ]

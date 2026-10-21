@@ -12,10 +12,9 @@ use std::time::{Duration, Instant};
 use pons_ir::Document;
 use serde_json::Value;
 
-use crate::pin::PluginPin;
 use crate::protocol::{
-    EmitMode, EmitRequest, EmitResponse, EmitterManifest, validate_response_for_document,
-    validation_enabled,
+    EmitMode, EmitRequest, EmitResponse, EmitterManifest, PROTOCOL_VERSION,
+    validate_response_for_document, validation_enabled,
 };
 
 #[derive(Debug)]
@@ -50,7 +49,6 @@ pub fn invoke(
     options: BTreeMap<String, Value>,
     strict: bool,
     search: &[PathBuf],
-    pin: Option<&PluginPin>,
 ) -> Result<PluginResult, PluginError> {
     let mut canonical = ir.clone();
     canonical.canonicalize();
@@ -65,10 +63,7 @@ pub fn invoke(
     })?;
     let ir = &canonical;
 
-    let resolved = match pin {
-        Some(pin) => resolve_pinned(pin)?,
-        None => resolve_executable(executable, search)?,
-    };
+    let resolved = resolve_executable(executable, search)?;
     let manifest_output = run_command(&resolved.program, &resolved.command("describe"), None)?;
     ensure_success(
         executable,
@@ -96,9 +91,6 @@ pub fn invoke(
     manifest.validate(&ir.ir_version).map_err(PluginError)?;
     manifest.validate_options(&options).map_err(PluginError)?;
     let validation_requested = validation_enabled(&options);
-    let protocol = manifest
-        .protocol_version(validation_requested)
-        .map_err(PluginError)?;
     let capability_warnings: Vec<String> = manifest
         .unsupported_features(ir)
         .into_iter()
@@ -118,7 +110,7 @@ pub fn invoke(
         EmitMode::Lossy
     };
     let request = EmitRequest {
-        protocol,
+        protocol: PROTOCOL_VERSION,
         source_ir_version: ir.ir_version.clone(),
         mode,
         ir,
@@ -144,7 +136,6 @@ pub fn invoke(
         &response,
         ir,
         mode,
-        protocol,
         manifest.capabilities.opaque,
         validation_requested,
     )
@@ -459,19 +450,6 @@ fn resolve_executable(executable: &OsStr, search: &[PathBuf]) -> Result<Executab
     }
 }
 
-fn resolve_pinned(pin: &PluginPin) -> Result<Executable, PluginError> {
-    pin.verify().map_err(PluginError)?;
-    start_resolved(pin.path().to_path_buf(), pin_suffix(pin.path()))
-}
-
-fn pin_suffix(path: &std::path::Path) -> &'static str {
-    match path.extension().and_then(OsStr::to_str) {
-        Some("cmd") => ".cmd",
-        Some("bat") => ".bat",
-        _ => "",
-    }
-}
-
 fn find_in_directories(
     name: &str,
     directories: &[PathBuf],
@@ -737,7 +715,6 @@ mod tests {
             BTreeMap::new(),
             true,
             &[],
-            None,
         )
         .unwrap_err();
 
@@ -1054,7 +1031,6 @@ printf '%s' '{"name":"fixture","protokl":{"min":"3.0","max":"3.0"}}'
             BTreeMap::new(),
             false,
             &[],
-            None,
         )
         .unwrap_err();
         assert!(error.0.contains("invalid manifest"), "{}", error.0);
@@ -1066,7 +1042,7 @@ printf '%s' '{"name":"fixture","protokl":{"min":"3.0","max":"3.0"}}'
             "unparsable-response",
             r#"#!/bin/sh
 if [ "$1" = describe ]; then
-  printf '%s' '{"name":"fixture","version":"1.0.0","protocol":{"min":"3.0","max":"3.0"},"ir_version":{"min":"0.2","max":"0.2"},"capabilities":{"streaming":["sse"],"enum_reprs":["string","external","internal","adjacent","untagged"],"direction_split":true,"provides":true,"flattened":true,"opaque":true,"object_openness":["reject","preserve_typed","preserve_opaque"],"extensions":{"test.example.source/v1":"exact","test.example.large/v1":"exact"}}}'
+  printf '%s' '{"name":"fixture","version":"1.0.0","protocol":{"min":"3.0","max":"3.0"},"ir_version":{"min":"0.2","max":"0.2"},"capabilities":{"streaming":["sse"],"enum_reprs":["string","external","internal","adjacent","untagged"],"direction_split":true,"provides":true,"flattened":true,"opaque":true,"object_openness":["reject","preserve_typed","preserve_opaque"]}}'
   exit 0
 fi
 cat > /dev/null
@@ -1081,7 +1057,6 @@ printf '%s' '{"protocol":3,"coverag":{}}'
             BTreeMap::new(),
             false,
             &[],
-            None,
         )
         .unwrap_err();
         assert!(error.0.contains("invalid response"), "{}", error.0);
@@ -1104,7 +1079,7 @@ printf '%s' '{"protocol":3,"coverag":{}}'
             "refusing",
             r#"#!/bin/sh
 printf '%s\n' 'cannot model preserved objects' >&2
-printf '%s' '{"name":"fixture","version":"1.0.0","protocol":{"min":"3.0","max":"3.0"},"ir_version":{"min":"0.2","max":"0.2"},"capabilities":{"streaming":["sse"],"enum_reprs":["string","external","internal","adjacent","untagged"],"direction_split":true,"provides":true,"flattened":true,"object_openness":["reject","preserve_typed","preserve_opaque"],"extensions":{"test.example.source/v1":"exact","test.example.large/v1":"exact"}}}'
+printf '%s' '{"name":"fixture","version":"1.0.0","protocol":{"min":"3.0","max":"3.0"},"ir_version":{"min":"0.2","max":"0.2"},"capabilities":{"streaming":["sse"],"enum_reprs":["string","external","internal","adjacent","untagged"],"direction_split":true,"provides":true,"flattened":true,"object_openness":["reject","preserve_typed","preserve_opaque"]}}'
 "#,
         );
         let error = invoke(
@@ -1114,7 +1089,6 @@ printf '%s' '{"name":"fixture","version":"1.0.0","protocol":{"min":"3.0","max":"
             BTreeMap::new(),
             true,
             &[],
-            None,
         )
         .unwrap_err();
         assert!(error.0.contains("does not declare opaque value support"));
@@ -1129,7 +1103,7 @@ printf '%s' '{"name":"fixture","version":"1.0.0","protocol":{"min":"3.0","max":"
             "unclassified",
             r#"#!/bin/sh
 if [ "$1" = describe ]; then
-  printf '%s' '{"name":"fixture","version":"1.0.0","protocol":{"min":"3.0","max":"3.0"},"ir_version":{"min":"0.2","max":"0.2"},"capabilities":{"streaming":["sse"],"enum_reprs":["string","external","internal","adjacent","untagged"],"direction_split":true,"provides":true,"flattened":true,"opaque":true,"object_openness":["reject","preserve_typed","preserve_opaque"],"extensions":{"test.example.source/v1":"exact","test.example.large/v1":"exact"}}}'
+  printf '%s' '{"name":"fixture","version":"1.0.0","protocol":{"min":"3.0","max":"3.0"},"ir_version":{"min":"0.2","max":"0.2"},"capabilities":{"streaming":["sse"],"enum_reprs":["string","external","internal","adjacent","untagged"],"direction_split":true,"provides":true,"flattened":true,"opaque":true,"object_openness":["reject","preserve_typed","preserve_opaque"]}}'
   exit 0
 fi
 cat > /dev/null
@@ -1144,7 +1118,6 @@ printf '%s' '{"protocol":3,"files":[{"path":"client.ts","content":"generated"}],
             BTreeMap::new(),
             true,
             &[],
-            None,
         )
         .unwrap_err();
         assert!(error.0.contains("missing subjects"), "{}", error.0);

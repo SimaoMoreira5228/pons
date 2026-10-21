@@ -85,7 +85,6 @@ pub(crate) struct Resolved {
     pub(crate) mode: EmitMode,
     pub(crate) built: Built,
     pub(crate) search: Vec<PathBuf>,
-    pub(crate) pin: Option<pons_plugin::PluginPin>,
 }
 
 pub(crate) enum Built {
@@ -174,7 +173,6 @@ pub(crate) fn resolve(args: &EmitArgs, config: Option<&Config>) -> Result<Resolv
         search: config
             .map(|config| config.search().to_vec())
             .unwrap_or_default(),
-        pin: config.and_then(|config| config.pin(&args.target).cloned()),
     })
 }
 

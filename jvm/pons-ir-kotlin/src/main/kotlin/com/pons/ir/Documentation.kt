@@ -18,18 +18,8 @@ data class Diagnostic(
     val code: String,
     val message: String,
     val origin: Origin? = null,
-    val fidelity: Fidelity? = null,
-    val capability: String? = null,
     val ext: Map<String, JsonElement> = emptyMap(),
 )
-
-@Serializable
-enum class Fidelity {
-    @SerialName("exact") Exact,
-    @SerialName("opaque") Opaque,
-    @SerialName("lossy") Lossy,
-    @SerialName("unsupported") Unsupported,
-}
 
 @Serializable
 enum class DiagnosticSeverity {

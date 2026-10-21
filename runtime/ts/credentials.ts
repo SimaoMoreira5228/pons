@@ -1,11 +1,5 @@
-import type { AuthAdapter, AuthSchemeDefinition, CredentialMetadata, StoredCredential, TokenStore } from "../client.js";
+import type { AuthAdapter, AuthSchemeDefinition, CredentialMetadata, StoredCredential } from "../client.js";
 import type { AttachedQueryCredential, ConfiguredClient } from "./transport.js";
-
-export type TokenStorage = {
-  getItem(key: string): string | null;
-  setItem(key: string, value: string): void;
-  removeItem(key: string): void;
-};
 
 type CredentialLocator =
   | { from: "body"; pointer: string }
@@ -38,48 +32,6 @@ function storedCredential(stored: unknown): StoredCredential | undefined {
     }
   }
   return record;
-}
-
-export type StorageTokenStoreOptions = { key?: string; storage?: TokenStorage | undefined };
-
-const DEFAULT_TOKEN_KEY = "pons.token";
-
-function storageTokenStore(
-  name: "localStorage" | "sessionStorage",
-  options: StorageTokenStoreOptions,
-): TokenStore {
-  const storage = options.storage
-    ?? (globalThis as { localStorage?: TokenStorage; sessionStorage?: TokenStorage })[name];
-  if (storage === undefined) throw new Error(`${name} is not available in this environment`);
-  const key = options.key ?? DEFAULT_TOKEN_KEY;
-  return {
-    get() {
-      const raw = storage.getItem(key);
-      if (raw === null) return undefined;
-      let record: unknown;
-      try {
-        record = JSON.parse(raw);
-      } catch (cause) {
-        throw new Error(`the ${name} record for ${key} is not valid JSON`, { cause });
-      }
-      return storedCredential(record);
-    },
-    set(value, metadata) {
-      const record: StoredCredential = metadata === undefined ? { value } : { value, ...metadata };
-      storage.setItem(key, JSON.stringify(record));
-    },
-    clear() {
-      storage.removeItem(key);
-    },
-  };
-}
-
-export function localStorageTokenStore(options: StorageTokenStoreOptions = {}): TokenStore {
-  return storageTokenStore("localStorage", options);
-}
-
-export function sessionStorageTokenStore(options: StorageTokenStoreOptions = {}): TokenStore {
-  return storageTokenStore("sessionStorage", options);
 }
 
 export function credentialRecords(client: ConfiguredClient, scheme: string): CredentialValue[] {
