@@ -282,15 +282,18 @@ fn frontend(file: &Path, value: &toml::Value) -> Result<Frontend, CliError> {
         }
     };
     let command = match table.get(COMMAND) {
-        None => frontend_kind.default_command().map(str::to_owned).ok_or_else(|| {
-            config_error(
-                file,
-                FRONTEND_TABLE,
-                &format!(
-                    "{KIND} {name:?} needs a command; only axum and spring have a default"
-                ),
-            )
-        })?,
+        None => frontend_kind
+            .default_command()
+            .map(str::to_owned)
+            .ok_or_else(|| {
+                config_error(
+                    file,
+                    FRONTEND_TABLE,
+                    &format!(
+                        "{KIND} {name:?} needs a command; only axum and spring have a default"
+                    ),
+                )
+            })?,
         Some(value) => {
             let Some(command) = value.as_str() else {
                 return Err(config_error(

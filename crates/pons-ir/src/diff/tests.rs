@@ -1961,19 +1961,11 @@ fn pagination_descriptors_are_classified_when_added_removed_or_rewritten() {
     );
     added.validate().unwrap();
 
-    let change = change_at(
-        &old,
-        &added,
-        "operations.events.watch.semantics.pagination",
-    );
+    let change = change_at(&old, &added, "operations.events.watch.semantics.pagination");
     assert_eq!(change.level, ChangeLevel::NonBreaking);
     assert_eq!(change.detail, "pagination descriptor added");
 
-    let change = change_at(
-        &added,
-        &old,
-        "operations.events.watch.semantics.pagination",
-    );
+    let change = change_at(&added, &old, "operations.events.watch.semantics.pagination");
     assert_eq!(change.level, ChangeLevel::Breaking);
     assert_eq!(change.detail, "pagination descriptor removed");
 

@@ -76,6 +76,7 @@ pub(crate) fn build(path: &str, description: RouteDescription) -> BuiltOperation
                 method,
                 Method::Get | Method::Put | Method::Delete | Method::Head | Method::Options
             )),
+            pagination: None,
         },
         doc,
         origin: None,

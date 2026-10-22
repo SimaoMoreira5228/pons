@@ -991,9 +991,10 @@ impl Document {
         }) {
             return true;
         }
-        operation.body.as_ref().is_some_and(|body| {
-            self.struct_field_named(&body.ty, wire, &mut BTreeSet::new())
-        })
+        operation
+            .body
+            .as_ref()
+            .is_some_and(|body| self.struct_field_named(&body.ty, wire, &mut BTreeSet::new()))
     }
 
     fn validate_credential_carriers(&self, errors: &mut Vec<ValidationError>) {

@@ -2409,7 +2409,10 @@ fn a_page_size_default_cannot_exceed_its_maximum() {
             "page_size": {"field": "limit", "default": 50, "maximum": 10}
         }),
     );
-    refuses(&invalid, "pagination page size default 50 exceeds its maximum 10");
+    refuses(
+        &invalid,
+        "pagination page size default 50 exceeds its maximum 10",
+    );
 
     let zero = paginated(
         json!({"ref": "EventQuery"}),

@@ -1831,9 +1831,7 @@ fn a_config_file_supplies_the_document_and_the_output_directory() {
     assert!(directory.path().join("generated/types.ts").exists());
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
-        stderr.contains(
-            "does not understand the extension namespace test.example.source/v1"
-        ),
+        stderr.contains("does not understand the extension namespace test.example.source/v1"),
         "the only thing the run has to say is the extension the target ignores: {stderr}"
     );
 }

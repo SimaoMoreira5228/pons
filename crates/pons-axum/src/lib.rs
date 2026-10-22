@@ -545,6 +545,7 @@ mod tests {
             semantics: pons_ir::OperationSemantics {
                 safe: false,
                 idempotent: false,
+                pagination: None,
             },
             doc: None,
             origin: None,

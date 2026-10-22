@@ -296,7 +296,12 @@ fn diff_pagination(
                 );
             }
             if old.items != new.items || old.next != new.next {
-                add(diff, ChangeLevel::Breaking, &owner, "pagination locator changed");
+                add(
+                    diff,
+                    ChangeLevel::Breaking,
+                    &owner,
+                    "pagination locator changed",
+                );
             }
             if old.page_size != new.page_size {
                 add(
