@@ -1016,7 +1016,7 @@ fn emit_strict_rejects_a_target_that_cannot_carry_preserved_objects() {
         &plugin,
         r##"#!/bin/sh
 if [ "$1" = describe ]; then
-  printf '%s' '{"name":"fixture","version":"1.0.0","protocol":{"min":"3.0","max":"3.0"},"ir_version":{"min":"0.2","max":"0.2"},"capabilities":{"streaming":["sse"],"enum_reprs":["string","external","internal","adjacent","untagged"],"direction_split":true,"provides":true,"flattened":true,"object_openness":["reject","preserve_typed","preserve_opaque"]}}'
+  printf '%s' '{"name":"fixture","version":"1.0.0","protocol":{"min":"3.0","max":"3.0"},"ir_version":{"min":"0.2","max":"0.2"},"capabilities":{"streaming":["sse"],"enum_reprs":["string","external","internal","adjacent","untagged"],"direction_split":true,"provides":true,"flattened":true,"object_openness":["reject","preserve_typed","preserve_opaque"],"extensions":{"test.example.source/v1":"exact","test.example.large/v1":"exact"}}}'
 elif [ "$1" = emit ]; then
   request=$(cat)
   printf '%s' "$request" > "$PONS_REQUEST"
@@ -1094,7 +1094,7 @@ fn emit_runs_an_external_target_and_writes_its_files() {
         &plugin,
         r##"#!/bin/sh
 if [ "$1" = describe ]; then
-  printf '%s' '{"name":"fixture","version":"1.0.0","protocol":{"min":"3.0","max":"3.0"},"ir_version":{"min":"0.2","max":"0.2"},"capabilities":{"streaming":["sse"],"enum_reprs":["string","external","internal","adjacent","untagged"],"direction_split":true,"provides":true,"flattened":true,"opaque":true,"object_openness":["reject","preserve_typed","preserve_opaque"]}}'
+  printf '%s' '{"name":"fixture","version":"1.0.0","protocol":{"min":"3.0","max":"3.0"},"ir_version":{"min":"0.2","max":"0.2"},"capabilities":{"streaming":["sse"],"enum_reprs":["string","external","internal","adjacent","untagged"],"direction_split":true,"provides":true,"flattened":true,"opaque":true,"object_openness":["reject","preserve_typed","preserve_opaque"],"extensions":{"test.example.source/v1":"exact","test.example.large/v1":"exact"}}}'
 elif [ "$1" = emit ]; then
   i=0
   while [ "$i" -lt 2000 ]; do
@@ -1263,7 +1263,7 @@ fn emit_lossy_warns_about_coverage_an_external_target_reports_below_exact() {
         &plugin,
         r##"#!/bin/sh
 if [ "$1" = describe ]; then
-  printf '%s' '{"name":"python","version":"1.0.0","protocol":{"min":"3.0","max":"3.0"},"ir_version":{"min":"0.2","max":"0.2"},"capabilities":{"streaming":["sse"],"enum_reprs":["string","external","internal","adjacent","untagged"],"direction_split":true,"provides":true,"flattened":true,"opaque":true,"object_openness":["reject","preserve_typed","preserve_opaque"]}}'
+  printf '%s' '{"name":"python","version":"1.0.0","protocol":{"min":"3.0","max":"3.0"},"ir_version":{"min":"0.2","max":"0.2"},"capabilities":{"streaming":["sse"],"enum_reprs":["string","external","internal","adjacent","untagged"],"direction_split":true,"provides":true,"flattened":true,"opaque":true,"object_openness":["reject","preserve_typed","preserve_opaque"],"extensions":{"test.example.source/v1":"exact","test.example.large/v1":"exact"}}}'
 elif [ "$1" = emit ]; then
   cat > /dev/null
   printf '%s' '{"protocol":3,"files":[{"path":"client.py","content":"generated"}],"coverage":{"exact":["types.EventQuery","types.LoginError"],"opaque":["operations.auth.login","operations.events.watch","types.LoginRequest"],"lossy":["types.User"],"unsupported":[]}}'
@@ -1317,7 +1317,7 @@ fn emit_writes_both_coverage_blocks_for_a_validating_plugin() {
         &plugin,
         r##"#!/bin/sh
 if [ "$1" = describe ]; then
-  printf '%s' '{"name":"python","version":"1.0.0","protocol":{"min":"3.0","max":"3.0"},"ir_version":{"min":"0.2","max":"0.2"},"capabilities":{"streaming":["sse"],"enum_reprs":["string","external","internal","adjacent","untagged"],"direction_split":true,"provides":true,"flattened":true,"opaque":true,"object_openness":["reject","preserve_typed","preserve_opaque"],"validation":{"backends":["pydantic"],"capabilities":{"validation.scalars":"exact"}}},"option_schema":{"options":{"validation":{"type":"object"}}}}'
+  printf '%s' '{"name":"python","version":"1.0.0","protocol":{"min":"3.0","max":"3.0"},"ir_version":{"min":"0.2","max":"0.2"},"capabilities":{"streaming":["sse"],"enum_reprs":["string","external","internal","adjacent","untagged"],"direction_split":true,"provides":true,"flattened":true,"opaque":true,"object_openness":["reject","preserve_typed","preserve_opaque"],"extensions":{"test.example.source/v1":"exact","test.example.large/v1":"exact"},"validation":{"backends":["pydantic"],"capabilities":{"validation.scalars":"exact"}}},"option_schema":{"options":{"validation":{"type":"object"}}}}'
 elif [ "$1" = emit ]; then
   cat > /dev/null
   printf '%s' '{"protocol":3,"files":[{"path":"client.py","content":"generated"}],"coverage":{"exact":["types.EventQuery","types.LoginError"],"opaque":["operations.auth.login","operations.events.watch","types.LoginRequest","types.User"],"lossy":[],"unsupported":[]},"validation_coverage":{"exact":["operations.auth.login","operations.events.watch","types.EventQuery","types.LoginError","types.LoginRequest","types.User"],"lossy":[],"unsupported":[]}}'
@@ -1394,7 +1394,7 @@ fn emit_refuses_a_validating_plugin_that_omits_validation_coverage() {
         &plugin,
         r##"#!/bin/sh
 if [ "$1" = describe ]; then
-  printf '%s' '{"name":"python","version":"1.0.0","protocol":{"min":"3.0","max":"3.0"},"ir_version":{"min":"0.2","max":"0.2"},"capabilities":{"streaming":["sse"],"enum_reprs":["string","external","internal","adjacent","untagged"],"direction_split":true,"provides":true,"flattened":true,"opaque":true,"object_openness":["reject","preserve_typed","preserve_opaque"],"validation":{"backends":["pydantic"],"capabilities":{"validation.scalars":"exact"}}},"option_schema":{"options":{"validation":{"type":"object"}}}}'
+  printf '%s' '{"name":"python","version":"1.0.0","protocol":{"min":"3.0","max":"3.0"},"ir_version":{"min":"0.2","max":"0.2"},"capabilities":{"streaming":["sse"],"enum_reprs":["string","external","internal","adjacent","untagged"],"direction_split":true,"provides":true,"flattened":true,"opaque":true,"object_openness":["reject","preserve_typed","preserve_opaque"],"extensions":{"test.example.source/v1":"exact","test.example.large/v1":"exact"},"validation":{"backends":["pydantic"],"capabilities":{"validation.scalars":"exact"}}},"option_schema":{"options":{"validation":{"type":"object"}}}}'
 elif [ "$1" = emit ]; then
   cat > /dev/null
   printf '%s' '{"protocol":3,"files":[{"path":"client.py","content":"generated"}],"coverage":{"exact":["types.EventQuery","types.LoginError"],"opaque":["operations.auth.login","operations.events.watch","types.LoginRequest","types.User"],"lossy":[],"unsupported":[]}}'
@@ -1451,7 +1451,7 @@ fn emit_writes_an_empty_validation_block_when_the_plugin_disables_validation() {
         &plugin,
         r##"#!/bin/sh
 if [ "$1" = describe ]; then
-  printf '%s' '{"name":"python","version":"1.0.0","protocol":{"min":"3.0","max":"3.0"},"ir_version":{"min":"0.2","max":"0.2"},"capabilities":{"streaming":["sse"],"enum_reprs":["string","external","internal","adjacent","untagged"],"direction_split":true,"provides":true,"flattened":true,"opaque":true,"object_openness":["reject","preserve_typed","preserve_opaque"]}}'
+  printf '%s' '{"name":"python","version":"1.0.0","protocol":{"min":"3.0","max":"3.0"},"ir_version":{"min":"0.2","max":"0.2"},"capabilities":{"streaming":["sse"],"enum_reprs":["string","external","internal","adjacent","untagged"],"direction_split":true,"provides":true,"flattened":true,"opaque":true,"object_openness":["reject","preserve_typed","preserve_opaque"],"extensions":{"test.example.source/v1":"exact","test.example.large/v1":"exact"}}}'
 elif [ "$1" = emit ]; then
   cat > /dev/null
   printf '%s' '{"protocol":3,"files":[{"path":"client.py","content":"generated"}],"coverage":{"exact":["types.EventQuery","types.LoginError"],"opaque":["operations.auth.login","operations.events.watch","types.LoginRequest","types.User"],"lossy":[],"unsupported":[]}}'
@@ -1513,7 +1513,7 @@ fn emit_lossy_warns_about_a_validation_gap() {
         &plugin,
         r##"#!/bin/sh
 if [ "$1" = describe ]; then
-  printf '%s' '{"name":"python","version":"1.0.0","protocol":{"min":"3.0","max":"3.0"},"ir_version":{"min":"0.2","max":"0.2"},"capabilities":{"streaming":["sse"],"enum_reprs":["string","external","internal","adjacent","untagged"],"direction_split":true,"provides":true,"flattened":true,"opaque":true,"object_openness":["reject","preserve_typed","preserve_opaque"]},"option_schema":{"options":{"validation":{"type":"object"}}}}'
+  printf '%s' '{"name":"python","version":"1.0.0","protocol":{"min":"3.0","max":"3.0"},"ir_version":{"min":"0.2","max":"0.2"},"capabilities":{"streaming":["sse"],"enum_reprs":["string","external","internal","adjacent","untagged"],"direction_split":true,"provides":true,"flattened":true,"opaque":true,"object_openness":["reject","preserve_typed","preserve_opaque"],"extensions":{"test.example.source/v1":"exact","test.example.large/v1":"exact"}},"option_schema":{"options":{"validation":{"type":"object"}}}}'
 elif [ "$1" = emit ]; then
   cat > /dev/null
   printf '%s' '{"protocol":3,"files":[{"path":"client.py","content":"generated"}],"coverage":{"exact":["types.EventQuery","types.LoginError"],"opaque":["operations.auth.login","operations.events.watch","types.LoginRequest","types.User"],"lossy":[],"unsupported":[]},"validation_coverage":{"exact":["operations.auth.login","operations.events.watch","types.EventQuery","types.LoginError","types.LoginRequest","types.User"],"lossy":[],"unsupported":[]}}'
@@ -1566,7 +1566,7 @@ fn a_fixture_a_target_cannot_build_is_reported_unsupported() {
         &plugin,
         r##"#!/bin/sh
 if [ "$1" = describe ]; then
-  printf '%s' '{"name":"python","version":"1.0.0","protocol":{"min":"3.0","max":"3.0"},"ir_version":{"min":"0.2","max":"0.2"},"capabilities":{"streaming":["sse"],"enum_reprs":["string","external","internal","adjacent","untagged"],"direction_split":true,"provides":true,"flattened":true,"opaque":true,"object_openness":["reject","preserve_typed","preserve_opaque"]}}'
+  printf '%s' '{"name":"python","version":"1.0.0","protocol":{"min":"3.0","max":"3.0"},"ir_version":{"min":"0.2","max":"0.2"},"capabilities":{"streaming":["sse"],"enum_reprs":["string","external","internal","adjacent","untagged"],"direction_split":true,"provides":true,"flattened":true,"opaque":true,"object_openness":["reject","preserve_typed","preserve_opaque"],"extensions":{"test.example.source/v1":"exact","test.example.large/v1":"exact"}}}'
 elif [ "$1" = emit ]; then
   request=$(cat)
   printf '%s' "$request" > "$PONS_REQUEST"
@@ -1645,7 +1645,7 @@ fn emit_bounds_the_log_it_echoes_from_an_external_target() {
         &plugin,
         r##"#!/bin/sh
 if [ "$1" = describe ]; then
-  printf '%s' '{"name":"python","version":"1.0.0","protocol":{"min":"3.0","max":"3.0"},"ir_version":{"min":"0.2","max":"0.2"},"capabilities":{"streaming":["sse","ndjson","bytes"],"enum_reprs":["string","external","internal","adjacent","untagged"],"direction_split":true,"provides":true,"flattened":true,"opaque":true,"object_openness":["reject","preserve_typed","preserve_opaque"]}}'
+  printf '%s' '{"name":"python","version":"1.0.0","protocol":{"min":"3.0","max":"3.0"},"ir_version":{"min":"0.2","max":"0.2"},"capabilities":{"streaming":["sse","ndjson","bytes"],"enum_reprs":["string","external","internal","adjacent","untagged"],"direction_split":true,"provides":true,"flattened":true,"opaque":true,"object_openness":["reject","preserve_typed","preserve_opaque"],"extensions":{"test.example.source/v1":"exact","test.example.large/v1":"exact"}}}'
 elif [ "$1" = emit ]; then
   cat > /dev/null
   printf 'log head\n' >&2
@@ -1770,7 +1770,7 @@ const STUB_RESPONSE: &str = r#"{"protocol":3,"files":[{"path":"acme/__init__.py"
 #[cfg(target_os = "linux")]
 fn stub_manifest(option_schema: &str) -> String {
     let mut manifest = String::from(
-        r#"{"name":"python","version":"1.0.0","protocol":{"min":"3.0","max":"3.0"},"ir_version":{"min":"0.2","max":"0.2"},"capabilities":{"streaming":["sse"],"enum_reprs":["string","external","internal","adjacent","untagged"],"direction_split":true,"provides":true,"custom_auth":true,"flattened":true,"wide_integers":true,"opaque":true,"object_openness":["reject","preserve_typed","preserve_opaque"]}"#,
+        r#"{"name":"python","version":"1.0.0","protocol":{"min":"3.0","max":"3.0"},"ir_version":{"min":"0.2","max":"0.2"},"capabilities":{"streaming":["sse"],"enum_reprs":["string","external","internal","adjacent","untagged"],"direction_split":true,"provides":true,"custom_auth":true,"flattened":true,"wide_integers":true,"opaque":true,"object_openness":["reject","preserve_typed","preserve_opaque"],"extensions":{"test.example.source/v1":"exact","test.example.large/v1":"exact"}}"#,
     );
     if !option_schema.is_empty() {
         manifest.push_str(",\"option_schema\":");
@@ -1829,9 +1829,12 @@ fn a_config_file_supplies_the_document_and_the_output_directory() {
         String::from_utf8_lossy(&output.stderr)
     );
     assert!(directory.path().join("generated/types.ts").exists());
+    let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
-        String::from_utf8_lossy(&output.stderr).is_empty(),
-        "a config file that supplies everything says nothing"
+        stderr.contains(
+            "does not understand the extension namespace test.example.source/v1"
+        ),
+        "the only thing the run has to say is the extension the target ignores: {stderr}"
     );
 }
 

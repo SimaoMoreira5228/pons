@@ -1,4 +1,5 @@
 mod client;
+mod extensions;
 mod runtime;
 mod types;
 mod validation;
@@ -252,6 +253,18 @@ pub fn emit_with_options(document: &Document, options: TsOptions) -> Result<Emit
             "a WebSocket operation cannot declare a request body, because the upgrade request does not carry one".into(),
         ));
     }
+    let paginated = document
+        .operations
+        .iter()
+        .filter(|operation| operation.semantics.pagination.is_some())
+        .map(|operation| format!("operations.{}", pons_ir::operation_path(&operation.id)))
+        .collect::<Vec<_>>();
+    if mode == EmitMode::Strict && !paginated.is_empty() {
+        return Err(EmitError(format!(
+            "the TypeScript emitter does not generate pagination iterators at {}; run in lossy mode to describe the operations without them",
+            paginated.join(", ")
+        )));
+    }
     let api_key_headers: BTreeMap<String, &str> = document
         .auth_schemes
         .iter()
@@ -336,7 +349,7 @@ pub fn emit_with_options(document: &Document, options: TsOptions) -> Result<Emit
     let files = files;
     strict_coverage_error(mode, &coverage)?;
     strict_validation_error(mode, options.validation.backend, &validation_coverage)?;
-    let mut warnings = Vec::new();
+    let mut warnings = extensions::warnings(&document).map_err(EmitError)?;
     if mode == EmitMode::Lossy {
         if !wide_integers.is_empty() {
             warnings.push(format!(
@@ -354,6 +367,12 @@ pub fn emit_with_options(document: &Document, options: TsOptions) -> Result<Emit
             warnings.push(format!(
                 "TypeScript emits opaque values as unknown at {}",
                 opaque_paths.join(", ")
+            ));
+        }
+        if !paginated.is_empty() {
+            warnings.push(format!(
+                "TypeScript does not generate pagination iterators at {}",
+                paginated.join(", ")
             ));
         }
         warnings.extend(validation_warnings(
@@ -1125,18 +1144,21 @@ mod tests {
         assert!(transport.contains("kind: \"auth_adapter\""));
         assert!(transport.contains("attachment.headers"));
         assert!(client.contains("signal?: AbortSignal"));
-        assert!(client.contains("timeout?: number"));
+        assert!(client.contains("timeoutMs?: number"));
         assert!(client.contains("export type CallOptions"));
         assert!(client.contains("headers?: HeadersInit"));
         assert!(transport.contains("callOptions?.headers"));
-        assert!(transport.contains("callOptions?.timeout ?? client.timeout"));
+        assert!(transport.contains("callOptions?.timeoutMs ?? client.timeoutMs"));
         assert!(transport.contains("callOptions?.signal ?? client.signal"));
         assert!(auth.contains("options?: CallOptions"));
-        assert!(client.contains("export type RequestInterceptor"));
-        assert!(client.contains("export type ResponseInterceptor"));
+        assert!(client.contains("export type Transport"));
+        assert!(client.contains("export type TransportRequestHook"));
+        assert!(client.contains("export type TransportResponseHook"));
         assert!(client.contains("headers?: HeadersInit |"));
-        assert!(transport.contains("client.interceptors?.request"));
-        assert!(transport.contains("client.interceptors?.response"));
+        assert!(client.contains("transport?: Transport"));
+        assert!(transport.contains("client.transport?.onRequest"));
+        assert!(transport.contains("client.transport?.onResponse"));
+        assert!(transport.contains("kind: \"transport\""));
         assert!(client.contains("export type RetryOptions"));
         assert!(client.contains("retry?: RetryOptions | false"));
         assert!(transport.contains("fetchWithRetry"));
@@ -1906,7 +1928,15 @@ mod tests {
             output.coverage.levels().collect::<BTreeMap<_, _>>(),
             canonical
         );
-        assert!(output.warnings.is_empty());
+        assert_eq!(
+            output.warnings,
+            vec![
+                "TypeScript does not understand the extension namespace test.example.source/v1, \
+                 so the emitted client ignores it"
+                    .to_owned()
+            ],
+            "the fixture carries one extension namespace the client cannot read"
+        );
     }
 
     #[test]
@@ -2268,6 +2298,29 @@ mod tests {
     }
 
     #[test]
+    fn pagination_is_an_explicit_unsupported_capability() {
+        let mut document: Document =
+            serde_json::from_str(include_str!("../../../fixtures/login.json")).unwrap();
+        document.operations[1].semantics.pagination = Some(
+            serde_json::from_value(json!({
+                "request": {"kind": "cursor", "field": "limit"},
+                "items": "/items"
+            }))
+            .unwrap(),
+        );
+        let error = super::emit(&document).unwrap_err();
+        assert!(error.0.contains("does not generate pagination iterators"));
+
+        let emitted = super::emit_with_mode(&document, super::EmitMode::Lossy).unwrap();
+        assert!(
+            emitted
+                .warnings
+                .iter()
+                .any(|warning| warning.contains("does not generate pagination iterators"))
+        );
+    }
+
+    #[test]
     fn rejects_form_and_multipart_responses() {
         for content in [ContentKind::Form, ContentKind::Multipart] {
             let mut document: Document =
@@ -2534,7 +2587,7 @@ mod tests {
         "[key: string]: unknown };\n",
         "\n"
     );
-    const CLIENT_WITHOUT_DOCS: u64 = 0xfe23_265c_668c_2b42;
+    const CLIENT_WITHOUT_DOCS: u64 = 0x8e78_b447_958f_a184;
 
     #[test]
     fn a_document_that_documents_nothing_emits_the_bytes_it_emitted_before() {

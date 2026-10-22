@@ -5,10 +5,23 @@ edition.workspace = true
 license.workspace = true
 rust-version.workspace = true
 
+[features]
+bytes = ["dep:bytes"]
+chrono = ["dep:chrono"]
+rust_decimal = ["dep:rust_decimal"]
+serde_json = []
+time = ["dep:time"]
+uuid = ["dep:uuid"]
+
 [dependencies]
+bytes = { version = "1", optional = true, default-features = false }
+chrono = { version = "0.4", optional = true, default-features = false, features = ["std"] }
 pons-ir = { path = "../pons-ir" }
 pons-derive = { path = "../pons-derive" }
+rust_decimal = { version = "1", optional = true, default-features = false }
 serde_json.workspace = true
+time = { version = "0.3", optional = true, default-features = false, features = ["std"] }
+uuid = { version = "1", optional = true, default-features = false }
 
 [dev-dependencies]
 serde.workspace = true

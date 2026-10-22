@@ -120,6 +120,12 @@ fn diff_operation(
             "operation idempotency changed",
         );
     }
+    diff_pagination(
+        diff,
+        path,
+        old.semantics.pagination.as_ref(),
+        new.semantics.pagination.as_ref(),
+    );
     if route_shape(&old.path) != route_shape(&new.path) {
         add(diff, ChangeLevel::NonBreaking, path, "route URL changed");
     }
@@ -257,6 +263,59 @@ fn diff_operation(
         new.doc.as_ref(),
         "operation",
     );
+}
+
+fn diff_pagination(
+    diff: &mut Diff,
+    path: &str,
+    old: Option<&crate::Pagination>,
+    new: Option<&crate::Pagination>,
+) {
+    let owner = format!("{path}.semantics.pagination");
+    match (old, new) {
+        (None, None) => {}
+        (None, Some(_)) => add(
+            diff,
+            ChangeLevel::NonBreaking,
+            owner,
+            "pagination descriptor added",
+        ),
+        (Some(_), None) => add(
+            diff,
+            ChangeLevel::Breaking,
+            owner,
+            "pagination descriptor removed",
+        ),
+        (Some(old), Some(new)) => {
+            if old.request != new.request {
+                add(
+                    diff,
+                    ChangeLevel::Breaking,
+                    &owner,
+                    "pagination request encoding changed",
+                );
+            }
+            if old.items != new.items || old.next != new.next {
+                add(diff, ChangeLevel::Breaking, &owner, "pagination locator changed");
+            }
+            if old.page_size != new.page_size {
+                add(
+                    diff,
+                    ChangeLevel::Breaking,
+                    &owner,
+                    "pagination page size changed",
+                );
+            }
+            if old.ext != new.ext {
+                add(
+                    diff,
+                    ChangeLevel::Warning,
+                    &owner,
+                    "pagination metadata changed",
+                );
+            }
+        }
+    }
 }
 
 fn route_shape(path: &[crate::PathSegment]) -> Vec<String> {

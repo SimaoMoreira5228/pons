@@ -110,6 +110,7 @@ pub(super) fn run(
                 options.clone(),
                 resolved.strict(),
                 &resolved.search,
+                resolved.pin.as_ref(),
             )
             .map_err(|error| CliError::Failure(error.to_string()))?;
             let coverage = result.response.coverage.clone();

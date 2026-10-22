@@ -25,7 +25,7 @@ pub(crate) fn run() -> Result<(), CliError> {
     let mut document = pons_ir::decode(&output).map_err(|error| {
         CliError::Failure(format!(
             "the {} frontend produced invalid IR: {error}",
-            frontend.kind()
+            frontend.name()
         ))
     })?;
     crate::validate(&document)?;
@@ -53,14 +53,14 @@ fn frontend_output(frontend: &Frontend, directory: &Path) -> Result<Vec<u8>, Cli
         .map_err(|error| {
             CliError::Failure(format!(
                 "cannot run the {} frontend {:?}: {error}",
-                frontend.kind(),
+                frontend.name(),
                 frontend.command()
             ))
         })?;
     if !output.status.success() {
         return Err(CliError::Failure(format!(
             "the {} frontend {:?} failed with {}",
-            frontend.kind(),
+            frontend.name(),
             frontend.command(),
             output.status
         )));

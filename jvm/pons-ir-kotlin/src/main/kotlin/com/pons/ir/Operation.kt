@@ -1,4 +1,4 @@
-@file:OptIn(kotlinx.serialization.InternalSerializationApi::class)
+@file:OptIn(kotlinx.serialization.InternalSerializationApi::class, kotlinx.serialization.ExperimentalSerializationApi::class)
 
 package com.pons.ir
 
@@ -11,6 +11,7 @@ import kotlinx.serialization.descriptors.SerialKind
 import kotlinx.serialization.descriptors.buildSerialDescriptor
 import kotlinx.serialization.encoding.Decoder
 import kotlinx.serialization.encoding.Encoder
+import kotlinx.serialization.json.JsonClassDiscriminator
 import kotlinx.serialization.json.JsonDecoder
 import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonObject
@@ -128,6 +129,37 @@ enum class ErrorContent {
 data class OperationSemantics(
     val safe: Boolean,
     val idempotent: Boolean,
+    val pagination: Pagination? = null,
+)
+
+@Serializable
+data class Pagination(
+    val request: PaginationRequest,
+    val items: String,
+    val next: String? = null,
+    @SerialName("page_size") val pageSize: PageSize? = null,
+    val ext: Map<String, JsonElement> = emptyMap(),
+)
+
+@Serializable
+@JsonClassDiscriminator("kind")
+sealed class PaginationRequest {
+    abstract val field: String
+
+    @Serializable
+    @SerialName("cursor")
+    data class Cursor(override val field: String) : PaginationRequest()
+
+    @Serializable
+    @SerialName("offset")
+    data class Offset(override val field: String) : PaginationRequest()
+}
+
+@Serializable
+data class PageSize(
+    val field: String,
+    val default: UInt? = null,
+    val maximum: UInt? = null,
 )
 
 internal object PathSegmentSerializer : KSerializer<PathSegment> {

@@ -43,6 +43,8 @@ fn field_error_diagnostics_block_validation() {
         code: "FIELD_ERROR".into(),
         message: "field is blocked".into(),
         origin: None,
+        fidelity: None,
+        capability: None,
         ext: BTreeMap::new(),
     });
 
@@ -68,6 +70,8 @@ fn variant_error_diagnostics_block_validation() {
         code: "VARIANT_ERROR".into(),
         message: "variant is blocked".into(),
         origin: None,
+        fidelity: None,
+        capability: None,
         ext: BTreeMap::new(),
     });
 

@@ -525,6 +525,8 @@ fn field_body(
                         code: "PONS-E101".into(),
                         message: "custom serde flatten in an enum variant payload has no wire key; VariantPayload::Struct cannot represent flattened output".into(),
                         origin: None,
+                        fidelity: None,
+                        capability: None,
                         ext: Default::default(),
                     }],
                     ext: #ext,

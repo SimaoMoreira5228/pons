@@ -2,6 +2,8 @@ use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 
+use pons_plugin::PluginPin;
+
 use crate::CliError;
 use crate::options;
 
@@ -18,12 +20,14 @@ pub(crate) const OUT_DIR: &str = "out_dir";
 const TOP_LEVEL: &[&str] = &[EMIT_TABLE, FRONTEND_TABLE, "plugins", DOCUMENT_TABLE];
 const PROJECT: &[&str] = &[DOCUMENT, NAME];
 const FRONTEND: &[&str] = &[KIND, COMMAND];
-const PLUGINS: &[&str] = &["search"];
+const PLUGINS: &[&str] = &["search", "pin"];
+const PIN: &[&str] = &["path", "sha256"];
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum FrontendKind {
     Axum,
     Spring,
+    Custom,
 }
 
 impl FrontendKind {
@@ -31,14 +35,22 @@ impl FrontendKind {
         match word {
             "axum" => Some(Self::Axum),
             "spring" => Some(Self::Spring),
+            _ if !word.is_empty()
+                && word
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_')) =>
+            {
+                Some(Self::Custom)
+            }
             _ => None,
         }
     }
 
-    pub(crate) fn default_command(self) -> &'static str {
+    pub(crate) fn default_command(self) -> Option<&'static str> {
         match self {
-            Self::Axum => "cargo pons export",
-            Self::Spring => "./gradlew --quiet ponsExport",
+            Self::Axum => Some("cargo pons export"),
+            Self::Spring => Some("./gradlew --quiet ponsExport"),
+            Self::Custom => None,
         }
     }
 }
@@ -48,18 +60,19 @@ impl std::fmt::Display for FrontendKind {
         formatter.write_str(match self {
             Self::Axum => "axum",
             Self::Spring => "spring",
+            Self::Custom => "custom",
         })
     }
 }
 
 pub(crate) struct Frontend {
-    kind: FrontendKind,
+    name: String,
     command: String,
 }
 
 impl Frontend {
-    pub(crate) fn kind(&self) -> FrontendKind {
-        self.kind
+    pub(crate) fn name(&self) -> &str {
+        &self.name
     }
 
     pub(crate) fn command(&self) -> &str {
@@ -73,6 +86,7 @@ pub(crate) struct Config {
     frontend: Option<Frontend>,
     targets: BTreeMap<String, toml::Table>,
     search: Vec<PathBuf>,
+    pins: BTreeMap<String, PluginPin>,
 }
 
 impl Config {
@@ -105,6 +119,10 @@ impl Config {
 
     pub(crate) fn search(&self) -> &[PathBuf] {
         &self.search
+    }
+
+    pub(crate) fn pin(&self, target: &str) -> Option<&PluginPin> {
+        self.pins.get(target)
     }
 }
 
@@ -186,6 +204,7 @@ pub(crate) fn load(file: PathBuf) -> Result<Config, CliError> {
         frontend: None,
         targets: BTreeMap::new(),
         search: Vec::new(),
+        pins: BTreeMap::new(),
     };
     for (key, value) in &parsed {
         match key.as_str() {
@@ -194,7 +213,11 @@ pub(crate) fn load(file: PathBuf) -> Result<Config, CliError> {
                     project(&config.file, value)?.map(|document| under(&directory, document))
             }
             FRONTEND_TABLE => config.frontend = Some(frontend(&config.file, value)?),
-            "plugins" => config.search = plugins(&config.file, value, &directory)?,
+            "plugins" => {
+                let plugins = plugins(&config.file, value, &directory)?;
+                config.search = plugins.search;
+                config.pins = plugins.pins;
+            }
             EMIT_TABLE => config.targets = targets(&config.file, value, &directory)?,
             other => return Err(unknown_key(&config.file, "", other, TOP_LEVEL)),
         }
@@ -232,12 +255,12 @@ fn project(file: &Path, value: &toml::Value) -> Result<Option<PathBuf>, CliError
 fn frontend(file: &Path, value: &toml::Value) -> Result<Frontend, CliError> {
     let table = table(file, FRONTEND_TABLE, value)?;
     check_keys(file, FRONTEND_TABLE, table, FRONTEND)?;
-    let frontend_kind = match table.get(KIND) {
+    let (frontend_kind, name) = match table.get(KIND) {
         None => {
             return Err(config_error(
                 file,
                 FRONTEND_TABLE,
-                "has no kind; it is axum or spring",
+                "has no kind; it is axum, spring, or a named frontend with a command",
             ));
         }
         Some(value) => {
@@ -245,20 +268,29 @@ fn frontend(file: &Path, value: &toml::Value) -> Result<Frontend, CliError> {
                 return Err(config_error(
                     file,
                     FRONTEND_TABLE,
-                    &format!("{KIND} is {}; it is axum or spring", kind(value)),
+                    &format!("{KIND} is {}; it is a frontend name", kind(value)),
                 ));
             };
-            FrontendKind::parse(word).ok_or_else(|| {
+            let kind = FrontendKind::parse(word).ok_or_else(|| {
                 config_error(
                     file,
                     FRONTEND_TABLE,
-                    &format!("{KIND} is {word:?}; it is axum or spring"),
+                    &format!("{KIND} is {word:?}; it is a frontend name"),
                 )
-            })?
+            })?;
+            (kind, word.to_owned())
         }
     };
     let command = match table.get(COMMAND) {
-        None => frontend_kind.default_command().to_owned(),
+        None => frontend_kind.default_command().map(str::to_owned).ok_or_else(|| {
+            config_error(
+                file,
+                FRONTEND_TABLE,
+                &format!(
+                    "{KIND} {name:?} needs a command; only axum and spring have a default"
+                ),
+            )
+        })?,
         Some(value) => {
             let Some(command) = value.as_str() else {
                 return Err(config_error(
@@ -277,37 +309,115 @@ fn frontend(file: &Path, value: &toml::Value) -> Result<Frontend, CliError> {
             command.to_owned()
         }
     };
-    Ok(Frontend {
-        kind: frontend_kind,
-        command,
-    })
+    Ok(Frontend { name, command })
 }
 
-fn plugins(file: &Path, value: &toml::Value, directory: &Path) -> Result<Vec<PathBuf>, CliError> {
+struct Plugins {
+    search: Vec<PathBuf>,
+    pins: BTreeMap<String, PluginPin>,
+}
+
+fn plugins(file: &Path, value: &toml::Value, directory: &Path) -> Result<Plugins, CliError> {
     let table = table(file, "plugins", value)?;
     check_keys(file, "plugins", table, PLUGINS)?;
-    let Some(value) = table.get("search") else {
-        return Ok(Vec::new());
+    let search = match table.get("search") {
+        None => Vec::new(),
+        Some(value) => {
+            let Some(entries) = value.as_array() else {
+                return Err(config_error(
+                    file,
+                    "plugins",
+                    &format!("search is {}; it is an array of directories", kind(value)),
+                ));
+            };
+            let mut search = Vec::new();
+            for entry in entries {
+                let Some(entry) = entry.as_str() else {
+                    return Err(config_error(
+                        file,
+                        "plugins",
+                        &format!("search holds {}; it is a path to a directory", kind(entry)),
+                    ));
+                };
+                search.push(under(directory, PathBuf::from(entry)));
+            }
+            search
+        }
     };
-    let Some(entries) = value.as_array() else {
-        return Err(config_error(
-            file,
-            "plugins",
-            &format!("search is {}; it is an array of directories", kind(value)),
-        ));
+    let pins = match table.get("pin") {
+        None => BTreeMap::new(),
+        Some(value) => pins(file, value, directory)?,
     };
-    let mut search = Vec::new();
-    for entry in entries {
-        let Some(entry) = entry.as_str() else {
+    Ok(Plugins { search, pins })
+}
+
+fn pins(
+    file: &Path,
+    value: &toml::Value,
+    directory: &Path,
+) -> Result<BTreeMap<String, PluginPin>, CliError> {
+    let pins_table = table(file, "plugins.pin", value)?;
+    let mut pins = BTreeMap::new();
+    for (target, value) in pins_table {
+        let name = format!("plugins.pin.{target}");
+        if target.is_empty()
+            || !target
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
+        {
             return Err(config_error(
                 file,
-                "plugins",
-                &format!("search holds {}; it is a path to a directory", kind(entry)),
+                "plugins.pin",
+                &format!("{target:?} cannot be a target name; a name is letters, digits, - and _"),
             ));
+        }
+        let pin_table = table(file, &name, value)?;
+        check_keys(file, &name, pin_table, PIN)?;
+        let path = match pin_table.get("path") {
+            None => {
+                return Err(config_error(
+                    file,
+                    &name,
+                    "has no path; it is the executable to pin",
+                ));
+            }
+            Some(value) => value.as_str().ok_or_else(|| {
+                config_error(
+                    file,
+                    &name,
+                    &format!("path is {}; it is a path to an executable", kind(value)),
+                )
+            })?,
         };
-        search.push(under(directory, PathBuf::from(entry)));
+        let path = under(directory, PathBuf::from(path));
+        if !path.is_file() {
+            return Err(config_error(
+                file,
+                &name,
+                &format!("path {} is not a file", path.display()),
+            ));
+        }
+        let checksum = match pin_table.get("sha256") {
+            None => {
+                return Err(config_error(
+                    file,
+                    &name,
+                    "has no sha256; it is the checksum of the pinned executable",
+                ));
+            }
+            Some(value) => value.as_str().ok_or_else(|| {
+                config_error(
+                    file,
+                    &name,
+                    &format!("sha256 is {}; it is 64 hexadecimal characters", kind(value)),
+                )
+            })?,
+        };
+        let pin =
+            PluginPin::new(path, checksum).map_err(|error| config_error(file, &name, &error))?;
+        pins.insert(target.clone(), pin);
     }
-    Ok(search)
+    Ok(pins)
 }
 
 fn targets(
@@ -592,12 +702,12 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         let config = loaded(directory.path(), "[frontend]\nkind = \"axum\"\n").unwrap();
         let frontend = config.frontend().expect("the table names a frontend");
-        assert_eq!(frontend.kind(), FrontendKind::Axum);
+        assert_eq!(frontend.name(), "axum");
         assert_eq!(frontend.command(), "cargo pons export");
 
         let config = loaded(directory.path(), "[frontend]\nkind = \"spring\"\n").unwrap();
         let frontend = config.frontend().expect("the table names a frontend");
-        assert_eq!(frontend.kind(), FrontendKind::Spring);
+        assert_eq!(frontend.name(), "spring");
         assert_eq!(frontend.command(), "./gradlew --quiet ponsExport");
 
         let config = loaded(
@@ -612,6 +722,15 @@ mod tests {
                 .command(),
             "./tools/export.sh"
         );
+
+        let config = loaded(
+            directory.path(),
+            "[frontend]\nkind = \"python\"\ncommand = \"python -m pons_fastapi app:app\"\n",
+        )
+        .unwrap();
+        let frontend = config.frontend().expect("the table names a frontend");
+        assert_eq!(frontend.name(), "python");
+        assert_eq!(frontend.command(), "python -m pons_fastapi app:app");
     }
 
     #[test]
@@ -619,7 +738,7 @@ mod tests {
         for (source, expected) in [
             (
                 "[frontend]\nkind = \"warp\"\n",
-                "[frontend] kind is \"warp\"; it is axum or spring",
+                "[frontend] kind \"warp\" needs a command; only axum and spring have a default",
             ),
             (
                 "[frontend]\nkind = \"axum\"\nrunner = \"x\"\n",
@@ -627,7 +746,7 @@ mod tests {
             ),
             (
                 "[frontend]\nkind = 3\n",
-                "[frontend] kind is an integer; it is axum or spring",
+                "[frontend] kind is an integer; it is a frontend name",
             ),
             (
                 "[frontend]\nkind = \"axum\"\ncommand = true\n",
@@ -639,7 +758,7 @@ mod tests {
             ),
             (
                 "[frontend]\ncommand = \"x\"\n",
-                "[frontend] has no kind; it is axum or spring",
+                "[frontend] has no kind; it is axum, spring, or a named frontend with a command",
             ),
             ("frontend = 3\n", "[frontend] is an integer; it is a table"),
         ] {

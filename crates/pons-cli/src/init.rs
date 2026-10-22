@@ -67,7 +67,7 @@ fn toml_string(value: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::{self, FrontendKind};
+    use crate::config;
 
     #[test]
     fn the_starter_parses_and_names_the_project_directory() {
@@ -85,7 +85,7 @@ mod tests {
         let loaded = config::load(path).unwrap();
         assert_eq!(loaded.document(), Some(root.join("api/ir.json").as_path()));
         let frontend = loaded.frontend().expect("the starter names a frontend");
-        assert_eq!(frontend.kind(), FrontendKind::Axum);
+        assert_eq!(frontend.name(), "axum");
         assert_eq!(frontend.command(), "cargo pons export");
     }
 
