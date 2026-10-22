@@ -4,6 +4,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::IR_VERSION;
+use crate::migration::MigrationRegistry;
 use crate::operation::{
     ApiKeyLocation, AuthScheme, ContentKind, CredentialLocator, ErrorContent, ErrorResponse,
     ErrorStatus, Method, OAuthFlowKind, Operation, PathSegment, ResponseHeader, ResponseStatus,
@@ -1632,6 +1633,10 @@ pub enum DecodeError {
         found: String,
         supported: &'static str,
     },
+    Migration {
+        name: String,
+        message: String,
+    },
     Member {
         path: String,
         message: String,
@@ -1646,6 +1651,9 @@ impl std::fmt::Display for DecodeError {
                 f,
                 "unsupported IR version {found}, this build reads {supported}"
             ),
+            Self::Migration { name, message } => {
+                write!(f, "migration {name} failed: {message}")
+            }
             Self::Member { path, message } if path.is_empty() => write!(f, "{message}"),
             Self::Member { path, message } => write!(f, "{path}: {message}"),
         }
@@ -1655,25 +1663,43 @@ impl std::fmt::Display for DecodeError {
 impl std::error::Error for DecodeError {}
 
 pub fn decode(bytes: &[u8]) -> Result<Document, DecodeError> {
+    decode_with(bytes, &MigrationRegistry::empty())
+}
+
+pub fn decode_with(bytes: &[u8], migrations: &MigrationRegistry) -> Result<Document, DecodeError> {
     let value: Value =
         serde_json::from_slice(bytes).map_err(|error| DecodeError::Json(error.to_string()))?;
-    let Some(found) = value.get("ir_version").and_then(Value::as_str) else {
+    let Some(found) = value
+        .get("ir_version")
+        .and_then(Value::as_str)
+        .map(str::to_owned)
+    else {
         return Err(DecodeError::Member {
             path: "ir_version".into(),
             message: "the document does not carry a string ir_version".into(),
         });
     };
-    if found != IR_VERSION {
-        return Err(DecodeError::UnsupportedVersion {
-            found: found.to_owned(),
-            supported: IR_VERSION,
-        });
-    }
-    serde_json::from_slice::<Document>(bytes).map_err(|error| {
+    let encoded;
+    let source = if found == IR_VERSION {
+        bytes
+    } else {
+        let Some(value) = migrations.migrate(value, &found, IR_VERSION)? else {
+            return Err(DecodeError::UnsupportedVersion {
+                found,
+                supported: IR_VERSION,
+            });
+        };
+        encoded = serde_json::to_vec(&value).map_err(|error| DecodeError::Migration {
+            name: "encode".into(),
+            message: format!("cannot encode the migrated document: {error}"),
+        })?;
+        &encoded
+    };
+    serde_json::from_slice::<Document>(source).map_err(|error| {
         let text = error.to_string();
         let message = text.split(" at line ").next().unwrap_or(&text);
         DecodeError::Member {
-            path: member_path(bytes, error.line(), error.column()),
+            path: member_path(source, error.line(), error.column()),
             message: message.to_owned(),
         }
     })
