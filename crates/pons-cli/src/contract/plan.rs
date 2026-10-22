@@ -68,9 +68,9 @@ pub(super) fn plan<'a>(
             ));
         }
         if body
-            .media_type
-            .as_deref()
-            .is_some_and(|media_type| !json_media(media_type))
+            .media
+            .as_ref()
+            .is_some_and(|media| !json_media(&media.to_string()))
         {
             return Err("the request body uses a custom media type".into());
         }
@@ -232,8 +232,9 @@ pub(super) fn plan<'a>(
         let text = serde_json::to_string(&value)
             .map_err(|error| format!("cannot write the request body: {error}"))?;
         let content_type = declared
-            .media_type
-            .clone()
+            .media
+            .as_ref()
+            .map(ToString::to_string)
             .unwrap_or_else(|| default_content_type(declared.content).to_owned());
         body = Some((content_type, text));
         body_value = Some(value);

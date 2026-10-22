@@ -235,10 +235,14 @@
           "type": "object",
           "additionalProperties": true
         },
-        "media_type": {
-          "type": [
-            "string",
-            "null"
+        "media": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/MediaDescriptor"
+            },
+            {
+              "type": "null"
+            }
           ]
         },
         "required": {
@@ -591,10 +595,14 @@
             "$ref": "#/$defs/ResponseHeader"
           }
         },
-        "media_type": {
-          "type": [
-            "string",
-            "null"
+        "media": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/MediaDescriptor"
+            },
+            {
+              "type": "null"
+            }
           ]
         },
         "name": {
@@ -1079,6 +1087,34 @@
       "enum": [
         "number",
         "string"
+      ]
+    },
+    "MediaDescriptor": {
+      "type": "object",
+      "properties": {
+        "codec": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "parameters": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "string"
+          }
+        },
+        "subtype": {
+          "type": "string"
+        },
+        "type": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "type",
+        "subtype"
       ]
     },
     "Method": {
@@ -1568,10 +1604,14 @@
             "$ref": "#/$defs/ResponseHeader"
           }
         },
-        "media_type": {
-          "type": [
-            "string",
-            "null"
+        "media": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/MediaDescriptor"
+            },
+            {
+              "type": "null"
+            }
           ]
         },
         "status": {

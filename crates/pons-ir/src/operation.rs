@@ -6,6 +6,7 @@ use std::borrow::Cow;
 
 use schemars::{JsonSchema, Schema, SchemaGenerator};
 
+use crate::media::MediaDescriptor;
 use crate::pagination::Pagination;
 use crate::types::{Diagnostic, Doc, Name, Presence, TypeRef};
 
@@ -110,6 +111,21 @@ impl Operation {
     }
 
     pub(crate) fn canonicalize(&mut self) {
+        if let Some(body) = &mut self.body
+            && let Some(media) = &mut body.media
+        {
+            media.canonicalize();
+        }
+        self.responses.iter_mut().for_each(|response| {
+            if let Some(media) = &mut response.media {
+                media.canonicalize();
+            }
+        });
+        self.errors.iter_mut().for_each(|error| {
+            if let Some(media) = &mut error.media {
+                media.canonicalize();
+            }
+        });
         self.headers.sort_by(|left, right| {
             left.wire
                 .to_ascii_lowercase()
@@ -205,7 +221,7 @@ pub struct Body {
     pub content: ContentKind,
     pub required: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub media_type: Option<String>,
+    pub media: Option<MediaDescriptor>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub ext: BTreeMap<String, Value>,
 }
@@ -229,7 +245,7 @@ pub struct Response {
     pub status: ResponseStatus,
     pub content: ContentKind,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub media_type: Option<String>,
+    pub media: Option<MediaDescriptor>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub body: Option<TypeRef>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -340,7 +356,7 @@ impl Response {
     pub(crate) fn equivalent_ignoring_header_case(&self, other: &Self) -> bool {
         self.status == other.status
             && self.content == other.content
-            && self.media_type == other.media_type
+            && self.media == other.media
             && self.body == other.body
             && self.ext == other.ext
             && self.headers.len() == other.headers.len()
@@ -374,7 +390,7 @@ pub struct ErrorResponse {
     pub name: Name,
     pub content: ErrorContent,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub media_type: Option<String>,
+    pub media: Option<MediaDescriptor>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub body: Option<TypeRef>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -392,7 +408,7 @@ impl ErrorResponse {
         self.status == other.status
             && self.name == other.name
             && self.content == other.content
-            && self.media_type == other.media_type
+            && self.media == other.media
             && self.body == other.body
             && self.retryable == other.retryable
             && self.doc == other.doc

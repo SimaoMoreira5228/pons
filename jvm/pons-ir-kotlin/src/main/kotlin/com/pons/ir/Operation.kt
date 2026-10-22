@@ -70,7 +70,7 @@ data class Body(
     val ty: TypeRef,
     val content: ContentKind,
     val required: Boolean,
-    @SerialName("media_type") val mediaType: String? = null,
+    val media: MediaDescriptor? = null,
     val ext: Map<String, JsonElement> = emptyMap(),
 )
 
@@ -90,7 +90,7 @@ enum class ContentKind {
 data class Response(
     val status: ResponseStatus,
     val content: ContentKind,
-    @SerialName("media_type") val mediaType: String? = null,
+    val media: MediaDescriptor? = null,
     val body: TypeRef? = null,
     val headers: List<ResponseHeader> = emptyList(),
     val ext: Map<String, JsonElement> = emptyMap(),
@@ -109,7 +109,7 @@ data class ErrorResponse(
     val status: ErrorStatus,
     val name: Name,
     val content: ErrorContent,
-    @SerialName("media_type") val mediaType: String? = null,
+    val media: MediaDescriptor? = null,
     val body: TypeRef? = null,
     val headers: List<ResponseHeader> = emptyList(),
     val retryable: Boolean? = null,

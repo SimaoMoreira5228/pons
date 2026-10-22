@@ -112,7 +112,11 @@ fn explicit_response_metadata_preserves_runtime_status() {
         .into_document()
         .unwrap();
     assert_eq!(
-        document.operations[0].responses[0].media_type.as_deref(),
+        document.operations[0].responses[0]
+            .media
+            .as_ref()
+            .map(|media| media.to_string())
+            .as_deref(),
         Some("application/vnd.acme+json")
     );
     let document = Router::<()>::new(info())

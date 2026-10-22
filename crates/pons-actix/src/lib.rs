@@ -279,13 +279,13 @@ fn both_spelled_differ<T: PartialEq>(inherited: Option<&T>, declared: Option<&T>
     }
 }
 
-fn effective_media_type(error: &ErrorResponse) -> Option<&str> {
-    match error.media_type.as_deref() {
-        Some(declared) => Some(declared),
+fn effective_media_type(error: &ErrorResponse) -> Option<String> {
+    match &error.media {
+        Some(declared) => Some(declared.to_string()),
         None => match error.content {
-            ErrorContent::Json => Some("application/json"),
-            ErrorContent::ProblemJson => Some("application/problem+json"),
-            ErrorContent::Text => Some("text/plain"),
+            ErrorContent::Json => Some("application/json".into()),
+            ErrorContent::ProblemJson => Some("application/problem+json".into()),
+            ErrorContent::Text => Some("text/plain".into()),
             ErrorContent::Empty => None,
         },
     }

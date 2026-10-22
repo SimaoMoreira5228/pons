@@ -1447,7 +1447,7 @@ fn a_declared_media_type_must_name_the_body_the_client_writes() {
         }));
         let body = &mut document.operations[0].body.as_mut().unwrap();
         body.content = serde_json::from_value(json!(content)).unwrap();
-        body.media_type = Some(media_type.into());
+        body.media = Some(pons_ir::MediaDescriptor::from_declared(media_type));
         body.ty = serde_json::from_value(ty).unwrap();
         document
     };
@@ -1473,7 +1473,7 @@ fn a_declared_media_type_must_name_the_body_the_client_writes() {
                     envelope.clone()
                 },
             ),
-            &format!("has media type \"{media_type}\", which does not name the"),
+            &format!("has media type {media_type}, which does not name the"),
         );
     }
     for (content, media_type, ty) in [
@@ -1500,17 +1500,19 @@ fn a_declared_media_type_must_name_the_body_the_client_writes() {
 
     let mut response = fixture();
     response.operations[0].responses[0].content = pons_ir::ContentKind::Text;
-    response.operations[0].responses[0].media_type = Some("application/json".into());
+    response.operations[0].responses[0].media =
+        Some(pons_ir::MediaDescriptor::from_declared("application/json"));
     refuses(
         &response,
-        "response 200 body has media type \"application/json\", which does not name the text body the client writes",
+        "response 200 body has media type application/json, which does not name the text body the client writes",
     );
     let mut error = fixture();
     error.operations[0].errors[0].content = pons_ir::ErrorContent::Text;
-    error.operations[0].errors[0].media_type = Some("application/json".into());
+    error.operations[0].errors[0].media =
+        Some(pons_ir::MediaDescriptor::from_declared("application/json"));
     refuses(
         &error,
-        "error body has media type \"application/json\", which does not name the text body the client writes",
+        "error body has media type application/json, which does not name the text body the client writes",
     );
 }
 

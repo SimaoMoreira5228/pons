@@ -82,7 +82,11 @@ async fn a_declared_media_type_replaces_the_inner_content_type() {
     let router = Router::<()>::new(info()).route("/vendor", post(vendor_response));
     let document = router.document();
     assert_eq!(
-        document.operations[0].responses[0].media_type.as_deref(),
+        document.operations[0].responses[0]
+            .media
+            .as_ref()
+            .map(|media| media.to_string())
+            .as_deref(),
         Some("application/vnd.acme+json")
     );
 

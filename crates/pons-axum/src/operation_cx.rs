@@ -4,8 +4,8 @@ use std::collections::BTreeMap;
 use pons_core::Schema;
 use pons_ir::{
     Body, ContentKind, CredentialProvision, Diagnostic, DiagnosticSeverity, Direction,
-    HeaderParameter, InlineType, NamedRef, Presence, Response, ResponseStatus, StreamDescription,
-    StreamKind, StreamMessage, TypeDef, TypeKind, TypeRef,
+    HeaderParameter, InlineType, MediaDescriptor, NamedRef, Presence, Response, ResponseStatus,
+    StreamDescription, StreamKind, StreamMessage, TypeDef, TypeKind, TypeRef,
 };
 
 use crate::describe::OperationCx;
@@ -80,23 +80,23 @@ impl OperationCx {
     pub fn request_body_with_media<T: Schema>(
         &mut self,
         content: ContentKind,
-        media_type: Option<String>,
+        media: Option<MediaDescriptor>,
     ) {
-        self.request_body_with_presence::<T>(content, media_type, true);
+        self.request_body_with_presence::<T>(content, media, true);
     }
 
     pub fn optional_request_body_with_media<T: Schema>(
         &mut self,
         content: ContentKind,
-        media_type: Option<String>,
+        media: Option<MediaDescriptor>,
     ) {
-        self.request_body_with_presence::<T>(content, media_type, false);
+        self.request_body_with_presence::<T>(content, media, false);
     }
 
     fn request_body_with_presence<T: Schema>(
         &mut self,
         content: ContentKind,
-        media_type: Option<String>,
+        media: Option<MediaDescriptor>,
         required: bool,
     ) {
         let ty = match content {
@@ -107,7 +107,7 @@ impl OperationCx {
             ty,
             content,
             required,
-            media_type,
+            media,
             ext: Default::default(),
         };
         if self.body.replace(body).is_some() {
@@ -126,12 +126,12 @@ impl OperationCx {
         &mut self,
         status: u16,
         content: ContentKind,
-        media_type: Option<String>,
+        media: Option<MediaDescriptor>,
     ) {
         self.responses.push(Response {
             status: ResponseStatus::Exact(status),
             content,
-            media_type,
+            media,
             body: Some(T::schema(&mut self.types, Direction::Output)),
             headers: Vec::new(),
             ext: Default::default(),
@@ -142,7 +142,7 @@ impl OperationCx {
         self.responses.push(Response {
             status: ResponseStatus::Unknown,
             content,
-            media_type: None,
+            media: None,
             body: Some(T::schema(&mut self.types, Direction::Output)),
             headers: Vec::new(),
             ext: Default::default(),
@@ -153,7 +153,7 @@ impl OperationCx {
         self.responses.push(Response {
             status: ResponseStatus::Exact(status),
             content: ContentKind::Empty,
-            media_type: None,
+            media: None,
             body: None,
             headers: Vec::new(),
             ext: Default::default(),
@@ -172,7 +172,7 @@ impl OperationCx {
         self.responses.push(Response {
             status: ResponseStatus::Exact(200),
             content: ContentKind::Stream,
-            media_type: None,
+            media: None,
             body: None,
             headers: Vec::new(),
             ext: Default::default(),
@@ -188,7 +188,7 @@ impl OperationCx {
         self.responses.push(Response {
             status: ResponseStatus::Exact(200),
             content: ContentKind::Stream,
-            media_type: None,
+            media: None,
             body: None,
             headers: Vec::new(),
             ext: Default::default(),
@@ -204,7 +204,7 @@ impl OperationCx {
         self.responses.push(Response {
             status: ResponseStatus::Exact(200),
             content: ContentKind::Stream,
-            media_type: None,
+            media: None,
             body: None,
             headers: Vec::new(),
             ext: Default::default(),
@@ -221,7 +221,7 @@ impl OperationCx {
         self.responses.push(Response {
             status: ResponseStatus::Exact(101),
             content: ContentKind::Empty,
-            media_type: None,
+            media: None,
             body: None,
             headers: Vec::new(),
             ext: Default::default(),

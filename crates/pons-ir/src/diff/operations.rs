@@ -344,7 +344,7 @@ fn diff_body(diff: &mut Diff, path: &str, old: Option<&Body>, new: Option<&Body>
         }
         return;
     };
-    if old.ty != new.ty || old.content != new.content || old.media_type != new.media_type {
+    if old.ty != new.ty || old.content != new.content || old.media != new.media {
         add(
             diff,
             ChangeLevel::Breaking,

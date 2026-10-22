@@ -72,7 +72,7 @@ pub(super) fn expand(input: &DeriveInput) -> TokenStream {
                 status: #status,
                 name: #error_name,
                 content: #content,
-                media_type: #media_type,
+                media: #media_type,
                 body: #body_field,
                 headers: #headers,
                 retryable: #retryable,
@@ -167,7 +167,9 @@ fn error_media_type(attrs: &[syn::Attribute], variant: &syn::Ident) -> syn::Resu
     let literal: syn::LitStr = syn::parse2(value).map_err(|_| {
         syn::Error::new_spanned(variant, "ApiError media_type must be a string literal")
     })?;
-    Ok(quote!(Some(#literal.to_owned())))
+    Ok(quote!(
+        Some(::pons_core::ir::MediaDescriptor::from_declared(#literal))
+    ))
 }
 
 fn error_headers(attrs: &[syn::Attribute], variant: &syn::Ident) -> syn::Result<TokenStream> {
@@ -253,7 +255,9 @@ mod tests {
         .unwrap();
         assert_eq!(
             expanded(media_type),
-            expanded(quote!(Some("application/problem+json".to_owned())))
+            expanded(quote!(Some(
+                ::pons_core::ir::MediaDescriptor::from_declared("application/problem+json")
+            )))
         );
         assert_eq!(
             expanded(error_media_type(&[], &variant(Vec::new())).unwrap()),

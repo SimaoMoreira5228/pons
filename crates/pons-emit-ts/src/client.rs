@@ -541,8 +541,8 @@ fn operation_function(
             "bodyContent: {}",
             string(content_name(body.content))
         ));
-        if let Some(media_type) = &body.media_type {
-            spec.push(format!("bodyMediaType: {}", string(media_type)));
+        if let Some(media) = &body.media {
+            spec.push(format!("bodyMediaType: {}", string(&media.to_string())));
         }
         spec.push(format!("bodySchema: {}", type_ref_json(&body.ty, options)?));
     }
@@ -1123,9 +1123,9 @@ fn response_descriptors(
                 String::new()
             };
             let media_type = response
-                .media_type
-                .as_deref()
-                .map(|value| format!(", mediaType: {}", string(value)))
+                .media
+                .as_ref()
+                .map(|media| format!(", mediaType: {}", string(&media.to_string())))
                 .unwrap_or_default();
             let headers = response
                 .headers
@@ -1215,9 +1215,9 @@ fn error_descriptor(
         .map(|value| format!(", retryable: {value}"))
         .unwrap_or_default();
     let media_type = error
-        .media_type
-        .as_deref()
-        .map(|value| format!(", mediaType: {}", string(value)))
+        .media
+        .as_ref()
+        .map(|media| format!(", mediaType: {}", string(&media.to_string())))
         .unwrap_or_default();
     Ok(format!(
         "{{ status: {status}, content: {}, schema: {schema}{validate}{media_type}{retryable}{headers} }}",

@@ -854,8 +854,9 @@ fn request_body_auth_and_provision_metadata_are_warnings() {
     }
 
     let mut retyped = annotated;
-    retyped.operations[0].body.as_mut().unwrap().media_type =
-        Some("application/vnd.acme+json".into());
+    retyped.operations[0].body.as_mut().unwrap().media = Some(
+        crate::MediaDescriptor::from_declared("application/vnd.acme+json"),
+    );
     let diff = old.diff(&retyped);
     let body = diff
         .changes
@@ -1460,8 +1461,9 @@ fn request_body_requiredness_is_classified() {
     );
 
     let mut media = old.clone();
-    media.operations[0].body.as_mut().unwrap().media_type =
-        Some("application/vnd.acme+json".into());
+    media.operations[0].body.as_mut().unwrap().media = Some(crate::MediaDescriptor::from_declared(
+        "application/vnd.acme+json",
+    ));
     assert_eq!(
         old.diff(&media)
             .changes

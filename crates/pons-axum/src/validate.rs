@@ -48,13 +48,13 @@ fn request_type<T: Schema>(carrier: &str) -> TypeRef {
         .clone()
 }
 
-pub(crate) fn declared_media_type<'a>(
-    document: &'a Document,
+pub(crate) fn declared_media_type(
+    document: &Document,
     request: &axum::extract::Request,
-    default: &'a str,
-) -> &'a str {
+    default: &str,
+) -> String {
     let Some(method) = method(request.method()) else {
-        return default;
+        return default.to_owned();
     };
     document
         .operations
@@ -63,8 +63,9 @@ pub(crate) fn declared_media_type<'a>(
             operation.method == method && path_matches(&operation.path, request.uri().path())
         })
         .max_by_key(|operation| specificity(&operation.path))
-        .and_then(|operation| operation.body.as_ref()?.media_type.as_deref())
-        .unwrap_or(default)
+        .and_then(|operation| operation.body.as_ref()?.media.as_ref())
+        .map(ToString::to_string)
+        .unwrap_or_else(|| default.to_owned())
 }
 
 fn specificity(segments: &[pons_ir::PathSegment]) -> (usize, Vec<u8>) {

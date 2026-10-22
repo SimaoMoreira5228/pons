@@ -480,7 +480,11 @@ fn a_derived_error_publishes_the_header_and_media_type_its_variant_declares() {
         limited.headers[0].ty
     );
     assert_eq!(
-        limited.media_type.as_deref(),
+        limited
+            .media
+            .as_ref()
+            .map(|media| media.to_string())
+            .as_deref(),
         Some("application/problem+json")
     );
 
@@ -496,7 +500,7 @@ fn a_derived_error_publishes_the_header_and_media_type_its_variant_declares() {
         pons_ir::TypeRef::Inline(pons_ir::InlineType::String { .. })
     ));
     assert_eq!(
-        degraded.media_type, None,
+        degraded.media, None,
         "a variant that declares no media type leaves the content to speak for it"
     );
 }

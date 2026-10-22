@@ -125,21 +125,28 @@ type headerParameter struct {
 	Ext      map[string]json.RawMessage `json:"ext"`
 }
 
+type mediaDescriptor struct {
+	Type       string            `json:"type"`
+	Subtype    string            `json:"subtype"`
+	Parameters map[string]string `json:"parameters"`
+	Codec      *string           `json:"codec"`
+}
+
 type body struct {
-	Ty        typeRef                    `json:"ty"`
-	Content   string                     `json:"content"`
-	Required  bool                       `json:"required"`
-	MediaType *string                    `json:"media_type"`
-	Ext       map[string]json.RawMessage `json:"ext"`
+	Ty       typeRef                    `json:"ty"`
+	Content  string                     `json:"content"`
+	Required bool                       `json:"required"`
+	Media    *mediaDescriptor           `json:"media"`
+	Ext      map[string]json.RawMessage `json:"ext"`
 }
 
 type response struct {
-	Status    httpStatus                 `json:"status"`
-	Content   string                     `json:"content"`
-	MediaType *string                    `json:"media_type"`
-	Body      *typeRef                   `json:"body"`
-	Headers   []responseHeader           `json:"headers"`
-	Ext       map[string]json.RawMessage `json:"ext"`
+	Status  httpStatus                 `json:"status"`
+	Content string                     `json:"content"`
+	Media   *mediaDescriptor           `json:"media"`
+	Body    *typeRef                   `json:"body"`
+	Headers []responseHeader           `json:"headers"`
+	Ext     map[string]json.RawMessage `json:"ext"`
 }
 
 type responseHeader struct {
@@ -153,7 +160,7 @@ type errorResponse struct {
 	Status    httpStatus                 `json:"status"`
 	Name      []string                   `json:"name"`
 	Content   string                     `json:"content"`
-	MediaType *string                    `json:"media_type"`
+	Media     *mediaDescriptor           `json:"media"`
 	Body      *typeRef                   `json:"body"`
 	Headers   []responseHeader           `json:"headers"`
 	Retryable *bool                      `json:"retryable"`

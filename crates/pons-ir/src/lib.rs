@@ -22,7 +22,7 @@ pub use ext::{
     ALIAS as EXT_ALIAS, OPEN_VARIANT as EXT_OPEN_VARIANT, RESERVED_PREFIX as EXT_RESERVED_PREFIX,
     validate_extension_key,
 };
-pub use media::{is_valid_media_type, media_type_matches};
+pub use media::{MediaDescriptor, is_valid_media_type, media_type_matches};
 pub use migration::{Migration, MigrationRegistry};
 pub use operation::{
     ApiKeyLocation, AuthRequirement, AuthScheme, Body, ContentKind, CredentialLocator,

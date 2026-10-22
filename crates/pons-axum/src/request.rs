@@ -27,9 +27,9 @@ where
     async fn from_request(request: Request, state: &S) -> Result<Self, Self::Rejection> {
         let (document, ty) = request_contract::<T>(request.extensions(), "input")?;
         let expected = declared_media_type(&document, &request, JSON_MEDIA_TYPE);
-        let announced = announced_media_type(&request, expected)?;
+        let announced = announced_media_type(&request, &expected)?;
         let bytes = read_body(request, state).await?;
-        refuse_unannounced(expected, announced, &bytes)?;
+        refuse_unannounced(&expected, announced, &bytes)?;
         let value: Value = serde_json::from_slice(&bytes)
             .map_err(|error| violated("a JSON document", error.to_string()))?;
         check(&document, &ty, &value)?;
@@ -87,9 +87,9 @@ where
             )?));
         }
         let expected = declared_media_type(&document, &request, FORM_MEDIA_TYPE);
-        let announced = announced_media_type(&request, expected)?;
+        let announced = announced_media_type(&request, &expected)?;
         let bytes = read_body(request, state).await?;
-        refuse_unannounced(expected, announced, &bytes)?;
+        refuse_unannounced(&expected, announced, &bytes)?;
         Ok(Form(read_pairs(
             &document,
             &ty,

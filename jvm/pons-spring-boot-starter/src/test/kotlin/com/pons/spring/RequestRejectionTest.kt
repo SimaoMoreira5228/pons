@@ -80,7 +80,7 @@ class RequestRejectionTest {
             val rejection = rejection(operation(id))
             assertEquals(ErrorStatus.Exact(422), rejection.status)
             assertEquals(REJECTED_NAME, rejection.name)
-            assertNull(rejection.mediaType)
+            assertNull(rejection.media)
             assertTrue(rejection.headers.isEmpty())
             assertEquals(false, rejection.retryable)
             assertEquals(
@@ -136,7 +136,7 @@ class RequestRejectionTest {
         val rejection = rejection(operation("head"))
         assertNull(rejection.body)
         assertEquals(ErrorContent.Empty, rejection.content)
-        assertNull(rejection.mediaType)
+        assertNull(rejection.media)
     }
 
     @Test

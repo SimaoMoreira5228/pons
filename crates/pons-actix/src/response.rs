@@ -5,7 +5,7 @@ use actix_web::http::StatusCode;
 use actix_web::http::header::{CONTENT_TYPE, HeaderValue};
 use actix_web::{HttpRequest, HttpResponse, Responder};
 use pons_core::Schema;
-use pons_ir::{ContentKind, ResponseStatus};
+use pons_ir::{ContentKind, MediaDescriptor, ResponseStatus};
 
 use crate::describe::{
     DescribeResponse, OperationCx, StatusResponse, invalid_response_header,
@@ -114,7 +114,7 @@ where
         cx.response_with_media::<T>(
             spec_status::<S>(),
             S::content(),
-            S::media_type().map(str::to_owned),
+            S::media_type().map(MediaDescriptor::from_declared),
         );
     }
 }

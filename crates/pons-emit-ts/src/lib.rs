@@ -219,12 +219,19 @@ pub fn emit_with_options(document: &Document, options: TsOptions) -> Result<Emit
     }
     if document.operations.iter().any(|operation| {
         operation.body.as_ref().is_some_and(|body| {
-            body.content == pons_ir::ContentKind::Multipart && body.media_type.is_some()
+            body.content == pons_ir::ContentKind::Multipart && body.media.is_some()
         })
     }) {
         return Err(EmitError(
             "the TypeScript emitter does not support multipart media type overrides".into(),
         ));
+    }
+    let media_codecs = media_codec_paths(&document);
+    if !media_codecs.is_empty() {
+        return Err(EmitError(format!(
+            "the TypeScript emitter cannot honor the media codec ids at {}",
+            media_codecs.join(", ")
+        )));
     }
     if document.operations.iter().any(|operation| {
         operation.stream.as_ref().is_some_and(|stream| {
@@ -386,6 +393,49 @@ pub fn emit_with_options(document: &Document, options: TsOptions) -> Result<Emit
         coverage,
         validation_coverage,
     })
+}
+
+fn media_codec_paths(document: &Document) -> Vec<String> {
+    let mut paths = Vec::new();
+    for (index, error) in document.common_errors.iter().enumerate() {
+        if let Some(codec) = error
+            .media
+            .as_ref()
+            .and_then(|media| media.codec.as_deref())
+        {
+            paths.push(format!("common_errors[{index}] ({codec})"));
+        }
+    }
+    for operation in &document.operations {
+        let owner = format!("operations.{}", pons_ir::operation_path(&operation.id));
+        if let Some(codec) = operation
+            .body
+            .as_ref()
+            .and_then(|body| body.media.as_ref())
+            .and_then(|media| media.codec.as_deref())
+        {
+            paths.push(format!("{owner}.body ({codec})"));
+        }
+        for (index, response) in operation.responses.iter().enumerate() {
+            if let Some(codec) = response
+                .media
+                .as_ref()
+                .and_then(|media| media.codec.as_deref())
+            {
+                paths.push(format!("{owner}.responses[{index}] ({codec})"));
+            }
+        }
+        for (index, error) in operation.errors.iter().enumerate() {
+            if let Some(codec) = error
+                .media
+                .as_ref()
+                .and_then(|media| media.codec.as_deref())
+            {
+                paths.push(format!("{owner}.errors[{index}] ({codec})"));
+            }
+        }
+    }
+    paths
 }
 
 fn strict_validation_error(
@@ -1717,8 +1767,12 @@ mod tests {
             .iter_mut()
             .find(|operation| operation.id[0][0] == "auth")
             .unwrap();
-        login.body.as_mut().unwrap().media_type = Some("application/vnd.acme+json".into());
-        login.responses[0].media_type = Some("application/vnd.acme.session+json".into());
+        login.body.as_mut().unwrap().media = Some(pons_ir::MediaDescriptor::from_declared(
+            "application/vnd.acme+json",
+        ));
+        login.responses[0].media = Some(pons_ir::MediaDescriptor::from_declared(
+            "application/vnd.acme.session+json",
+        ));
         let output = super::emit(&document).unwrap();
         let auth = file(&output, "operations/auth.ts");
         assert!(auth.contains("\"application/vnd.acme+json\""));
@@ -2407,7 +2461,7 @@ mod tests {
             ty: pons_ir::TypeRef::Inline(pons_ir::InlineType::Any),
             content: pons_ir::ContentKind::Json,
             required: true,
-            media_type: None,
+            media: None,
             ext: Default::default(),
         });
         let error = super::emit(&document).unwrap_err();

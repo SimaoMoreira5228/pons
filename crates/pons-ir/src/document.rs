@@ -4,6 +4,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::IR_VERSION;
+use crate::media::MediaDescriptor;
 use crate::migration::MigrationRegistry;
 use crate::operation::{
     ApiKeyLocation, AuthScheme, ContentKind, CredentialLocator, ErrorContent, ErrorResponse,
@@ -110,13 +111,8 @@ impl Encoding {
         }
     }
 
-    fn names(self, media_type: &str) -> bool {
-        let base = media_type
-            .split(';')
-            .next()
-            .unwrap_or_default()
-            .trim()
-            .to_ascii_lowercase();
+    fn names(self, media: &MediaDescriptor) -> bool {
+        let base = media.base();
         let json = base == "application/json" || base.ends_with("+json");
         match self {
             Self::Json => json,
@@ -252,6 +248,9 @@ impl Document {
                 .then_with(|| left.name.cmp(&right.name))
         });
         self.common_errors.iter_mut().for_each(|error| {
+            if let Some(media) = &mut error.media {
+                media.canonicalize();
+            }
             error.headers.sort_by(|left, right| {
                 left.wire
                     .to_ascii_lowercase()
@@ -597,18 +596,18 @@ impl Document {
                         ),
                     });
                 }
-                if body.content == ContentKind::Empty && body.media_type.is_some() {
+                if body.content == ContentKind::Empty && body.media.is_some() {
                     errors.push(ValidationError::InvalidValue {
                         path: owner.clone(),
                         message: "empty request bodies cannot declare a media type".into(),
                     });
                 }
-                if let Some(media_type) = &body.media_type {
-                    self.validate_media_type(
+                if let Some(media) = &body.media {
+                    self.validate_media(
                         &owner,
                         "request body",
                         encoding(body.content),
-                        media_type,
+                        media,
                         &mut errors,
                     );
                 }
@@ -795,7 +794,7 @@ impl Document {
                         message: format!("duplicate response status {}", response.status),
                     });
                 }
-                if response.content == ContentKind::Empty && response.media_type.is_some() {
+                if response.content == ContentKind::Empty && response.media.is_some() {
                     errors.push(ValidationError::InvalidValue {
                         path: owner.clone(),
                         message: format!(
@@ -804,27 +803,27 @@ impl Document {
                         ),
                     });
                 }
-                if let Some(media_type) = &response.media_type {
-                    self.validate_media_type(
+                if let Some(media) = &response.media {
+                    self.validate_media(
                         &owner,
                         &format!("response {} body", response.status),
                         encoding(response.content),
-                        media_type,
+                        media,
                         &mut errors,
                     );
                 }
                 if response.content == ContentKind::Stream
-                    && let Some(media_type) = &response.media_type
+                    && let Some(media) = &response.media
                     && let Some(content_type) = operation
                         .stream
                         .as_ref()
                         .and_then(|stream| stream.kind.media_type())
-                    && !crate::media::media_type_matches(media_type, content_type)
+                    && !crate::media::media_type_matches(&media.to_string(), content_type)
                 {
                     errors.push(ValidationError::InvalidValue {
                         path: owner.clone(),
                         message: format!(
-                            "response media type {media_type:?} does not match stream kind media type {content_type:?}"
+                            "response media type {media} does not match stream kind media type {content_type:?}"
                         ),
                     });
                 }
@@ -1433,24 +1432,24 @@ impl Document {
         }
     }
 
-    fn validate_media_type(
+    fn validate_media(
         &self,
         owner: &str,
         label: &str,
         written: Encoding,
-        value: &str,
+        media: &MediaDescriptor,
         errors: &mut Vec<ValidationError>,
     ) {
-        if !crate::is_valid_media_type(value) {
+        if let Err(message) = media.validate() {
             errors.push(ValidationError::InvalidValue {
                 path: owner.into(),
-                message: format!("{label} has invalid media type {value:?}"),
+                message: format!("{label} has {message}"),
             });
-        } else if !written.names(value) {
+        } else if !written.names(media) {
             errors.push(ValidationError::InvalidValue {
                 path: owner.into(),
                 message: format!(
-                    "{label} has media type {value:?}, which does not name the {} body the client writes",
+                    "{label} has media type {media}, which does not name the {} body the client writes",
                     written.name()
                 ),
             });
@@ -1502,18 +1501,18 @@ impl Document {
                 message: format!("error content {:?} does not match its body", error.content),
             });
         }
-        if error.content == ErrorContent::Empty && error.media_type.is_some() {
+        if error.content == ErrorContent::Empty && error.media.is_some() {
             errors.push(ValidationError::InvalidValue {
                 path: owner.into(),
                 message: "empty errors cannot declare a media type".into(),
             });
         }
-        if let Some(media_type) = &error.media_type {
-            self.validate_media_type(
+        if let Some(media) = &error.media {
+            self.validate_media(
                 owner,
                 "error body",
                 error_encoding(error.content),
-                media_type,
+                media,
                 errors,
             );
         }

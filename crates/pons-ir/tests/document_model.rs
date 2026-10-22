@@ -204,13 +204,17 @@ fn media_types_validate_and_empty_payloads_reject_them() {
         .body
         .as_mut()
         .unwrap()
-        .media_type
-        .clone_from(&Some("application/vnd.acme+json; charset=utf-8".into()));
+        .media
+        .clone_from(&Some(pons_ir::MediaDescriptor::from_declared(
+            "application/vnd.acme+json; charset=utf-8",
+        )));
     document.validate().unwrap();
-    document.operations[0].body.as_mut().unwrap().media_type = Some("not-a-media-type".into());
+    document.operations[0].body.as_mut().unwrap().media =
+        Some(pons_ir::MediaDescriptor::from_declared("not-a-media-type"));
     document.operations[0].responses[0].content = ContentKind::Empty;
     document.operations[0].responses[0].body = None;
-    document.operations[0].responses[0].media_type = Some("application/json".into());
+    document.operations[0].responses[0].media =
+        Some(pons_ir::MediaDescriptor::from_declared("application/json"));
     let errors = document.validate().unwrap_err();
     assert!(
         errors
@@ -241,15 +245,17 @@ fn byte_stream_media_types_are_consistent_and_validated() {
         content_type: "Application/PDF ; Version=1".into(),
     };
     document.validate().unwrap();
-    document.operations[operation_index].responses[0].media_type =
-        Some("application/pdf; version=2".into());
+    document.operations[operation_index].responses[0].media = Some(
+        pons_ir::MediaDescriptor::from_declared("application/pdf; version=2"),
+    );
     assert!(document.validate().unwrap_err().iter().any(|error| {
         error
             .to_string()
             .contains("does not match stream kind media type")
     }));
-    document.operations[operation_index].responses[0].media_type =
-        Some("application/pdf; version=1; extra=value".into());
+    document.operations[operation_index].responses[0].media = Some(
+        pons_ir::MediaDescriptor::from_declared("application/pdf; version=1; extra=value"),
+    );
     document.validate().unwrap();
     document.operations[operation_index]
         .stream
@@ -294,11 +300,13 @@ fn sse_and_ndjson_media_types_are_checked_against_their_kind() {
             format!("{expected}; charset=utf-8"),
             format!("{expected} ; CharSet=UTF-8"),
         ] {
-            document.operations[operation_index].responses[0].media_type = Some(accepted);
+            document.operations[operation_index].responses[0].media =
+                Some(pons_ir::MediaDescriptor::from_declared(accepted));
             document.validate().unwrap();
         }
         for rejected in ["application/json", "application/octet-stream", "text/plain"] {
-            document.operations[operation_index].responses[0].media_type = Some(rejected.into());
+            document.operations[operation_index].responses[0].media =
+                Some(pons_ir::MediaDescriptor::from_declared(rejected));
             assert!(
                 document.validate().unwrap_err().iter().any(|error| error
                     .to_string()

@@ -3,8 +3,8 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use pons_ir::{
-    ContentKind, Document, ErrorContent, Operation, Presence, ResponseHeader, TypeRef,
-    media_type_matches, operation_path, validate_value,
+    ContentKind, Document, ErrorContent, MediaDescriptor, Operation, Presence, ResponseHeader,
+    TypeRef, media_type_matches, operation_path, validate_value,
 };
 use serde_json::Value;
 
@@ -206,7 +206,7 @@ fn execute(document: &Document, client: &Client, plan: &Plan<'_>, id: String) ->
         document,
         &reply,
         plan.success.content.into(),
-        plan.success.media_type.as_deref(),
+        plan.success.media.as_ref(),
         plan.success.body.as_ref(),
         &plan.success.headers,
     );
@@ -256,7 +256,7 @@ fn check_invalid(
         document,
         &reply,
         error.content.into(),
-        error.media_type.as_deref(),
+        error.media.as_ref(),
         error.body.as_ref(),
         &error.headers,
     );
@@ -302,17 +302,12 @@ fn response_problems(
     document: &Document,
     reply: &crate::live::Reply,
     expect: Expect,
-    media_type: Option<&str>,
+    media: Option<&MediaDescriptor>,
     body: Option<&TypeRef>,
     headers: &[ResponseHeader],
 ) -> Vec<String> {
     let mut problems = Vec::new();
-    check_content_type(
-        reply.content_type.as_deref(),
-        expect,
-        media_type,
-        &mut problems,
-    );
+    check_content_type(reply.content_type.as_deref(), expect, media, &mut problems);
     match expect {
         Expect::Empty => {}
         Expect::Text => {
@@ -359,19 +354,16 @@ fn response_problems(
 fn check_content_type(
     found: Option<&str>,
     expect: Expect,
-    media_type: Option<&str>,
+    media: Option<&MediaDescriptor>,
     problems: &mut Vec<String>,
 ) {
     if matches!(expect, Expect::Empty) {
         return;
     }
     let found = found.unwrap_or_default();
-    if let Some(media_type) = media_type {
-        if !media_type_matches(found, media_type) {
-            problems.push(format!(
-                "expected content type {media_type}, found {:?}",
-                found
-            ));
+    if let Some(media) = media {
+        if !media_type_matches(found, &media.to_string()) {
+            problems.push(format!("expected content type {media}, found {:?}", found));
         }
         return;
     }

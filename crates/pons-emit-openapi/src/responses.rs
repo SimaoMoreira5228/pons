@@ -1,6 +1,6 @@
 use pons_ir::{
-    ContentKind, ErrorContent, ErrorStatus, Operation, Presence, ResponseHeader, ResponseStatus,
-    StreamKind, TypeRef, is_valid_media_type,
+    ContentKind, ErrorContent, ErrorStatus, MediaDescriptor, Operation, Presence, ResponseHeader,
+    ResponseStatus, StreamKind, TypeRef, is_valid_media_type,
 };
 use serde_json::{Map, Value, json};
 
@@ -20,7 +20,7 @@ impl Builder<'_> {
             let media = media_type(
                 response.content,
                 operation.stream.as_ref(),
-                response.media_type.as_deref(),
+                response.media.as_ref(),
             )?;
             let mut value = json!({"description":"Response"});
             match response.content {
@@ -54,7 +54,7 @@ impl Builder<'_> {
                 }
             }
             add_response_headers(self, &response.headers, &mut value, "response")?;
-            value["x-pons"] = json!({"status":response.status,"body":response.body,"content":response.content,"media_type":response.media_type,"ext":response.ext});
+            value["x-pons"] = json!({"status":response.status,"body":response.body,"content":response.content,"media":response.media,"ext":response.ext});
             responses.insert(success_status(response.status), value);
         }
         self.add_errors(operation, &mut responses)?;
@@ -90,7 +90,7 @@ impl Builder<'_> {
             "status": 101,
             "body": null,
             "content": ContentKind::Empty,
-            "media_type": null,
+            "media": null,
             "ext": ext,
             "websocket": {
                 "client": self.type_schema(client)?,
@@ -130,8 +130,9 @@ impl Builder<'_> {
                     EmitError(format!("error {:?} is missing its body", error.name))
                 })?;
                 let media = error
-                    .media_type
-                    .clone()
+                    .media
+                    .as_ref()
+                    .map(ToString::to_string)
                     .unwrap_or_else(|| error_media_type(error.content).into());
                 value["content"] = media_content(media, self.type_schema(body)?);
             }
@@ -139,7 +140,7 @@ impl Builder<'_> {
             if let Some(retryable) = error.retryable {
                 value["x-pons-retryable"] = json!(retryable);
             }
-            value["x-pons"] = json!({"name":error.name,"body":error.body,"headers":error.headers,"content":error.content,"media_type":error.media_type,"doc":error.doc,"ext":error.ext});
+            value["x-pons"] = json!({"name":error.name,"body":error.body,"headers":error.headers,"content":error.content,"media":error.media,"doc":error.doc,"ext":error.ext});
             responses.insert(status, value);
         }
         Ok(())
@@ -172,7 +173,7 @@ impl Builder<'_> {
 pub(super) fn media_type(
     content: ContentKind,
     stream: Option<&pons_ir::StreamDescription>,
-    override_type: Option<&str>,
+    override_media: Option<&MediaDescriptor>,
 ) -> Result<Option<String>, EmitError> {
     if let Some(StreamKind::Bytes { content_type }) = stream.map(|stream| &stream.kind)
         && !is_valid_media_type(content_type)
@@ -182,19 +183,19 @@ pub(super) fn media_type(
         )));
     }
     if content == ContentKind::Stream
-        && let Some(value) = override_type
+        && let Some(media) = override_media
         && let Some(expected) = stream.and_then(|stream| stream.kind.media_type())
-        && !pons_ir::media_type_matches(value, expected)
+        && !pons_ir::media_type_matches(&media.to_string(), expected)
     {
         return Err(EmitError(format!(
-            "response media type {value:?} does not match stream kind media type {expected:?}"
+            "response media type {media} does not match stream kind media type {expected:?}"
         )));
     }
-    if let Some(value) = override_type {
-        if !is_valid_media_type(value) {
-            return Err(EmitError(format!("invalid media type {value:?}")));
-        }
-        return Ok(Some(value.into()));
+    if let Some(media) = override_media {
+        media
+            .validate()
+            .map_err(|message| EmitError(message.to_string()))?;
+        return Ok(Some(media.to_string()));
     }
     Ok(Some(match content {
         ContentKind::Json => "application/json".into(),
@@ -340,7 +341,7 @@ mod tests {
         Response {
             status: ResponseStatus::Exact(101),
             content: ContentKind::Empty,
-            media_type: None,
+            media: None,
             body: None,
             headers: Vec::new(),
             ext: Default::default(),
@@ -398,7 +399,7 @@ mod tests {
             status: pons_ir::ErrorStatus::Exact(403),
             name: vec!["forbidden".into()],
             content: pons_ir::ErrorContent::Json,
-            media_type: None,
+            media: None,
             body: Some(string()),
             headers: Vec::new(),
             retryable: None,

@@ -4285,7 +4285,7 @@ fn rejects_multipart_media_type_overrides() {
         serde_json::from_str(include_str!("../../../fixtures/login.json")).unwrap();
     let body = document.operations[0].body.as_mut().unwrap();
     body.content = ContentKind::Multipart;
-    body.media_type = Some("multipart/mixed".into());
+    body.media = Some(pons_ir::MediaDescriptor::from_declared("multipart/mixed"));
     let error = emit_with_strategy(&document, EmitMode::Strict, ErrorStrategy::Throw).unwrap_err();
     assert!(error.0.contains("multipart media type overrides"));
 }
@@ -4331,7 +4331,9 @@ if (count !== 2) throw new Error(`expected 2 events, received ${count}`);
 fn accepts_bare_json_when_contract_media_type_has_parameters() {
     let mut document: pons_ir::Document =
         serde_json::from_str(include_str!("../../../fixtures/login.json")).unwrap();
-    document.operations[0].responses[0].media_type = Some("application/json; charset=utf-8".into());
+    document.operations[0].responses[0].media = Some(pons_ir::MediaDescriptor::from_declared(
+        "application/json; charset=utf-8",
+    ));
     let files = emit_with_strategy(&document, EmitMode::Strict, ErrorStrategy::Throw)
         .unwrap()
         .files;
@@ -4360,7 +4362,7 @@ fn byte_response_media_matching_remains_strict() {
     response.body = Some(TypeRef::Inline(InlineType::Bytes {
         encoding: ByteEncoding::Base64,
     }));
-    response.media_type = Some("application/pdf; version=1".into());
+    response.media = Some("application/pdf; version=1".into());
     let files = emit_with_strategy(&document, EmitMode::Strict, ErrorStrategy::Throw)
         .unwrap()
         .files;

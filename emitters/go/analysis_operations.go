@@ -128,7 +128,7 @@ func (a *analysis) buildBody(plan *operationPlan, params *nameRegistry, origin s
 		a.addProblem(origin, "the request body content %q is not supported; this emitter reads JSON bodies", requestBody.Content)
 		return
 	}
-	if err := checkJSONMediaType(requestBody.MediaType); err != nil {
+	if err := checkJSONMediaType(requestBody.Media); err != nil {
 		a.addProblem(origin, "the request body %s", err)
 		return
 	}
@@ -164,7 +164,7 @@ func (a *analysis) buildSuccess(plan *operationPlan, origin string) {
 		a.addProblem(origin, "the success response declares typed headers, which this emitter does not expose")
 		return
 	}
-	if err := checkJSONMediaType(response.MediaType); err != nil {
+	if err := checkJSONMediaType(response.Media); err != nil {
 		a.addProblem(origin, "the success response %s", err)
 		return
 	}
@@ -221,7 +221,7 @@ func (a *analysis) observeError(response *errorResponse, origin string) (string,
 		a.addProblem(origin, "the error %s declares typed headers, which this emitter does not expose", statusText(response.Status))
 		return "", false
 	}
-	if err := checkJSONMediaType(response.MediaType); err != nil {
+	if err := checkJSONMediaType(response.Media); err != nil {
 		a.addProblem(origin, "the error %s %s", statusText(response.Status), err)
 		return "", false
 	}
@@ -308,15 +308,20 @@ func (a *analysis) observeAuth(op *operation, origin string) authPlan {
 	}
 	return plan
 }
-func checkJSONMediaType(mediaType *string) error {
-	if mediaType == nil || *mediaType == "" {
+func checkJSONMediaType(media *mediaDescriptor) error {
+	if media == nil {
 		return nil
 	}
-	base := strings.ToLower(strings.TrimSpace(strings.Split(*mediaType, ";")[0]))
-	if base == "application/json" {
-		return nil
+	if len(media.Parameters) > 0 {
+		return fmt.Errorf("uses media type parameters, which this emitter does not write")
 	}
-	return fmt.Errorf("uses the media type %q; this emitter writes application/json", *mediaType)
+	if media.Codec != nil {
+		return fmt.Errorf("declares media codec %q, which this emitter does not implement", *media.Codec)
+	}
+	if strings.ToLower(media.Type) != "application" || strings.ToLower(media.Subtype) != "json" {
+		return fmt.Errorf("uses the media type %s/%s; this emitter writes application/json", media.Type, media.Subtype)
+	}
+	return nil
 }
 func refSignature(ref typeRef) string {
 	if ref.Named {

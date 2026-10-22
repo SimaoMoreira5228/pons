@@ -30,7 +30,7 @@ where
             Ok(contract) => contract,
             Err(report) => return Box::pin(async move { Err(report) }),
         };
-        let expected = declared_media_type(&document, request, JSON_MEDIA_TYPE).to_owned();
+        let expected = declared_media_type(&document, request, JSON_MEDIA_TYPE);
         let announced = announced_media_type(request, &expected);
         let body = actix_web::web::Bytes::from_request(request, payload);
         Box::pin(async move {
@@ -98,7 +98,7 @@ where
             let pairs = decode_pairs(request.query_string());
             return Box::pin(async move { read_pairs(&document, &ty, pairs).map(Form) });
         }
-        let expected = declared_media_type(&document, request, FORM_MEDIA_TYPE).to_owned();
+        let expected = declared_media_type(&document, request, FORM_MEDIA_TYPE);
         let announced = announced_media_type(request, &expected);
         let body = actix_web::web::Bytes::from_request(request, payload);
         Box::pin(async move {

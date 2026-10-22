@@ -136,7 +136,7 @@ impl Builder<'_> {
     }
 
     fn request_body(&self, body: &pons_ir::Body) -> Result<Value, EmitError> {
-        let media = media_type(body.content, None, body.media_type.as_deref())?
+        let media = media_type(body.content, None, body.media.as_ref())?
             .ok_or_else(|| EmitError("request body cannot use empty content".into()))?;
         let schema = if body.content == ContentKind::Bytes {
             json!({})
@@ -160,7 +160,7 @@ impl Builder<'_> {
         Ok(json!({
             "required":body.required,
             "content":content,
-            "x-pons":{"ty":body.ty,"required":body.required,"content":body.content,"media_type":body.media_type,"ext":body.ext}
+            "x-pons":{"ty":body.ty,"required":body.required,"content":body.content,"media":body.media,"ext":body.ext}
         }))
     }
 

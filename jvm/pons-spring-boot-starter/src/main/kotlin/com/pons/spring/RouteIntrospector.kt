@@ -5,6 +5,7 @@ import com.fasterxml.jackson.databind.annotation.JsonSerialize
 import com.fasterxml.jackson.databind.ser.std.ToStringSerializer
 import com.pons.ir.Body as IrBody
 import com.pons.ir.ContentKind
+import com.pons.ir.parseMediaDescriptor
 import com.pons.ir.CredentialProvision
 import com.pons.ir.Diagnostic
 import com.pons.ir.DiagnosticSeverity
@@ -254,7 +255,7 @@ internal class RouteIntrospector(
                             ty = ty,
                             content = requestContent.kind,
                             required = annotation.required && !shape.nullable,
-                            mediaType = requestContent.mediaType,
+                            media = requestContent.mediaType?.let(::parseMediaDescriptor),
                         )
                     }
                 }
@@ -482,7 +483,7 @@ internal class RouteIntrospector(
             IrResponse(
                 status = status,
                 content = if (empty) ContentKind.Empty else content,
-                mediaType = if (empty) null else mediaType,
+                media = if (empty) null else mediaType?.let(::parseMediaDescriptor),
                 body = body,
                 headers = responseHeaders(handler),
             ),

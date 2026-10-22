@@ -518,7 +518,8 @@ mod tests {
             operation.stream.as_mut().unwrap().kind = StreamKind::Bytes {
                 content_type: "application/pdf".into(),
             };
-            operation.responses[0].media_type = Some("application/json".into());
+            operation.responses[0].media =
+                Some(pons_ir::MediaDescriptor::from_declared("application/json"));
         }
         assert!(
             super::emit(&document)
@@ -533,7 +534,7 @@ mod tests {
             .find(|operation| operation.stream.is_some())
             .unwrap()
             .responses[0]
-            .media_type = Some("application/pdf".into());
+            .media = Some(pons_ir::MediaDescriptor::from_declared("application/pdf"));
         assert!(super::emit(&document).is_ok());
 
         {
@@ -545,7 +546,9 @@ mod tests {
             operation.stream.as_mut().unwrap().kind = StreamKind::Bytes {
                 content_type: "Application/PDF ; Version=1".into(),
             };
-            operation.responses[0].media_type = Some("application/pdf; version=1".into());
+            operation.responses[0].media = Some(pons_ir::MediaDescriptor::from_declared(
+                "application/pdf; version=1",
+            ));
         }
         assert!(super::emit(&document).is_ok());
     }
@@ -575,7 +578,8 @@ mod tests {
                     .find(|operation| operation.stream.is_some())
                     .unwrap();
                 operation.stream.as_mut().unwrap().kind = kind.clone();
-                operation.responses[0].media_type = Some(media_type.clone());
+                operation.responses[0].media =
+                    Some(pons_ir::MediaDescriptor::from_declared(media_type.clone()));
                 assert_eq!(
                     super::emit(&document).is_ok(),
                     accepted,
@@ -589,7 +593,7 @@ mod tests {
                 .find(|operation| operation.stream.is_some())
                 .unwrap();
             operation.stream.as_mut().unwrap().kind = kind;
-            operation.responses[0].media_type = None;
+            operation.responses[0].media = None;
             let emitted: Value = serde_json::from_str(&super::emit(&document).unwrap()).unwrap();
             assert!(emitted.to_string().contains(expected));
         }
@@ -1100,9 +1104,15 @@ mod tests {
             .iter_mut()
             .find(|operation| operation.id[0][0] == "auth")
             .unwrap();
-        login.body.as_mut().unwrap().media_type = Some("application/vnd.acme+json".into());
-        login.responses[0].media_type = Some("application/vnd.acme.session+json".into());
-        login.errors[0].media_type = Some("application/vnd.acme.error+json".into());
+        login.body.as_mut().unwrap().media = Some(pons_ir::MediaDescriptor::from_declared(
+            "application/vnd.acme+json",
+        ));
+        login.responses[0].media = Some(pons_ir::MediaDescriptor::from_declared(
+            "application/vnd.acme.session+json",
+        ));
+        login.errors[0].media = Some(pons_ir::MediaDescriptor::from_declared(
+            "application/vnd.acme.error+json",
+        ));
         let output: Value = serde_json::from_str(&super::emit(&document).unwrap()).unwrap();
         let login = &output["paths"]["/auth/login"]["post"];
         assert!(login["requestBody"]["content"]["application/vnd.acme+json"].is_object());

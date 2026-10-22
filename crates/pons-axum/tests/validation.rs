@@ -1418,7 +1418,7 @@ fn a_head_operation_declares_the_rejection_without_a_body() {
             rejection.body.is_none(),
             "/{literal} cannot carry a rejection body"
         );
-        assert!(rejection.media_type.is_none());
+        assert!(rejection.media.is_none());
     }
 }
 
@@ -1713,7 +1713,10 @@ fn a_body_is_accepted_with_the_media_type_its_operation_declares() {
     let body = operation(&document, "notes").body.as_ref().unwrap();
     assert_eq!(body.content, ContentKind::Json);
     assert_eq!(
-        body.media_type.as_deref(),
+        body.media
+            .as_ref()
+            .map(|media| media.to_string())
+            .as_deref(),
         Some("application/vnd.note+json")
     );
 
@@ -1747,7 +1750,9 @@ fn the_media_type_of_the_route_the_router_picks_is_the_one_it_enforces() {
             .body
             .as_ref()
             .unwrap()
-            .media_type
+            .media
+            .as_ref()
+            .map(ToString::to_string)
             .as_deref(),
         Some("application/vnd.note+json")
     );
@@ -1892,7 +1897,7 @@ fn a_path_parameter_is_not_the_operation_beyond_its_own_segment() {
             .route("/assets/{id}/raw", post(plain_item))
     }
     let document = router().into_document().unwrap();
-    let published: BTreeMap<String, Option<String>> = document
+    let published: BTreeMap<String, Option<pons_ir::MediaDescriptor>> = document
         .operations
         .iter()
         .map(|operation| {
@@ -1907,16 +1912,15 @@ fn a_path_parameter_is_not_the_operation_beyond_its_own_segment() {
                 .join("/");
             (
                 path,
-                operation
-                    .body
-                    .as_ref()
-                    .and_then(|body| body.media_type.clone()),
+                operation.body.as_ref().and_then(|body| body.media.clone()),
             )
         })
         .collect();
     assert_eq!(
         published.get("assets/{id}"),
-        Some(&Some("application/vnd.note+json".to_owned()))
+        Some(&Some(pons_ir::MediaDescriptor::from_declared(
+            "application/vnd.note+json"
+        )))
     );
     assert_eq!(
         published.get("assets/{id}/raw"),
@@ -2005,7 +2009,7 @@ fn a_common_error_that_spells_the_media_type_the_rejection_answers_with_owns_the
             pons_axum::ViolationReport::errors(cx)
                 .into_iter()
                 .map(|mut error| {
-                    error.media_type = Some("application/json".into());
+                    error.media = Some(pons_ir::MediaDescriptor::from_declared("application/json"));
                     error.name = vec!["loud".into()];
                     error
                 })
@@ -2019,7 +2023,11 @@ fn a_common_error_that_spells_the_media_type_the_rejection_answers_with_owns_the
         .into_document()
         .expect("the media type the rejection answers with is not a disagreement");
     assert_eq!(
-        document.common_errors[0].media_type.as_deref(),
+        document.common_errors[0]
+            .media
+            .as_ref()
+            .map(|media| media.to_string())
+            .as_deref(),
         Some("application/json"),
         "the common error spells what the rejection's content kind already answers"
     );
@@ -2127,7 +2135,9 @@ fn a_common_error_that_answers_the_rejection_as_another_media_type_does_not_own_
             pons_axum::ViolationReport::errors(cx)
                 .into_iter()
                 .map(|mut error| {
-                    error.media_type = Some("application/problem+json".into());
+                    error.media = Some(pons_ir::MediaDescriptor::from_declared(
+                        "application/problem+json",
+                    ));
                     error.name = vec!["vendor".into()];
                     error
                 })
@@ -2144,11 +2154,15 @@ fn a_common_error_that_answers_the_rejection_as_another_media_type_does_not_own_
     let rejection = declared_rejection(&document, "vendored")
         .expect("/vendored declares the rejection the runtime can serve");
     assert_eq!(
-        rejection.media_type, None,
+        rejection.media, None,
         "the runtime answers the rejection as the content kind spells it, application/json"
     );
     assert_eq!(
-        document.common_errors[0].media_type.as_deref(),
+        document.common_errors[0]
+            .media
+            .as_ref()
+            .map(|media| media.to_string())
+            .as_deref(),
         Some("application/problem+json")
     );
     let diagnostic = operation(&document, "vendored")
