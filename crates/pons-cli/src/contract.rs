@@ -10,18 +10,20 @@ use serde_json::Value;
 
 use crate::live::Client;
 
+mod auth;
 mod plan;
 
+use auth::Auth;
 use plan::{Plan, RequestPlan, declared_errors, matching_error, plan};
 
 const DEFAULT_TIMEOUT_SECS: u64 = 10;
 
 pub(crate) fn run(args: &[OsString]) -> Result<(), crate::CliError> {
-    let options = Options::parse(args)?;
+    let mut options = Options::parse(args)?;
     let document = crate::read_document(&options.document)?;
     crate::validate(&document)?;
     let client = Client::new(&options.base_url, options.timeout);
-    let outcomes = check(&document, &client);
+    let outcomes = check(&document, &client, &mut options.auth);
     let summary = report(&outcomes);
     if summary.failed > 0 {
         return Err(crate::CliError::Failure(format!(
@@ -36,6 +38,7 @@ struct Options {
     document: PathBuf,
     base_url: String,
     timeout: Duration,
+    auth: Auth,
 }
 
 impl Options {
@@ -43,6 +46,10 @@ impl Options {
         let mut positionals = Vec::new();
         let mut base_url = None;
         let mut timeout = None;
+        let mut bearer = None;
+        let mut api_keys = Vec::new();
+        let mut headers = Vec::new();
+        let mut cookies = Vec::new();
         let mut index = 0;
         while index < args.len() {
             let Some(argument) = args[index].to_str() else {
@@ -86,6 +93,31 @@ impl Options {
                     }
                     timeout = Some(seconds);
                 }
+                "--bearer" if bearer.is_some() => {
+                    return Err(crate::CliError::Usage(
+                        "--bearer given more than once".into(),
+                    ));
+                }
+                "--bearer" => {
+                    index += 1;
+                    let value = value_for("--bearer", args.get(index))?;
+                    bearer = Some(credential("--bearer", value)?);
+                }
+                "--api-key" => {
+                    index += 1;
+                    let value = value_for("--api-key", args.get(index))?;
+                    api_keys.push(pair("--api-key", value)?);
+                }
+                "--header" => {
+                    index += 1;
+                    let value = value_for("--header", args.get(index))?;
+                    headers.push(header(value)?);
+                }
+                "--cookie" => {
+                    index += 1;
+                    let value = value_for("--cookie", args.get(index))?;
+                    cookies.push(pair("--cookie", value)?);
+                }
                 other if other.starts_with('-') => {
                     return Err(crate::CliError::Usage(format!(
                         "unexpected test option {other:?}"
@@ -116,8 +148,66 @@ impl Options {
             document,
             base_url,
             timeout: Duration::from_secs(timeout.unwrap_or(DEFAULT_TIMEOUT_SECS)),
+            auth: Auth::new(bearer, api_keys, headers, cookies),
         })
     }
+}
+
+fn credential(flag: &str, value: &str) -> Result<String, crate::CliError> {
+    if value.is_empty() || value.chars().any(char::is_control) {
+        return Err(crate::CliError::Usage(format!(
+            "{flag} expects a non-empty value without control characters"
+        )));
+    }
+    Ok(value.to_owned())
+}
+
+fn pair(flag: &str, value: &str) -> Result<(String, String), crate::CliError> {
+    let Some((name, value)) = value.split_once('=') else {
+        return Err(crate::CliError::Usage(format!(
+            "{flag} expects <name>=<value>, not {value:?}"
+        )));
+    };
+    let name = name.trim();
+    if name.is_empty() {
+        return Err(crate::CliError::Usage(format!(
+            "{flag} expects a cookie or key name before '='"
+        )));
+    }
+    if name.chars().any(char::is_control)
+        || value
+            .chars()
+            .any(|character| matches!(character, '\r' | '\n'))
+    {
+        return Err(crate::CliError::Usage(format!(
+            "{flag} names and values must stay on one line"
+        )));
+    }
+    Ok((name.to_owned(), value.to_owned()))
+}
+
+fn header(value: &str) -> Result<(String, String), crate::CliError> {
+    let Some((name, value)) = value.split_once(':') else {
+        return Err(crate::CliError::Usage(format!(
+            "--header expects <name>:<value>, not {value:?}"
+        )));
+    };
+    let name = name.trim();
+    if name.is_empty() {
+        return Err(crate::CliError::Usage(
+            "--header expects a name before ':'".into(),
+        ));
+    }
+    if name.chars().any(char::is_control)
+        || value
+            .chars()
+            .any(|character| matches!(character, '\r' | '\n'))
+    {
+        return Err(crate::CliError::Usage(
+            "--header names and values must stay on one line".into(),
+        ));
+    }
+    Ok((name.to_owned(), value.trim_start().to_owned()))
 }
 
 fn value_for<'a>(flag: &str, value: Option<&'a OsString>) -> Result<&'a str, crate::CliError> {
@@ -167,23 +257,29 @@ enum Outcome {
     },
 }
 
-fn check(document: &Document, client: &Client) -> Vec<Outcome> {
+fn check(document: &Document, client: &Client, auth: &mut Auth) -> Vec<Outcome> {
     let mut outcomes = Vec::new();
     for operation in &document.operations {
         let id = operation_path(&operation.id);
-        let plan = match plan(document, operation) {
+        let plan = match plan(document, operation, auth) {
             Ok(plan) => plan,
             Err(reason) => {
                 outcomes.push(Outcome::Skipped { id, reason });
                 continue;
             }
         };
-        outcomes.push(execute(document, client, &plan, id));
+        outcomes.push(execute(document, client, &plan, id, auth));
     }
     outcomes
 }
 
-fn execute(document: &Document, client: &Client, plan: &Plan<'_>, id: String) -> Outcome {
+fn execute(
+    document: &Document,
+    client: &Client,
+    plan: &Plan<'_>,
+    id: String,
+    auth: &mut Auth,
+) -> Outcome {
     let reply = match client.send(&plan.valid.request()) {
         Ok(reply) => reply,
         Err(error) => {
@@ -211,6 +307,9 @@ fn execute(document: &Document, client: &Client, plan: &Plan<'_>, id: String) ->
         &plan.success.headers,
     );
     if !problems.is_empty() {
+        return Outcome::Failed { id, problems };
+    }
+    if let Err(problems) = auth.capture(plan.operation, &reply) {
         return Outcome::Failed { id, problems };
     }
     let invalid = match &plan.invalid {
@@ -340,7 +439,8 @@ fn response_problems(
         }
         if !reply
             .headers
-            .contains_key(&header.wire.to_ascii_lowercase())
+            .get(&header.wire.to_ascii_lowercase())
+            .is_some_and(|values| !values.is_empty())
         {
             problems.push(format!(
                 "required response header {} is missing",

@@ -4,7 +4,41 @@ use std::path::Path;
 
 use crate::CliError;
 
-pub(crate) fn run(path: &Path) -> Result<(), CliError> {
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Kind {
+    Axum,
+    Spring,
+    Python,
+}
+
+impl Kind {
+    pub(crate) fn parse(word: &str) -> Option<Self> {
+        match word {
+            "axum" => Some(Self::Axum),
+            "spring" => Some(Self::Spring),
+            "python" => Some(Self::Python),
+            _ => None,
+        }
+    }
+
+    fn name(self) -> &'static str {
+        match self {
+            Self::Axum => "axum",
+            Self::Spring => "spring",
+            Self::Python => "python",
+        }
+    }
+
+    fn command(self) -> &'static str {
+        match self {
+            Self::Axum => "cargo pons export",
+            Self::Spring => "./gradlew --quiet ponsExport",
+            Self::Python => "python -m pons_fastapi myapp:app",
+        }
+    }
+}
+
+pub(crate) fn run(path: &Path, kind: Kind) -> Result<(), CliError> {
     let directory = path
         .parent()
         .filter(|parent| !parent.as_os_str().is_empty())
@@ -13,7 +47,7 @@ pub(crate) fn run(path: &Path) -> Result<(), CliError> {
         CliError::Failure(format!("cannot create {}: {error}", directory.display()))
     })?;
     let name = project_name(directory)?;
-    crate::file::write_new(path, &starter(&name))?;
+    crate::file::write_new(path, &starter(&name, kind))?;
     println!("wrote {}", path.display());
     Ok(())
 }
@@ -37,10 +71,12 @@ fn project_name(directory: &Path) -> Result<String, CliError> {
         })
 }
 
-fn starter(name: &str) -> String {
+fn starter(name: &str, kind: Kind) -> String {
     format!(
-        "[project]\nname = {name}\nir = \"api/ir.json\"\n\n[frontend]\nkind = \"axum\"\ncommand = \"cargo pons export\"\n\n[emit.ts]\nout_dir = \"web/src/api\"\nmode = \"strict\"\n",
-        name = toml_string(name)
+        "[project]\nname = {name}\nir = \"api/ir.json\"\n\n[frontend]\nkind = {kind}\ncommand = {command}\n\n[emit.ts]\nout_dir = \"web/src/api\"\nmode = \"strict\"\n",
+        name = toml_string(name),
+        kind = toml_string(kind.name()),
+        command = toml_string(kind.command())
     )
 }
 
@@ -76,7 +112,7 @@ mod tests {
         fs::create_dir(&root).unwrap();
         let path = root.join(config::FILE_NAME);
 
-        run(&path).unwrap();
+        run(&path, Kind::Axum).unwrap();
 
         let source = fs::read_to_string(&path).unwrap();
         assert!(source.contains("name = \"acme\""), "{source}");
@@ -90,12 +126,31 @@ mod tests {
     }
 
     #[test]
+    fn every_kind_writes_its_frontend_and_command() {
+        for (kind, expected) in [
+            (Kind::Axum, "cargo pons export"),
+            (Kind::Spring, "./gradlew --quiet ponsExport"),
+            (Kind::Python, "python -m pons_fastapi myapp:app"),
+        ] {
+            let directory = tempfile::tempdir().unwrap();
+            let path = directory.path().join(config::FILE_NAME);
+
+            run(&path, kind).unwrap();
+
+            let loaded = config::load(path).unwrap();
+            let frontend = loaded.frontend().expect("the starter names a frontend");
+            assert_eq!(frontend.name(), kind.name());
+            assert_eq!(frontend.command(), expected);
+        }
+    }
+
+    #[test]
     fn an_existing_file_is_left_alone() {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join(config::FILE_NAME);
         fs::write(&path, "hand written\n").unwrap();
 
-        let error = run(&path).unwrap_err();
+        let error = run(&path, Kind::Axum).unwrap_err();
         assert_eq!(
             error.message(),
             format!("{} already exists", path.display())

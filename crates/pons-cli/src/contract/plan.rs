@@ -1,15 +1,16 @@
 use std::collections::BTreeSet;
 
 use pons_ir::{
-    Access, AuthScheme, ContentKind, Document, ErrorResponse, ErrorStatus, FieldDefault,
-    InlineType, Method, ObjectOpenness, Operation, PathSegment, Presence, Response, ResponseStatus,
-    TypeKind, TypeRef, VariantPayload, query_fields, validate_value,
+    Access, ContentKind, Document, ErrorResponse, ErrorStatus, FieldDefault, InlineType, Method,
+    ObjectOpenness, Operation, PathSegment, Presence, Response, ResponseStatus, TypeKind, TypeRef,
+    VariantPayload, query_fields, validate_value,
 };
 use serde_json::{Map, Value};
 
 use crate::example::Examples;
 use crate::mutate;
 
+use super::auth::Auth;
 use super::{
     content_name, default_content_type, header_text, join_path, json_content, json_media,
     percent_encode, render_violations, scalar_text,
@@ -50,15 +51,10 @@ impl RequestPlan {
 pub(super) fn plan<'a>(
     document: &'a Document,
     operation: &'a Operation,
+    auth: &Auth,
 ) -> Result<Plan<'a>, String> {
     if operation.stream.is_some() {
         return Err("streams are not exercised".into());
-    }
-    if operation.provides.is_some() {
-        return Err("the operation provides a credential".into());
-    }
-    if let Some(reason) = authentication(document, operation) {
-        return Err(reason);
     }
     if let Some(body) = &operation.body {
         if !json_content(body.content) {
@@ -215,6 +211,12 @@ pub(super) fn plan<'a>(
         headers.push((header.wire.clone(), text));
     }
 
+    let attachment = auth.attach(document, operation)?;
+    for (name, value) in attachment.headers {
+        set_header(&mut headers, name, value);
+    }
+    query.extend(attachment.query);
+
     let mut body = None;
     let mut body_value = None;
     if let Some(declared) = &operation.body {
@@ -333,28 +335,13 @@ fn success_response(operation: &Operation) -> Option<&Response> {
         })
 }
 
-fn authentication(document: &Document, operation: &Operation) -> Option<String> {
-    if operation.auth.alternatives.is_empty() || operation.auth.optional {
-        return None;
-    }
-    let schemes = operation
-        .auth
-        .alternatives
-        .iter()
-        .flatten()
-        .map(String::as_str)
-        .collect::<BTreeSet<_>>();
-    let named = schemes.iter().copied().collect::<Vec<_>>().join(", ");
-    let custom = schemes.iter().any(|scheme| {
-        matches!(
-            document.auth_schemes.get(*scheme),
-            Some(AuthScheme::Custom { .. })
-        )
-    });
-    if custom {
-        Some(format!("custom authentication is required ({named})"))
-    } else {
-        Some(format!("authentication is required ({named})"))
+fn set_header(headers: &mut Vec<(String, String)>, name: String, value: String) {
+    match headers
+        .iter_mut()
+        .find(|(existing, _)| existing.eq_ignore_ascii_case(&name))
+    {
+        Some((_, existing)) => *existing = value,
+        None => headers.push((name, value)),
     }
 }
 

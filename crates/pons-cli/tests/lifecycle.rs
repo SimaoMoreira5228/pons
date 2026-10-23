@@ -73,6 +73,50 @@ fn init_takes_a_path_and_creates_only_its_parent() {
 }
 
 #[test]
+fn init_writes_the_requested_frontend_kind() {
+    for (kind, command) in [
+        ("axum", "cargo pons export"),
+        ("spring", "./gradlew --quiet ponsExport"),
+        ("python", "python -m pons_fastapi myapp:app"),
+    ] {
+        let directory = tempfile::tempdir().unwrap();
+        let output = pons()
+            .args(["init", "--kind", kind])
+            .current_dir(directory.path())
+            .output()
+            .unwrap();
+
+        assert!(
+            output.status.success(),
+            "{kind}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let source = fs::read_to_string(directory.path().join("pons.toml")).unwrap();
+        assert!(source.contains(&format!("kind = \"{kind}\"")), "{source}");
+        assert!(
+            source.contains(&format!("command = \"{command}\"")),
+            "{source}"
+        );
+    }
+}
+
+#[test]
+fn init_refuses_an_unknown_kind() {
+    let directory = tempfile::tempdir().unwrap();
+
+    let output = pons()
+        .args(["init", "--kind", "warp"])
+        .current_dir(directory.path())
+        .output()
+        .unwrap();
+
+    assert_eq!(output.status.code(), Some(4));
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("axum, spring, or python"), "{stderr}");
+    assert!(!directory.path().join("pons.toml").exists());
+}
+
+#[test]
 fn init_refuses_an_existing_file() {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("pons.toml");

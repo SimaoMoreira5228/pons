@@ -1,4 +1,5 @@
 use std::collections::BTreeMap;
+
 use std::time::Duration;
 
 use pons_ir::Method;
@@ -64,13 +65,19 @@ impl Client {
 
         let mut response = response;
         let status = response.status().as_u16();
-        let mut headers = BTreeMap::new();
+        let mut headers: BTreeMap<String, Vec<String>> = BTreeMap::new();
         for (name, value) in response.headers() {
             if let Ok(value) = value.to_str() {
-                headers.insert(name.as_str().to_ascii_lowercase(), value.to_owned());
+                headers
+                    .entry(name.as_str().to_ascii_lowercase())
+                    .or_default()
+                    .push(value.to_owned());
             }
         }
-        let content_type = headers.get("content-type").cloned();
+        let content_type = headers
+            .get("content-type")
+            .and_then(|values| values.first())
+            .cloned();
         let body = response
             .body_mut()
             .with_config()
@@ -102,7 +109,7 @@ pub(crate) struct Body<'a> {
 pub(crate) struct Reply {
     pub(crate) status: u16,
     pub(crate) content_type: Option<String>,
-    pub(crate) headers: BTreeMap<String, String>,
+    pub(crate) headers: BTreeMap<String, Vec<String>>,
     pub(crate) body: String,
 }
 

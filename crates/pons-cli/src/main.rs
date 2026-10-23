@@ -22,7 +22,7 @@ use pons_plugin::EmitMode;
 
 use options::{EmitArgs, validation_backend};
 
-const HELP: &str = "Usage: pons <command> [arguments]\n\nCommands:\n  init [path]                                  Write a starter pons.toml (default pons.toml)\n  export                                       Run the [frontend] command and write project.ir\n  check <ir.json>                              Validate an IR document\n  fmt <ir.json>                                Rewrite an IR document in canonical form\n  diff <old.json> <new.json>                   Classify changes between two IR documents\n  test <ir.json> --base-url <url> [--timeout <seconds>]\n                                                Generate requests and check them against a running server\n                                                (default timeout: 10 seconds)\n  emit --target <name> [ir.json] [output-dir] [--strict|--lossy] [--errors <neverthrow|throw>] [--validation <backend>] [--coverage <relative-file>] [--dump-request <relative-file>]\n                                                Generate files (built-in: ts, openapi)\n      --strict                                 Reject unsupported/lossy coverage; opaque is allowed on ts/openapi, and on a plugin that declares it (default)\n      --lossy                                  Emit non-exact coverage with warnings\n      --errors <neverthrow|throw>              TypeScript target only: neverthrow (default), throw\n      --validation <backend>                   TypeScript target only: none, builtin, zod, valibot, arktype, typebox, yup, superstruct\n      --coverage <relative-file>               Write emitter coverage as JSON\n      --dump-request <relative-file>           Write the emit request as JSON, and run no emitter\n\n  A document and an output directory may come from pons.toml, so \"emit --target ts\" is enough\n  there. A flag beats the file, and the file beats the default.\n\n  pons.toml names the frontend that produces the IR:\n    [frontend]\n    kind = \"axum\"        # axum or spring\n    command = \"cargo pons export\"\n  A missing command defaults to \"cargo pons export\" for axum and \"./gradlew ponsExport\"\n  for spring. export writes project.ir, and no server starts.\n\nExit codes:\n  0  success, and a diff that found nothing to report\n  1  diff only: the contract changed, but nothing in it is breaking\n  2  diff only: the new contract has a breaking change\n  3  diff only: the new contract is invalid\n  4  the arguments are wrong, and so is a pons.toml that does not parse or that names a key its\n     table does not hold and a value its option does not take\n  5  the tool could not do its job: an unreadable or malformed document, a\n     check/fmt validation failure, a frontend/init failure, an emit failure, or\n     a test operation that did not match the contract or could not reach the server\n";
+const HELP: &str = "Usage: pons <command> [arguments]\n\nCommands:\n  init [path] [--kind <axum|spring|python>]      Write a starter pons.toml (default pons.toml, kind axum)\n  export                                       Run the [frontend] command and write project.ir\n  check <ir.json>                              Validate an IR document\n  fmt <ir.json>                                Rewrite an IR document in canonical form\n  diff <old.json> <new.json>                   Classify changes between two IR documents\n  test <ir.json> --base-url <url> [--timeout <seconds>] [--bearer <token>] [--api-key <name>=<value>]... [--header <name>:<value>]... [--cookie <name>=<value>]...\n                                                Generate requests and check them against a running server\n                                                (default timeout: 10 seconds)\n  emit --target <name> [ir.json] [output-dir] [--strict|--lossy] [--errors <neverthrow|throw>] [--validation <backend>] [--coverage <relative-file>] [--dump-request <relative-file>]\n                                                Generate files (built-in: ts, openapi)\n      --strict                                 Reject unsupported/lossy coverage; opaque is allowed on ts/openapi, and on a plugin that declares it (default)\n      --lossy                                  Emit non-exact coverage with warnings\n      --errors <neverthrow|throw>              TypeScript target only: neverthrow (default), throw\n      --validation <backend>                   TypeScript target only: none, builtin, zod, valibot, arktype, typebox, yup, superstruct\n      --coverage <relative-file>               Write emitter coverage as JSON\n      --dump-request <relative-file>           Write the emit request as JSON, and run no emitter\n\n  A document and an output directory may come from pons.toml, so \"emit --target ts\" is enough\n  there. A flag beats the file, and the file beats the default.\n\n  pons.toml names the frontend that produces the IR:\n    [frontend]\n    kind = \"axum\"        # axum, spring, or a named frontend with an explicit command\n    command = \"cargo pons export\"\n  A missing command defaults to \"cargo pons export\" for axum and \"./gradlew --quiet ponsExport\"\n  for spring. export writes project.ir, and no server starts.\n\n  pons test attaches supplied credentials to operations that declare the matching scheme:\n    --bearer <token>              Authorization: Bearer <token>\n    --api-key <name>=<value>      keyed by scheme name or the scheme's declared key name\n    --header <name>:<value>       a raw header on every request\n    --cookie <name>=<value>       a raw cookie on every request\n  A credential a response provides is reused later in the same run. Custom authentication\n  is not attempted.\n\nExit codes:\n  0  success, and a diff that found nothing to report\n  1  diff only: the contract changed, but nothing in it is breaking\n  2  diff only: the new contract has a breaking change\n  3  diff only: the new contract is invalid\n  4  the arguments are wrong, and so is a pons.toml that does not parse or that names a key its\n     table does not hold and a value its option does not take\n  5  the tool could not do its job: an unreadable or malformed document, a\n     check/fmt validation failure, a frontend/init failure, an emit failure, or\n     a test operation that did not match the contract or could not reach the server\n";
 
 fn main() -> ExitCode {
     match run(env::args_os().skip(1).collect()) {
@@ -59,17 +59,48 @@ fn run(args: Vec<OsString>) -> Result<(), CliError> {
         return Ok(());
     }
     if command == "init" {
-        if args.len() > 2 {
-            return Err(CliError::Usage(format!(
-                "init takes at most one path, got {}",
-                args.len() - 1
-            )));
+        let mut path = None;
+        let mut kind = init::Kind::Axum;
+        let mut kind_given = false;
+        let mut positionals = 0;
+        let mut index = 1;
+        while index < args.len() {
+            let Some(argument) = args[index].to_str() else {
+                return Err(CliError::Usage(format!(
+                    "init argument {index} is not valid UTF-8"
+                )));
+            };
+            match argument {
+                "--kind" if kind_given => {
+                    return Err(CliError::Usage("--kind given more than once".into()));
+                }
+                "--kind" => {
+                    index += 1;
+                    let value = value_for("--kind", args.get(index))?;
+                    kind = init::Kind::parse(value).ok_or_else(|| {
+                        CliError::Usage(format!(
+                            "--kind expects axum, spring, or python, not {value:?}"
+                        ))
+                    })?;
+                    kind_given = true;
+                }
+                other if other.starts_with('-') => {
+                    return Err(CliError::Usage(format!("unexpected init option {other:?}")));
+                }
+                _ => {
+                    positionals += 1;
+                    if positionals > 1 {
+                        return Err(CliError::Usage(format!(
+                            "init takes at most one path, got {positionals}"
+                        )));
+                    }
+                    path = Some(Path::new(&args[index]));
+                }
+            }
+            index += 1;
         }
-        let path = args
-            .get(1)
-            .map(Path::new)
-            .unwrap_or(Path::new(config::FILE_NAME));
-        return init::run(path);
+        let path = path.unwrap_or(Path::new(config::FILE_NAME));
+        return init::run(path, kind);
     }
     if command == "export" {
         if args.len() != 1 {
