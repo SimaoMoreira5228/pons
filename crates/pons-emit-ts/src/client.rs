@@ -93,27 +93,11 @@ fn operation_type_names(document: &Document) -> Vec<Vec<String>> {
         .collect()
 }
 
-pub(super) fn error_types(error_strategy: ErrorStrategy) -> String {
-    let mut output = if error_strategy == ErrorStrategy::Throw {
-        String::from(
-            "type Result<T, E> = { isOk(): boolean; isErr(): boolean; value?: T; error?: E };\nfunction ok<T>(value: T): Result<T, never> { return { isOk: () => true, isErr: () => false, value }; }\nfunction err<E>(error: E): Result<never, E> { return { isOk: () => false, isErr: () => true, error }; }\nexport { ok, err };\nexport type { Result };\n",
-        )
-    } else {
-        String::from(
-            "import { err, ok, type Result } from \"neverthrow\";\nexport { err, ok };\nexport type { Result };\n",
-        )
-    };
-    output.push_str("export type ResponseWithHeaders<T, H> = { value: T; headers: H };\n");
-    output.push_str("export type ResponseWithStatus<T> = { value: T; status: number };\n");
-    output.push_str("export type ClientFailure = { kind: \"network\"; cause: unknown } | { kind: \"timeout\"; afterMs: number } | { kind: \"aborted\"; cause: unknown } | { kind: \"auth_adapter\"; scheme: string; cause: unknown } | { kind: \"auth_source\"; scheme: string; cause: unknown } | { kind: \"opaque_codec\"; codec: string; phase: \"encode\" | \"decode\"; cause: unknown } | { kind: \"transport\"; phase: \"request\" | \"response\"; cause: unknown } | { kind: \"protocol\"; message: string; cause?: unknown } | { kind: \"unexpected_http\"; status: number; body: unknown } | { kind: \"auth\"; schemes: string[] };\n");
-    output
-}
-
 pub(super) fn index(validation: Option<&str>) -> GeneratedFile {
     GeneratedFile {
         path: "index.ts".into(),
         content: format!(
-            "export * from \"./client.js\";\n{}",
+            "export * from \"./errors.js\";\nexport * from \"./client.js\";\n{}",
             validation.map_or_else(String::new, |module| format!(
                 "export * from \"./{module}.js\";\n"
             ))
@@ -178,6 +162,8 @@ pub(super) fn emit(
         namespace.declarations.push(declarations);
         namespace.aliases.extend(declaration_names.iter().cloned());
         namespace.is_operation |= parents.is_empty() || options.namespaces == Namespaces::Flat;
+        namespace.declares_api_error |= !operation.errors.is_empty()
+            || (operation.errors_inherit && !document.common_errors.is_empty());
         namespace.encodes_path |= !operation.path.is_empty();
         namespace.carries_path_values |= operation
             .path
@@ -187,10 +173,17 @@ pub(super) fn emit(
             .stream
             .as_ref()
             .is_some_and(|stream| matches!(stream.kind, StreamKind::Websocket { .. }));
-        namespace.streams |= matches!(
+        let sse = matches!(
             operation.stream.as_ref().map(|stream| &stream.kind),
-            Some(StreamKind::Sse { .. } | StreamKind::Ndjson { .. })
+            Some(StreamKind::Sse { .. })
         );
+        let ndjson = matches!(
+            operation.stream.as_ref().map(|stream| &stream.kind),
+            Some(StreamKind::Ndjson { .. })
+        );
+        namespace.sse |= sse;
+        namespace.ndjson |= ndjson;
+        namespace.streams |= sse || ndjson;
         namespace.websockets |= websocket;
         namespace.uses_request |= !websocket;
         if !websocket {
@@ -254,7 +247,10 @@ struct Namespace {
     encodes_path: bool,
     carries_path_values: bool,
     streams: bool,
+    sse: bool,
+    ndjson: bool,
     websockets: bool,
+    declares_api_error: bool,
     uses_request: bool,
     wraps_status: bool,
     declares_headers: bool,
@@ -292,6 +288,9 @@ fn namespace_file(
     }
     output.push_str("import type { CallOptions } from \"../client.js\";\n");
     let mut declared = vec!["ClientFailure"];
+    if namespace.declares_api_error {
+        declared.push("ApiError");
+    }
     if namespace.declares_headers {
         declared.push("ResponseWithHeaders");
     }
@@ -300,6 +299,15 @@ fn namespace_file(
     }
     if namespace.streams {
         declared.push("Result");
+    }
+    if namespace.sse {
+        declared.push("SseStreamError");
+    }
+    if namespace.ndjson {
+        declared.push("NdjsonStreamError");
+    }
+    if namespace.websockets {
+        declared.push("WebSocketFailure");
     }
     output.push_str(&format!(
         "import type {{ {} }} from \"../errors.js\";\n",
@@ -312,7 +320,7 @@ fn namespace_file(
     ));
     if namespace.websockets {
         output.push_str(&format!(
-            "import type {{ WebSocketConnection, WebSocketFailure }} from {runtime_specifier};\n"
+            "import type {{ WebSocketConnection }} from {runtime_specifier};\n"
         ));
     }
     if let Some(module) = namespace.validation_module {
@@ -763,30 +771,28 @@ fn response_type(
                 ))
             })
             .collect::<Result<Vec<_>, EmitError>>()?;
-        let mut stream_failures = vec![
-            "{ kind: \"stream_error\"; cause: unknown }".to_owned(),
-            "{ kind: \"unknown_event\"; event: string }".to_owned(),
-            "{ kind: \"invalid_event\"; event: string; cause: unknown }".to_owned(),
-        ];
-        for event in events.iter().filter(|event| event.event == "error") {
-            stream_failures.push(format!(
-                "{{ kind: \"server_error\"; body: {} }}",
-                types::type_ref(&event.data, document, names, options)?
-            ));
-        }
+        let error_bodies = events
+            .iter()
+            .filter(|event| event.event == "error")
+            .map(|event| types::type_ref(&event.data, document, names, options))
+            .collect::<Result<Vec<_>, EmitError>>()?;
+        let error_body = if error_bodies.is_empty() {
+            "never".to_owned()
+        } else {
+            error_bodies.join(" | ")
+        };
         let stream_type = format!("AsyncIterable<Result<{event_name}, {failure_name}>>");
         let response_type =
             stream_response_type(operation, &stream_type, document, names, options)?;
         return Ok((
             response_type,
             format!(
-                "export type {event_name} = {};\nexport type {failure_name} = {};\n",
+                "export type {event_name} = {};\nexport type {failure_name} = SseStreamError<{error_body}>;\n",
                 if variants.is_empty() {
                     "never".into()
                 } else {
                     variants.join(" | ")
                 },
-                stream_failures.join(" | ")
             ),
         ));
     }
@@ -798,7 +804,7 @@ fn response_type(
         return Ok((
             stream_response_type(operation, &stream_type, document, names, options)?,
             format!(
-                "export type {item_name} = {};\nexport type {failure_name} = {{ kind: \"stream_error\"; cause: unknown }} | {{ kind: \"invalid_item\"; cause: unknown }};\n",
+                "export type {item_name} = {};\nexport type {failure_name} = NdjsonStreamError;\n",
                 types::type_ref(item, document, names, options)?
             ),
         ));
@@ -926,7 +932,7 @@ fn error_type(
         let body = body.unwrap_or_else(|| "unknown".into());
         failures.push((
             error.doc.as_ref(),
-            format!("{{ kind: \"http\"; status: {status}; body: {body}; headers: {headers} }}"),
+            format!("ApiError<{status}, {body}, {headers}>"),
         ));
     }
     Ok(union_type(&failures))

@@ -170,7 +170,7 @@ export class CredentialSourceError extends Error {
   }
 }
 
-export class CredentialRedirectError extends Error {
+export class CredentialRedirectFailure extends Error {
   constructor(readonly schemes: string[]) {
     super(schemes.length > 0
       ? "redirect would forward credentials outside their scope"

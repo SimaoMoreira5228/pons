@@ -1,5 +1,20 @@
 import type { CallOptions } from "../client.js";
-import { err, ok, type ClientFailure, type Result } from "../errors.js";
+import {
+  err,
+  ok,
+  type AuthAdapterError,
+  type AuthSourceError,
+  type AuthUnavailableError,
+  type ClientFailure,
+  type ConfigurationError,
+  type RequestError,
+  type Result,
+  type WebSocketClosedError,
+  type WebSocketDecodeError,
+  type WebSocketFailure,
+  type WebSocketSendError,
+  type WebSocketValidationError,
+} from "../errors.js";
 import { decodeWire, encodeWire, parseJson, stringifyCarrier, stringifyJson } from "./codec.js";
 import {
   CredentialSourceError,
@@ -30,13 +45,6 @@ export type WebSocketConstructor = new (
   protocols?: string | string[],
   options?: { headers?: Record<string, string> },
 ) => WebSocketLike;
-
-export type WebSocketFailure =
-  | { kind: "closed"; code: number; reason: string; cause?: unknown }
-  | { kind: "send"; cause: unknown }
-  | { kind: "parse"; cause: unknown }
-  | { kind: "invalid_message"; cause: unknown }
-  | { kind: "validation"; cause: unknown };
 
 export type WebSocketConnection<Client, Server> = {
   send(message: Client): Result<void, WebSocketFailure>;
@@ -69,6 +77,24 @@ export type WebSocketRequestSpec = {
 
 const OPEN = 1;
 const MAX_TIMER_DELAY = 2_147_483_647;
+
+function authUnavailable(schemes: string[]): AuthUnavailableError {
+  return { _tag: "AuthUnavailableError", schemes };
+}
+
+function configurationFailure(message: string): ConfigurationError {
+  return { _tag: "ConfigurationError", message };
+}
+
+function requestFailure(message: string): RequestError {
+  return { _tag: "RequestError", message };
+}
+
+function closedFailure(code: number, reason: string, cause?: unknown): WebSocketClosedError {
+  return cause === undefined
+    ? { _tag: "WebSocketClosedError", code, reason }
+    : { _tag: "WebSocketClosedError", code, reason, cause };
+}
 
 class MessageQueue<T> implements AsyncIterable<T> {
   private buffered: T[] = [];
@@ -140,11 +166,11 @@ export async function websocket<Client, Server>(
     if (socketUrl.protocol === "http:") socketUrl.protocol = "ws:";
     else if (socketUrl.protocol === "https:") socketUrl.protocol = "wss:";
     else if (socketUrl.protocol !== "ws:" && socketUrl.protocol !== "wss:") {
-      return err({ kind: "protocol", message: `unsupported websocket base URL protocol ${socketUrl.protocol}` });
+      return err(configurationFailure(`unsupported websocket base URL protocol ${socketUrl.protocol}`));
     }
     const Constructor = client.webSocket ?? defaultWebSocketConstructor();
     if (Constructor === undefined) {
-      return err({ kind: "protocol", message: "no WebSocket constructor is available in this runtime" });
+      return err(configurationFailure("no WebSocket constructor is available in this runtime"));
     }
     const handshake: Record<string, string> = {};
     headers.forEach((value, name) => {
@@ -154,17 +180,17 @@ export async function websocket<Client, Server>(
     try {
       socket = new Constructor(socketUrl.href, undefined, { headers: handshake });
     } catch (cause) {
-      return err({ kind: "network", cause });
+      return err({ _tag: "NetworkError", cause });
     }
     const connected = await waitForOpen(socket, timeoutMs, parentSignal);
     if (connected.isErr()) return err(connected.error as ClientFailure);
     return ok(connection(client, spec, socket, preserveWideIntegers, parentSignal));
   } catch (cause) {
     if (cause instanceof CredentialSourceError) {
-      return err({ kind: "auth_source", scheme: cause.scheme, cause: cause.sourceCause });
+      return err({ _tag: "AuthSourceError", scheme: cause.scheme, cause: cause.sourceCause } satisfies AuthSourceError);
     }
-    if (cause instanceof WirePolicyError) return err({ kind: "protocol", message: cause.message });
-    return err({ kind: "network", cause });
+    if (cause instanceof WirePolicyError) return err(requestFailure(cause.message));
+    return err({ _tag: "NetworkError", cause });
   }
 }
 
@@ -240,7 +266,7 @@ async function attachAuth(
   }
   if (active === undefined) {
     if (auth?.optional) return undefined;
-    return { kind: "auth", schemes: groups.flat() };
+    return authUnavailable(groups.flat());
   }
   for (const scheme of active) {
     const definition = client.authSchemes[scheme];
@@ -255,14 +281,14 @@ async function attachAuth(
         for (const [key, value] of Object.entries(attachment.query ?? {})) url.searchParams.set(key, value);
         for (const [key, value] of Object.entries(attachment.cookies ?? {})) setCookieHeader(headers, key, value, scheme);
       } catch (cause) {
-        return { kind: "auth_adapter", scheme, cause };
+        return { _tag: "AuthAdapterError", scheme, cause } satisfies AuthAdapterError;
       }
       continue;
     }
     const credential = await valueFor(scheme);
     const value = credential.value;
     if (value === undefined) {
-      if (!auth?.optional) return { kind: "auth", schemes: [scheme] };
+      if (!auth?.optional) return authUnavailable([scheme]);
       continue;
     }
     if (definition.kind === "bearer") headers.set("authorization", `Bearer ${value}`);
@@ -303,14 +329,11 @@ function waitForOpen(
       }
     };
     const onOpen = () => settle(ok(undefined));
-    const onError = (event: WebSocketEvent) => settle(err({ kind: "network", cause: event }));
-    const onClose = (event: WebSocketEvent) => settle(err({
-      kind: "network",
-      cause: { code: event.code ?? 1006, reason: event.reason ?? "" },
-    }));
+    const onError = (event: WebSocketEvent) => settle(err({ _tag: "NetworkError", cause: event }));
+    const onClose = (event: WebSocketEvent) => settle(err({ _tag: "NetworkError", cause: { code: event.code ?? 1006, reason: event.reason ?? "" } }));
     const onAbort = () => {
       close();
-      settle(err({ kind: "aborted", cause: signal?.reason }));
+      settle(err({ _tag: "AbortedError", cause: signal?.reason }));
     };
     socket.addEventListener("open", onOpen);
     socket.addEventListener("error", onError);
@@ -326,7 +349,7 @@ function waitForOpen(
       ? undefined
       : setTimeout(() => {
         close();
-        settle(err({ kind: "timeout", afterMs: timeoutMs }));
+        settle(err({ _tag: "TimeoutError", afterMs: timeoutMs }));
       }, timeoutMs);
   });
 }
@@ -346,28 +369,28 @@ function connection<Client, Server>(
   });
   const inbound = (data: unknown): Result<Server, WebSocketFailure> => {
     if (typeof data !== "string") {
-      return err({ kind: "invalid_message", cause: new Error("the websocket message is not text") });
+      return err({ _tag: "WebSocketDecodeError", cause: new Error("the websocket message is not text") } satisfies WebSocketDecodeError);
     }
     let parsed: unknown;
     try {
       parsed = parseJson(data, preserveWideIntegers);
     } catch (cause) {
-      return err({ kind: "parse", cause });
+      return err({ _tag: "WebSocketDecodeError", cause } satisfies WebSocketDecodeError);
     }
     let decoded: unknown;
     try {
       decoded = decodeWire(parsed, spec.server.schema, preserveWideIntegers, client.opaque);
     } catch (cause) {
-      return err({ kind: "invalid_message", cause });
+      return err({ _tag: "WebSocketDecodeError", cause } satisfies WebSocketDecodeError);
     }
     if (spec.server.validate !== undefined) {
       let violation: unknown;
       try {
         violation = spec.server.validate(decoded);
       } catch (cause) {
-        return err({ kind: "validation", cause });
+        return err({ _tag: "WebSocketValidationError", cause } satisfies WebSocketValidationError);
       }
-      if (violation !== null) return err({ kind: "validation", cause: violation });
+      if (violation !== null) return err({ _tag: "WebSocketValidationError", cause: violation } satisfies WebSocketValidationError);
     }
     return ok(decoded as Server);
   };
@@ -377,7 +400,7 @@ function connection<Client, Server>(
   const onClose = (event: WebSocketEvent) => {
     const info = { code: event.code ?? 1006, reason: event.reason ?? "" };
     if (!locallyClosed) {
-      messages.push(err({ kind: "closed", ...info }));
+      messages.push(err(closedFailure(info.code, info.reason)));
     }
     messages.finish();
     if (signal !== undefined) signal.removeEventListener("abort", onAbort);
@@ -385,7 +408,7 @@ function connection<Client, Server>(
   };
   const onError = (event: WebSocketEvent) => {
     if (socket.readyState !== OPEN) {
-      messages.push(err({ kind: "closed", code: 1006, reason: "socket error", cause: event }));
+      messages.push(err(closedFailure(1006, "socket error", event)));
       messages.finish();
     }
   };
@@ -410,15 +433,15 @@ function connection<Client, Server>(
     else signal.addEventListener("abort", onAbort, { once: true });
   }
   return {
-    send(message: Client) {
+    send(message: Client): Result<void, WebSocketFailure> {
       if (locallyClosed || socket.readyState !== OPEN) {
-        return err({ kind: "send", cause: new Error("the websocket is not open") });
+        return err({ _tag: "WebSocketSendError", cause: new Error("the websocket is not open") } satisfies WebSocketSendError);
       }
       try {
         socket.send(stringifyJson(encodeWire(message, spec.client.schema, client.opaque)));
         return ok(undefined);
       } catch (cause) {
-        return err({ kind: "send", cause });
+        return err({ _tag: "WebSocketSendError", cause } satisfies WebSocketSendError);
       }
     },
     messages,

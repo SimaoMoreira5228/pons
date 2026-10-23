@@ -137,7 +137,7 @@ assert.equal((first.value as any).value.id, "1");
 socket.emit("message", { data: JSON.stringify({ id: 1 }) });
 const second = await messages.next();
 assert.ok(second.value.isErr());
-assert.equal((second.value as any).error.kind, "invalid_message");
+assert.equal((second.value as any).error._tag, "WebSocketDecodeError");
 
 connection.close();
 assert.equal((await connection.closed).code, 1000);

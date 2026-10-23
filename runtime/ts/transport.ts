@@ -1,8 +1,27 @@
 import type { AuthSchemeDefinition, CallOptions, ClientOptions, RetryOptions } from "../client.js";
-import { err, ok, type ClientFailure, type Result } from "../errors.js";
+import {
+  err,
+  ok,
+  type AbortedError,
+  type ApiError,
+  type AuthAdapterError,
+  type AuthSourceError,
+  type AuthUnavailableError,
+  type ClientFailure,
+  type CredentialRedirectError,
+  type DecodeError,
+  type NetworkError,
+  type OpaqueCodecError,
+  type RedirectError,
+  type RequestError,
+  type Result,
+  type TimeoutError,
+  type TransportHookError,
+  type UnexpectedStatusError,
+} from "../errors.js";
 import { typeDefinitions } from "../types.js";
 import {
-  OpaqueCodecError,
+  OpaqueCodecFailure,
   copyRecord,
   decodeWire,
   encodeWire,
@@ -15,7 +34,7 @@ import {
   type OpaqueContext,
 } from "./codec.js";
 import {
-  CredentialRedirectError,
+  CredentialRedirectFailure,
   CredentialSourceError,
   captureCredential,
   cookiePathMatches,
@@ -44,6 +63,8 @@ class ResponseHeaderDecodeError extends Error {
     super(message);
   }
 }
+
+class RedirectFailure extends Error {}
 
 export type ConfiguredClient = ClientOptions & {
   authRecords: Record<string, CredentialValue[]>;
@@ -103,6 +124,24 @@ export type AttachedQueryCredential = { scheme: string; params: Array<[string, s
 type AttachedCredentialOrigin = { scheme: string; origin: string };
 type AttachedCookie = { scheme: string; path?: string | undefined; secure?: boolean | undefined; host?: string | undefined };
 
+function authUnavailable(schemes: string[]): AuthUnavailableError {
+  return { _tag: "AuthUnavailableError", schemes };
+}
+
+function decodeFailure(status: number, issues: readonly string[], body: unknown, cause?: unknown): DecodeError {
+  return cause === undefined
+    ? { _tag: "DecodeError", status, issues, message: issues.join("; "), body }
+    : { _tag: "DecodeError", status, issues, message: issues.join("; "), body, cause };
+}
+
+function requestFailure(message: string): RequestError {
+  return { _tag: "RequestError", message };
+}
+
+function redirectFailure(message: string): RedirectError {
+  return { _tag: "RedirectError", message };
+}
+
 export async function request<T, E>(
   client: ConfiguredClient,
   spec: RequestSpec,
@@ -139,6 +178,9 @@ export async function request<T, E>(
     else parentSignal.addEventListener("abort", abortParent, { once: true });
   }
   const signal = timeoutController?.signal ?? parentSignal;
+  let phase: "request" | "response" = "request";
+  let responseStatus = 0;
+  let responseBody: unknown;
   try {
     const encodedPathValues = preflightPath(pathValues, inputs.path, client.opaque);
     const encodedQuery = preflightQuery(query, inputs.query, client.opaque);
@@ -221,7 +263,7 @@ export async function request<T, E>(
       }
     }
     if (authGroups.length && !activeGroup && !authOptional) {
-      return err({ kind: "auth", schemes: authGroups.flat() });
+      return err(authUnavailable(authGroups.flat()));
     }
     const attachedCredentialOrigins: AttachedCredentialOrigin[] = [];
     const attachedCookies: AttachedCookie[] = [];
@@ -246,7 +288,7 @@ export async function request<T, E>(
           if (customQuery.length > 0) attachedQueryCredentials.push({ scheme, params: customQuery });
           attachedCredentialOrigins.push({ scheme, origin: url.origin });
         } catch (cause) {
-          return err({ kind: "auth_adapter", scheme, cause });
+          return err({ _tag: "AuthAdapterError", scheme, cause } satisfies AuthAdapterError);
         }
         continue;
       }
@@ -262,7 +304,7 @@ export async function request<T, E>(
       const credential = await resolveCredential(scheme);
       const value = credential.value;
       if (value === undefined) {
-        if (!authOptional) return err({ kind: "auth", schemes: [scheme] });
+        if (!authOptional) return err(authUnavailable([scheme]));
         continue;
       }
       attachedCredentialOrigins.push({ scheme, origin: url.origin });
@@ -316,13 +358,13 @@ export async function request<T, E>(
       try {
         await client.transport.onRequest({ url, init });
       } catch (cause) {
-        return err({ kind: "transport", phase: "request", cause });
+        return err({ _tag: "TransportHookError", phase: "request", cause } satisfies TransportHookError);
       }
     }
     init.redirect = "manual";
     for (const credential of attachedCredentialOrigins) {
       if (credential.origin !== url.origin) {
-        return err({ kind: "auth", schemes: [credential.scheme] });
+        return err(authUnavailable([credential.scheme]));
       }
     }
     for (const cookie of attachedCookies) {
@@ -334,9 +376,10 @@ export async function request<T, E>(
         (cookie.secure && url.protocol !== "https:")
       ) {
         removeCookieHeader(headers, definition.name!);
-        return err({ kind: "auth", schemes: [cookie.scheme] });
+        return err(authUnavailable([cookie.scheme]));
       }
     }
+    phase = "response";
     const redirectResult = await fetchWithRedirect(
       client,
       provides,
@@ -361,24 +404,29 @@ export async function request<T, E>(
     const response = redirectResult.response;
     const finalUrl = redirectResult.url;
     const finalInit = redirectResult.init;
+    responseStatus = response.status;
     if (client.transport?.onResponse) {
       try {
         await client.transport.onResponse({ response, url: finalUrl, init: finalInit });
       } catch (cause) {
-        return err({ kind: "transport", phase: "response", cause });
+        return err({ _tag: "TransportHookError", phase: "response", cause } satisfies TransportHookError);
       }
     }
     const responseContent = response.headers.get("content-type") ?? "";
     const matched = matchResponse(responses, errors, response.status);
     const declaredSuccess = matched.success;
     const declaredError = matched.error;
-    if (declaredSuccess === undefined && declaredError === undefined && response.status >= 200 && response.status < 300) {
-      return err({ kind: "protocol", message: `undeclared success response ${response.status}` });
+    if (declaredSuccess === undefined && declaredError === undefined) {
+      return err({
+        _tag: "UnexpectedStatusError",
+        status: response.status,
+        body: await readUnexpectedBody(response, responseContent),
+      } satisfies UnexpectedStatusError);
     }
     const responseSchema = declaredSuccess ?? declaredError;
     const missingHeader = responseSchema?.headers?.find((header) => header.required && !response.headers.has(header.name));
     if (missingHeader) {
-      return err({ kind: "protocol", message: `missing required response header ${missingHeader.name}` });
+      return err(decodeFailure(response.status, [`missing required response header ${missingHeader.name}`], undefined));
     }
     const responseKind = responseSchema?.content;
     const expectedContentTypes: Record<string, string> = {
@@ -397,10 +445,10 @@ export async function request<T, E>(
       ? mediaTypeMatches(actualContentType, expectedContentType ?? "")
       : responseMediaTypeMatches(actualContentType, expectedContentType ?? "");
     if (expectedContentType !== undefined && !contentTypeMatches) {
-      return err({ kind: "protocol", message: `expected ${expectedContentType}, received ${responseContent || "no content type"}` });
+      return err(decodeFailure(response.status, [`expected ${expectedContentType}, received ${responseContent || "no content type"}`], undefined));
     }
     if (declaredSuccess?.content === "stream") {
-      if (!response.body) return err({ kind: "protocol", message: "the event stream has no response body" });
+      if (!response.body) return err(decodeFailure(response.status, ["the event stream has no response body"], undefined));
       await captureCredential(client, response, provides, undefined, false, finalUrl);
       if (declaredSuccess.stream === "ndjson") {
         return ok(withSuccessStatus(readNdjson(response.body, declaredSuccess.schema, declaredSuccess.validate, preserveWideIntegers, client.opaque), response, declaredSuccess, preserveWideIntegers, client.opaque) as T);
@@ -412,7 +460,7 @@ export async function request<T, E>(
     const textResponse = responseKind === "text" ||
       (!responseKind && responseContent.startsWith("text/"));
     if (responseKind === "empty" && await responseHasBody(response)) {
-      return err({ kind: "protocol", message: "empty response contains a body" });
+      return err(decodeFailure(response.status, ["empty response contains a body"], undefined));
     }
     let rawValue: unknown;
     if (response.status === 204 || response.status === 304 || responseKind === "empty") {
@@ -421,14 +469,15 @@ export async function request<T, E>(
       const text = await readResponseText(response, responseContent);
       try {
         rawValue = parseJson(text, preserveWideIntegers);
-      } catch {
-        return err({ kind: "protocol", message: "invalid JSON response" });
+      } catch (cause) {
+        return err(decodeFailure(response.status, ["invalid JSON response"], text, cause));
       }
     } else if (textResponse) {
       rawValue = await readResponseText(response, responseContent);
     } else {
       rawValue = await readBoundedBytes(response);
     }
+    responseBody = rawValue;
     if (declaredSuccess !== undefined) {
       await captureCredential(client, response, provides, rawValue, true, finalUrl);
     }
@@ -441,46 +490,54 @@ export async function request<T, E>(
       try {
         violation = responseSchema.validate(value);
       } catch (cause) {
-        return err({
-          kind: "protocol",
-          message: "the response does not match the contract: the validator threw",
+        return err(decodeFailure(
+          response.status,
+          ["the response does not match the contract: the validator threw"],
+          rawValue,
           cause,
-        });
+        ));
       }
-      if (violation !== null) return err(contractFailure(violation));
+      if (violation !== null) return err(contractFailure(violation, response.status, rawValue));
     }
     if (declaredSuccess === undefined) {
       return declaredError
         ? err({
-          kind: "http",
+          _tag: "ApiError",
           status: response.status,
           body: value,
           headers: declaredError.headers
             ? responseHeaders(response, declaredError.headers, preserveWideIntegers, client.opaque)
             : response.headers,
-        } as E)
-        : err({ kind: "unexpected_http", status: response.status, body: value });
+        } satisfies ApiError<number, unknown, unknown> as E)
+        : err({ _tag: "UnexpectedStatusError", status: response.status, body: value } satisfies UnexpectedStatusError);
     }
     return ok(withSuccessStatus(value, response, declaredSuccess, preserveWideIntegers, client.opaque) as T);
   } catch (cause) {
-    if (timedOut) return err({ kind: "timeout", afterMs: timeoutMs! });
-    if (cause instanceof CredentialRedirectError) {
+    if (timedOut) return err({ _tag: "TimeoutError", afterMs: timeoutMs! } satisfies TimeoutError);
+    if (cause instanceof CredentialRedirectFailure) {
       return err(cause.schemes.length > 0
-        ? { kind: "auth", schemes: cause.schemes }
-        : { kind: "protocol", message: cause.message });
+        ? { _tag: "CredentialRedirectError", schemes: cause.schemes } satisfies CredentialRedirectError
+        : redirectFailure(cause.message));
     }
+    if (cause instanceof RedirectFailure) return err(redirectFailure(cause.message));
     if (cause instanceof ResponseHeaderDecodeError) {
-      return cause.sourceCause === undefined
-        ? err({ kind: "protocol", message: cause.message })
-        : err({ kind: "protocol", message: cause.message, cause: cause.sourceCause });
+      return err(decodeFailure(responseStatus, [cause.message], responseBody, cause.sourceCause));
     }
-    if (cause instanceof WirePolicyError) return err({ kind: "protocol", message: cause.message });
-    if (cause instanceof CredentialSourceError) return err({ kind: "auth_source", scheme: cause.scheme, cause: cause.sourceCause });
-    if (cause instanceof OpaqueCodecError) return err({ kind: "opaque_codec", codec: cause.codec, phase: cause.phase, cause: cause.sourceCause });
+    if (cause instanceof WirePolicyError) {
+      return err(phase === "request"
+        ? requestFailure(cause.message)
+        : decodeFailure(responseStatus, [cause.message], responseBody));
+    }
+    if (cause instanceof CredentialSourceError) {
+      return err({ _tag: "AuthSourceError", scheme: cause.scheme, cause: cause.sourceCause } satisfies AuthSourceError);
+    }
+    if (cause instanceof OpaqueCodecFailure) {
+      return err({ _tag: "OpaqueCodecError", codec: cause.codec, phase: cause.phase, cause: cause.sourceCause } satisfies OpaqueCodecError);
+    }
     if (typeof DOMException !== "undefined" && cause instanceof DOMException && cause.name === "AbortError") {
-      return err({ kind: "aborted", cause });
+      return err({ _tag: "AbortedError", cause } satisfies AbortedError);
     }
-    return err({ kind: "network", cause });
+    return err({ _tag: "NetworkError", cause } satisfies NetworkError);
   } finally {
     if (timeoutId !== undefined) clearTimeout(timeoutId);
     if (timeoutController && parentSignal) parentSignal.removeEventListener("abort", abortParent);
@@ -559,13 +616,13 @@ async function fetchWithRedirect(
       try {
         nextUrl = new URL(location, currentUrl);
       } catch {
-        throw new WirePolicyError("invalid redirect location");
+        throw new RedirectFailure("invalid redirect location");
       }
       if ((nextUrl.protocol !== "http:" && nextUrl.protocol !== "https:") || nextUrl.username !== "" || nextUrl.password !== "") {
-        throw new WirePolicyError("redirect target is not an HTTP origin");
+        throw new RedirectFailure("redirect target is not an HTTP origin");
       }
-      if (visited.has(nextUrl.href)) throw new WirePolicyError("redirect loop");
-      if (redirectCount >= MAX_REDIRECTS) throw new WirePolicyError("too many redirects");
+      if (visited.has(nextUrl.href)) throw new RedirectFailure("redirect loop");
+      if (redirectCount >= MAX_REDIRECTS) throw new RedirectFailure("too many redirects");
       const nextInit: RequestInit = { ...currentInit };
       const method = currentInit.method?.toUpperCase();
       if ((response.status === 303 && method !== "HEAD") || ((response.status === 301 || response.status === 302) && method === "POST")) {
@@ -635,24 +692,24 @@ function validateRedirectCredentials(
   const wrongOriginSchemes = attachedCredentialOrigins
     .filter((credential) => credential.origin !== nextUrl.origin)
     .map((credential) => credential.scheme);
-  if (originChanged && wrongOriginSchemes.length > 0) throw new CredentialRedirectError(wrongOriginSchemes);
+  if (originChanged && wrongOriginSchemes.length > 0) throw new CredentialRedirectFailure(wrongOriginSchemes);
   for (const cookie of attachedCookies) {
     if (
       (cookie.host !== undefined && cookie.host !== nextUrl.hostname) ||
       (cookie.path !== undefined && !cookiePathMatches(cookie.path, nextUrl.pathname)) ||
       (cookie.secure && nextUrl.protocol !== "https:")
     ) {
-      throw new CredentialRedirectError([cookie.scheme]);
+      throw new CredentialRedirectFailure([cookie.scheme]);
     }
   }
   if (!originChanged) return;
-  if (init.body !== undefined && init.body !== null) throw new CredentialRedirectError([]);
-  if (nextUrl.search !== "") throw new CredentialRedirectError([]);
-  if (credentials === "include") throw new CredentialRedirectError([]);
+  if (init.body !== undefined && init.body !== null) throw new CredentialRedirectFailure([]);
+  if (nextUrl.search !== "") throw new CredentialRedirectFailure([]);
+  if (credentials === "include") throw new CredentialRedirectFailure([]);
   const headers = new Headers(init.headers);
-  if (headers.has("authorization") || headers.has("cookie")) throw new CredentialRedirectError([]);
+  if (headers.has("authorization") || headers.has("cookie")) throw new CredentialRedirectFailure([]);
   for (const credential of attachedCustomCredentials) {
-    if (credential.headers.some((name) => headers.has(name))) throw new CredentialRedirectError([credential.scheme]);
+    if (credential.headers.some((name) => headers.has(name))) throw new CredentialRedirectFailure([credential.scheme]);
   }
 }
 
@@ -732,7 +789,7 @@ async function applyCapturedCredential(
       const path = captured?.path;
       const secure = captured?.secure === true;
       if ((origin !== undefined && origin !== url.origin) || (host !== undefined && host !== url.hostname) || (path !== undefined && !cookiePathMatches(path, url.pathname)) || (secure && url.protocol !== "https:")) {
-        throw new CredentialRedirectError([provides.scheme]);
+        throw new CredentialRedirectFailure([provides.scheme]);
       }
       setCookieHeader(headers, name, value, provides.scheme);
       const scope = { scheme: provides.scheme, path, secure, host };
@@ -896,8 +953,8 @@ function findError<E extends { status: number | string }>(entries: E[], actual: 
   return findSpecific(entries, actual) ?? findCatchAll(entries);
 }
 
-function contractFailure(violation: unknown): ClientFailure {
-  return { kind: "protocol", message: contractMessage(violation) };
+function contractFailure(violation: unknown, status: number, body: unknown): DecodeError {
+  return decodeFailure(status, [contractMessage(violation)], body);
 }
 
 function contractMessage(violation: unknown): string {
@@ -1033,9 +1090,18 @@ function decodeHeaderValue(value: string, schema: any, preserveWideIntegers: boo
     if (schema.kind === "string") return decodeWire(value, schema, preserveWideIntegers, opaque);
     return value;
   } catch (cause) {
-    if (cause instanceof ResponseHeaderDecodeError || cause instanceof OpaqueCodecError) throw cause;
+    if (cause instanceof ResponseHeaderDecodeError || cause instanceof OpaqueCodecFailure) throw cause;
     throw new ResponseHeaderDecodeError(`invalid response header value ${JSON.stringify(value)}`);
   }
+}
+
+async function readUnexpectedBody(response: Response, contentType: string): Promise<unknown> {
+  if (response.status === 204 || response.status === 304 || !response.body) return undefined;
+  const lowered = contentType.toLowerCase();
+  if (lowered.includes("json") || lowered.startsWith("text/")) {
+    return readResponseText(response, contentType);
+  }
+  return readBoundedBytes(response);
 }
 
 async function responseHasBody(response: Response): Promise<boolean> {

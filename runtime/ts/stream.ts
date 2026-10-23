@@ -1,12 +1,10 @@
-import { err, ok, type Result } from "../errors.js";
+import { err, ok, type NdjsonStreamError, type Result, type SseStreamError } from "../errors.js";
 import { decodeWire, parseJson, type OpaqueContext } from "./codec.js";
 import type { Validator } from "./validate.js";
 import { WirePolicyError } from "./wire.js";
 
 export const MAX_STREAM_BUFFER = 8 * 1024 * 1024;
 const MAX_STREAM_FIELDS = 100_000;
-
-type SseStreamFailure = { kind: "stream_error"; cause: unknown } | { kind: "unknown_event"; event: string } | { kind: "invalid_event"; event: string; cause: unknown } | { kind: "server_error"; body: unknown };
 
 function nextLineEnd(buffer: string, done: boolean): number {
   const lineFeed = buffer.indexOf("\n");
@@ -20,12 +18,12 @@ function nextLineEnd(buffer: string, done: boolean): number {
   return lineEnd;
 }
 
-export async function* readSse<EventValue>(
+export async function* readSse<EventValue, ErrorBody = unknown>(
   body: ReadableStream<Uint8Array>,
   events: Array<{ event: string; schema: unknown; validate?: Validator }>,
   preserveWideIntegers: boolean,
   opaque: OpaqueContext,
-): AsyncIterable<Result<EventValue, SseStreamFailure>> {
+): AsyncIterable<Result<EventValue, SseStreamError<ErrorBody>>> {
   const reader = body.getReader();
   const decoder = new TextDecoder();
   let buffer = "";
@@ -50,17 +48,17 @@ export async function* readSse<EventValue>(
             const name = eventName || "message";
             const descriptor = events.find((entry) => entry.event === name);
             if (!descriptor) {
-              yield err({ kind: "unknown_event", event: name });
+              yield err({ _tag: "StreamUnknownEventError", event: name });
             } else {
               try {
                 const parsed = parseJson(data.join("\n"), preserveWideIntegers);
                 const decoded = decodeWire(parsed, descriptor.schema, preserveWideIntegers, opaque);
                 const violation = descriptor.validate === undefined ? null : descriptor.validate(decoded);
-                if (violation !== null) yield err({ kind: "invalid_event", event: name, cause: violation });
-                else if (name === "error") yield err({ kind: "server_error", body: decoded });
+                if (violation !== null) yield err({ _tag: "StreamDecodeError", event: name, cause: violation });
+                else if (name === "error") yield err({ _tag: "StreamServerError", body: decoded as ErrorBody });
                 else yield ok({ event: name, data: decoded } as EventValue);
               } catch (cause) {
-                yield err({ kind: "invalid_event", event: name, cause });
+                yield err({ _tag: "StreamDecodeError", event: name, cause });
               }
             }
           }
@@ -86,7 +84,7 @@ export async function* readSse<EventValue>(
       if (done) break;
     }
   } catch (cause) {
-    yield err({ kind: "stream_error", cause });
+    yield err({ _tag: "StreamReadError", cause });
   } finally {
     try {
       await reader.cancel();
@@ -95,15 +93,13 @@ export async function* readSse<EventValue>(
   }
 }
 
-type NdjsonStreamFailure = { kind: "stream_error"; cause: unknown } | { kind: "invalid_item"; cause: unknown };
-
 export async function* readNdjson<Item>(
   body: ReadableStream<Uint8Array>,
   schema: unknown,
   validate: Validator | undefined,
   preserveWideIntegers: boolean,
   opaque: OpaqueContext,
-): AsyncIterable<Result<Item, NdjsonStreamFailure>> {
+): AsyncIterable<Result<Item, NdjsonStreamError>> {
   const reader = body.getReader();
   const decoder = new TextDecoder();
   let buffer = "";
@@ -124,10 +120,10 @@ export async function* readNdjson<Item>(
             const parsed = parseJson(line, preserveWideIntegers);
             const decoded = decodeWire(parsed, schema, preserveWideIntegers, opaque) as Item;
             const violation = validate === undefined ? null : validate(decoded);
-            if (violation !== null) yield err({ kind: "invalid_item", cause: violation });
+            if (violation !== null) yield err({ _tag: "StreamDecodeError", cause: violation });
             else yield ok(decoded);
           } catch (cause) {
-            yield err({ kind: "invalid_item", cause });
+            yield err({ _tag: "StreamDecodeError", cause });
           }
         }
         lineEnd = nextLineEnd(buffer, done);
@@ -135,7 +131,7 @@ export async function* readNdjson<Item>(
       if (done) break;
     }
   } catch (cause) {
-    yield err({ kind: "stream_error", cause });
+    yield err({ _tag: "StreamReadError", cause });
   } finally {
     try {
       await reader.cancel();

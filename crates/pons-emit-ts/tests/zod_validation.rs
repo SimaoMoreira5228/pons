@@ -784,7 +784,7 @@ for (const [label, broken] of [
   ["hex that is not hex", { ...body, hex: "zz" }],
 ] as Array<[string, Record<string, unknown>]>) {
   const refused = await login(broken);
-  if (refused.failure?.kind !== "protocol") {
+  if (refused.failure?._tag !== "DecodeError") {
     throw new Error(`${label} was admitted: ${JSON.stringify(refused)}`);
   }
   if (refused.failure.message.includes("the response does not match the contract")) {
@@ -849,9 +849,9 @@ const ok = await login(answering(JSON.stringify({ id: "1" })));
 if (ok.failure !== undefined) throw new Error(`a good body was refused: ${JSON.stringify(ok.failure)}`);
 if (ok.value.id !== "1") throw new Error("the good body did not come back");
 
-const shape = (answer: any) => answer.failure?.kind ?? "ok";
-if (shape(broken) !== "protocol") throw new Error(`a schema breach is not a protocol failure: ${JSON.stringify(broken)}`);
-if (shape(malformed) !== "protocol") throw new Error(`a malformed body is not a protocol failure: ${JSON.stringify(malformed)}`);
+const shape = (answer: any) => answer.failure?._tag ?? "ok";
+if (shape(broken) !== "DecodeError") throw new Error(`a schema breach is not a protocol failure: ${JSON.stringify(broken)}`);
+if (shape(malformed) !== "DecodeError") throw new Error(`a malformed body is not a protocol failure: ${JSON.stringify(malformed)}`);
 if (typeof (broken.failure ?? malformed.failure).message !== "string") {
   throw new Error(`a protocol failure names what it saw: ${JSON.stringify(broken)}`);
 }
@@ -866,14 +866,14 @@ if (broken.failure.message.includes("the response does not match the contract"))
 }
 
 const declared = await login(answering(JSON.stringify({ code: "invalid" }), 418));
-if (declared.failure.kind !== "http" || declared.failure.status !== 418) {
+if (declared.failure._tag !== "ApiError" || declared.failure.status !== 418) {
   throw new Error(`a declared error status is still an http failure: ${JSON.stringify(declared)}`);
 }
 if (declared.failure.body.code !== "invalid") {
   throw new Error(`the declared error body is checked too: ${JSON.stringify(declared)}`);
 }
 const unexpected = await login(answering(JSON.stringify({ id: "1" }), 500));
-if (unexpected.failure.kind !== "unexpected_http" || unexpected.failure.status !== 500) {
+if (unexpected.failure._tag !== "UnexpectedStatusError" || unexpected.failure.status !== 500) {
   throw new Error(`a status no list declares is an unexpected_http: ${JSON.stringify(unexpected)}`);
 }
 "#;
@@ -889,31 +889,26 @@ if (unexpected.failure.kind !== "unexpected_http" || unexpected.failure.status !
             },
         );
         let errors_file = file(&files, "errors.ts");
-        let declared = errors_file
-            .split("export type ClientFailure = ")
-            .nth(1)
-            .and_then(|rest| rest.split('\n').next())
-            .unwrap();
         for kind in [
-            "network",
-            "timeout",
-            "aborted",
-            "auth_adapter",
-            "auth_source",
-            "opaque_codec",
-            "transport",
-            "protocol",
-            "unexpected_http",
-            "auth",
+            "NetworkError",
+            "TimeoutError",
+            "AbortedError",
+            "AuthAdapterError",
+            "AuthSourceError",
+            "OpaqueCodecError",
+            "TransportHookError",
+            "DecodeError",
+            "UnexpectedStatusError",
+            "AuthUnavailableError",
         ] {
             assert!(
-                declared.contains(&format!("kind: \"{kind}\"")),
-                "{kind} is still in the closed union under {errors:?}: {declared}"
+                errors_file.contains(kind),
+                "{kind} is still in the closed union under {errors:?}: {errors_file}"
             );
         }
         assert!(
-            !declared.contains("schema"),
-            "a schema breach joins the union as a protocol failure, not as a new kind: {declared}"
+            !errors_file.contains("schema"),
+            "a schema breach joins the union as a DecodeError, not as a new kind: {errors_file}"
         );
     }
 }
@@ -943,7 +938,7 @@ try {
 } catch (cause) {
   refused = cause;
 }
-if (refused?.kind !== "protocol") throw new Error(`the schema did not answer: ${JSON.stringify(refused)}`);
+if (refused?._tag !== "DecodeError") throw new Error(`the schema did not answer: ${JSON.stringify(refused)}`);
 if (!refused.message.includes("the response does not match the contract")) {
   throw new Error(`the failure names the schema: ${refused.message}`);
 }
@@ -1146,7 +1141,7 @@ try {
 } catch (cause) {
   failure = cause;
 }
-if (failure?.kind !== "protocol") throw new Error(`expected a protocol failure: ${JSON.stringify(failure)}`);
+if (failure?._tag !== "RequestError") throw new Error(`expected a protocol failure: ${JSON.stringify(failure)}`);
 if (!failure.message.includes("is read_only and cannot cross the encode direction")) {
   throw new Error(`the wire validator answers the request: ${failure.message}`);
 }
@@ -1296,7 +1291,7 @@ try {
 } catch (cause) {
   refused = cause;
 }
-if (refused?.kind !== "protocol") throw new Error(`the packaged runtime did not answer: ${JSON.stringify(refused)}`);
+if (refused?._tag !== "DecodeError") throw new Error(`the packaged runtime did not answer: ${JSON.stringify(refused)}`);
 "#;
     run_bun_with(&files, harness, Runtime::Package);
 }

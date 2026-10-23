@@ -84,7 +84,7 @@ const refusedRequest = createClient({
 });
 const requestFailure = await refusedRequest.auth.login({ body: { email: "person@example.test" } });
 assert.equal(requestFailure.isErr(), true);
-assert.equal((requestFailure as any).error.kind, "transport");
+assert.equal((requestFailure as any).error._tag, "TransportHookError");
 assert.equal((requestFailure as any).error.phase, "request");
 
 const refusedResponse = createClient({
@@ -98,7 +98,7 @@ const refusedResponse = createClient({
 });
 const responseFailure = await refusedResponse.auth.login({ body: { email: "person@example.test" } });
 assert.equal(responseFailure.isErr(), true);
-assert.equal((responseFailure as any).error.kind, "transport");
+assert.equal((responseFailure as any).error._tag, "TransportHookError");
 assert.equal((responseFailure as any).error.phase, "response");
 
 console.log("transport ok");

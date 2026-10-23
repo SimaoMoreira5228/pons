@@ -877,8 +877,7 @@ fn a_narrowed_untagged_variant_carries_only_its_own_payload() {
         .expect("the TypeScript emitter must accept the document")
         .files;
     assert!(
-        operations_of(&files, "auth")
-            .contains("{ kind: \"http\"; status: number; body: string; headers: Headers }"),
+        operations_of(&files, "auth").contains("ApiError<number, string, Headers>"),
         "{}",
         operations_of(&files, "auth")
     );
@@ -893,7 +892,7 @@ const failure: unknown = await client
   .catch((cause: unknown) => cause);
 if (typeof failure === "object" && failure !== null && "error" in failure) {
   const error = (failure as { error: AuthLoginError }).error;
-  if (error.kind === "http") {
+  if (error._tag === "ApiError") {
     const label: string = error.body;
     // @ts-expect-error the runtime only ever tries the variant the reference names
     const other: number = error.body;

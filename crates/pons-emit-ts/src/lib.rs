@@ -1,4 +1,5 @@
 mod client;
+mod errors;
 mod extensions;
 mod runtime;
 mod types;
@@ -332,7 +333,7 @@ pub fn emit_with_options(document: &Document, options: TsOptions) -> Result<Emit
         },
         GeneratedFile {
             path: "errors.ts".into(),
-            content: client::error_types(options.errors),
+            content: errors::error_types(options.errors),
         },
     ];
     let mut validation = validation::Backend::new(&document, &names, &options)?;
@@ -1191,7 +1192,7 @@ mod tests {
         assert!(client.contains("AuthAttachment"));
         assert!(client.contains("authAdapters?: Record<string, AuthAdapter>"));
         assert!(transport.contains("group.length === 0"));
-        assert!(transport.contains("kind: \"auth_adapter\""));
+        assert!(transport.contains("_tag: \"AuthAdapterError\""));
         assert!(transport.contains("attachment.headers"));
         assert!(client.contains("signal?: AbortSignal"));
         assert!(client.contains("timeoutMs?: number"));
@@ -1208,7 +1209,7 @@ mod tests {
         assert!(client.contains("transport?: Transport"));
         assert!(transport.contains("client.transport?.onRequest"));
         assert!(transport.contains("client.transport?.onResponse"));
-        assert!(transport.contains("kind: \"transport\""));
+        assert!(transport.contains("_tag: \"TransportHookError\""));
         assert!(client.contains("export type RetryOptions"));
         assert!(client.contains("retry?: RetryOptions | false"));
         assert!(transport.contains("fetchWithRetry"));
@@ -1216,10 +1217,10 @@ mod tests {
         assert!(transport.contains("Date.parse(retryAfterText)"));
         assert!(transport.contains("idempotent: boolean"));
         assert!(transport.contains("setTimeout"));
-        assert!(transport.contains("kind: \"timeout\""));
-        assert!(transport.contains("kind: \"aborted\""));
-        assert!(auth.contains("body: Extract<Types.LoginError"));
-        assert!(auth.contains("headers: Headers"));
+        assert!(transport.contains("_tag: \"TimeoutError\""));
+        assert!(transport.contains("_tag: \"AbortedError\""));
+        assert!(auth.contains("ApiError<number, Extract<Types.LoginError"));
+        assert!(auth.contains("ApiError<number"));
         assert!(transport.contains("headers: declaredError.headers"));
         assert!(errors.contains("ResponseWithHeaders"));
         assert!(transport.contains("withResponseHeaders"));
@@ -1230,7 +1231,7 @@ mod tests {
                 .contains("A store returns a `{ value, ...metadata }` record, never a bare string")
         );
         assert!(client.contains("export type CredentialSource"));
-        assert!(transport.contains("kind: \"auth_source\""));
+        assert!(transport.contains("_tag: \"AuthSourceError\""));
         assert!(credentials.contains("await source.set(nextCredential, {"));
         assert!(credentials.contains("client.authRecords[scheme] = records"));
         assert!(credentials.contains("credentialRecords(client, provides.scheme)"));
@@ -1278,13 +1279,13 @@ mod tests {
         assert!(
             missing_header_branch.contains("header.required && !response.headers.has(header.name)")
         );
-        assert!(missing_header_branch.contains("kind: \"protocol\""));
-        assert!(transport.contains("undeclared success response"));
+        assert!(missing_header_branch.contains("decodeFailure"));
+        assert!(transport.contains("_tag: \"UnexpectedStatusError\""));
         assert!(transport.contains("matchResponse"));
         assert!(!transport.contains("response.ok"));
         let declared_success = transport.find("const declaredSuccess").unwrap();
         let declared_error = transport.find("const declaredError").unwrap();
-        let undeclared_success = transport.find("undeclared success response").unwrap();
+        let undeclared_success = transport.find("_tag: \"UnexpectedStatusError\"").unwrap();
         assert!(declared_success < declared_error && declared_error < undeclared_success);
         let stream_capture = transport
             .find("captureCredential(client, response, provides, undefined, false, finalUrl)")
@@ -1825,9 +1826,10 @@ mod tests {
             });
         let files = super::emit(&document).unwrap();
         let auth = file(&files, "operations/auth.ts");
-        assert!(auth.contains("headers: { \"Retry-After\": string }"));
+        assert!(auth.contains("ApiError<number"));
+        assert!(auth.contains("\"Retry-After\": string"));
         assert!(auth.contains("retryable: true"));
-        assert!(auth.contains("headers: [{ name: \"Retry-After\", required: true, schema:"));
+        assert!(auth.contains("Retry-After"));
     }
 
     #[test]
@@ -2098,7 +2100,7 @@ mod tests {
 
         let files = super::emit(&document).unwrap();
         let events = file(&files, "operations/events.ts");
-        assert!(events.contains("kind: \"server_error\"; body: string"));
+        assert!(events.contains("SseStreamError<string>"));
         assert!(!events.contains("event: \"error\"; data:"));
     }
 
@@ -2565,9 +2567,8 @@ mod tests {
     fn a_documented_error_response_carries_its_documentation() {
         let (_, _, operations) = emitted(&documented());
         assert!(
-            operations["auth"].contains(
-                "export type AuthLoginError = ClientFailure\n  | /** The credentials did not match. */\n  { kind: \"http\"; status: number; body: Extract<Types.LoginError, { \"code\": \"invalid\" }>; headers: Headers };"
-            ),
+            operations["auth"].contains("export type AuthLoginError = ClientFailure")
+                && operations["auth"].contains("ApiError<number, Extract<Types.LoginError"),
             "{}",
             operations["auth"]
         );

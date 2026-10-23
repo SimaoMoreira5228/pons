@@ -252,7 +252,7 @@ const refused = await client.auth.login({ body: { email: "person@example.test" }
 if (!refused.isErr()) throw new Error("a missing field answered with a value");
 if (refused.isOk()) throw new Error("the ok branch is reachable");
 const failure: any = refused.error;
-if (failure.kind !== "protocol" || !failure.message.includes("missing required field id")) {
+if (failure._tag !== "DecodeError" || !failure.issues.some((issue: string) => issue.includes("missing required field id"))) {
   throw new Error(JSON.stringify(failure));
 }
 "#,
@@ -273,7 +273,7 @@ try {
   thrown = cause;
 }
 if (thrown === undefined) throw new Error("the call answered with a value");
-if (thrown.kind !== "protocol" || !thrown.message.includes("missing required field id")) {
+if (thrown._tag !== "DecodeError" || !thrown.issues.some((issue: string) => issue.includes("missing required field id"))) {
   throw new Error(JSON.stringify(thrown));
 }
 "#,
@@ -834,7 +834,7 @@ fn the_zod_option_writes_the_validators_the_response_is_checked_against() {
     );
     assert_eq!(
         file(&none, "index.ts"),
-        "export * from \"./client.js\";\n",
+        "export * from \"./errors.js\";\nexport * from \"./client.js\";\n",
         "the default's entry point is one line"
     );
     assert_eq!(
@@ -1008,7 +1008,7 @@ try {
 } catch (cause) {
   failure = cause;
 }
-if (failure?.kind !== "protocol" || !failure.message.includes("missing required field id")) {
+if (failure?._tag !== "DecodeError" || !failure.issues.some((issue: string) => issue.includes("missing required field id"))) {
   throw new Error(`the wire validator in the package did not refuse it: ${JSON.stringify(failure)}`);
 }
 "#,
@@ -1106,7 +1106,7 @@ try {
   failure = cause;
 }
 if (failure === undefined) throw new Error("a wire name in the body was accepted");
-if (failure.kind !== "protocol" || !failure.message.includes("unknown property user_id")) {
+if (failure._tag !== "RequestError" || !failure.message.includes("unknown property user_id")) {
   throw new Error(JSON.stringify(failure));
 }
 "#,
@@ -1294,7 +1294,7 @@ if (sent !== '{"at":"2024-01-31T12:00:00.000Z","day":"2024-01-31"}') {
 answer = '{"day":"2024-01-31","at":"2024-01-31T12:00:00.123456Z"}';
 const finer = await client.auth.login({ body: { day: "2024-01-31" as DateOnly, at: new Date() } });
 if (finer.isOk()) throw new Error("a nanosecond date-time was read as a Date");
-if (!(finer as any).error.message.includes("not an instant a Date can hold")) {
+if ((finer as any).error._tag !== "DecodeError" || !(finer as any).error.issues.some((issue: string) => issue.includes("not an instant a Date can hold"))) {
   throw new Error(JSON.stringify(finer));
 }
 "#,

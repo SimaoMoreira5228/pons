@@ -19,7 +19,7 @@ export type OpaqueCodec = { encode(value: unknown, wire: OpaqueWire): unknown; d
 export type OpaqueCodecRegistry = Record<string, OpaqueCodec>;
 export type OpaqueContext = { codecs?: OpaqueCodecRegistry | undefined; required: boolean; allowUnsafeWideIntegers?: boolean | undefined };
 
-export class OpaqueCodecError extends Error {
+export class OpaqueCodecFailure extends Error {
   constructor(readonly codec: string, readonly phase: "encode" | "decode", readonly sourceCause: unknown) {
     super(`opaque codec failed for ${codec}`);
   }
@@ -34,14 +34,14 @@ function transformOpaque(
   const hasCodec = Object.hasOwn(opaque.codecs ?? {}, schema.codec);
   const codec = hasCodec ? opaque.codecs?.[schema.codec] : undefined;
   if (!hasCodec || codec === undefined) {
-    if (opaque.required) throw new OpaqueCodecError(schema.codec, mode, new Error("missing opaque codec"));
+    if (opaque.required) throw new OpaqueCodecFailure(schema.codec, mode, new Error("missing opaque codec"));
     return value;
   }
   try {
     return mode === "encode" ? codec.encode(value, schema.wire) : codec.decode(value, schema.wire);
   } catch (cause) {
-    if (cause instanceof OpaqueCodecError) throw cause;
-    throw new OpaqueCodecError(schema.codec, mode, cause);
+    if (cause instanceof OpaqueCodecFailure) throw cause;
+    throw new OpaqueCodecFailure(schema.codec, mode, cause);
   }
 }
 

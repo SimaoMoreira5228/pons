@@ -594,7 +594,7 @@ try {
 } catch (cause) {
   failure = cause;
 }
-if (failure?.kind !== "opaque_codec") throw new Error(`unexpected failure ${JSON.stringify(failure)}`);
+if (failure?._tag !== "OpaqueCodecError") throw new Error(`unexpected failure ${JSON.stringify(failure)}`);
 if (fetched) throw new Error("missing codec reached fetch");
 "#;
     run_bun(&files, harness);
@@ -670,7 +670,7 @@ try {
 } catch (cause) {
   failure = cause;
 }
-if (failure?.kind !== "opaque_codec") throw new Error(`unexpected failure ${JSON.stringify(failure)}`);
+if (failure?._tag !== "OpaqueCodecError") throw new Error(`unexpected failure ${JSON.stringify(failure)}`);
 if (fetched) throw new Error("missing codec reached fetch");
 "#;
     run_bun(&files, harness);
@@ -728,7 +728,7 @@ try {
 } catch (cause) {
   failure = cause;
 }
-if (failure?.kind !== "opaque_codec") throw new Error(`unexpected failure ${JSON.stringify(failure)}`);
+if (failure?._tag !== "OpaqueCodecError") throw new Error(`unexpected failure ${JSON.stringify(failure)}`);
 if (fetched) throw new Error("missing flattened codec reached fetch");
 "#;
     run_bun(&files, harness);
@@ -786,7 +786,7 @@ try {
 } catch (cause) {
   failure = cause;
 }
-if (failure?.kind !== "opaque_codec") throw new Error(`unexpected failure ${JSON.stringify(failure)}`);
+if (failure?._tag !== "OpaqueCodecError") throw new Error(`unexpected failure ${JSON.stringify(failure)}`);
 if (fetched) throw new Error("missing named flattened codec reached fetch");
 "#;
     run_bun(&files, harness);
@@ -845,7 +845,7 @@ try {
 } catch (cause) {
   failure = cause;
 }
-if (failure?.kind !== "opaque_codec") throw new Error(`unexpected failure ${JSON.stringify(failure)}`);
+if (failure?._tag !== "OpaqueCodecError") throw new Error(`unexpected failure ${JSON.stringify(failure)}`);
 if (fetched) throw new Error("missing nested flattened codec reached fetch");
 "#;
     run_bun(&files, harness);
@@ -920,7 +920,7 @@ try {
 } catch (cause) {
   failure = cause;
 }
-if (failure?.kind !== "opaque_codec") throw new Error(`unexpected failure ${JSON.stringify(failure)}`);
+if (failure?._tag !== "OpaqueCodecError") throw new Error(`unexpected failure ${JSON.stringify(failure)}`);
 if (fetched) throw new Error("missing sibling codec reached fetch");
 "#;
     run_bun(&files, harness);
@@ -1037,7 +1037,7 @@ try {
 } catch (cause) {
   failure = cause;
 }
-if (failure?.kind !== "opaque_codec") throw new Error(`unexpected failure ${JSON.stringify(failure)}`);
+if (failure?._tag !== "OpaqueCodecError") throw new Error(`unexpected failure ${JSON.stringify(failure)}`);
 await client.events.watch({ path: { cursor: "cursor" }, query: {}, headers: {} });
 if (sent !== "Bearer wire-secret") throw new Error(`credential was not captured: ${sent}`);
 "#;
@@ -1537,7 +1537,7 @@ const expectAuthFailure = async (baseUrl: string) => {
   } catch (cause) {
     failure = cause;
   }
-  if (failure?.kind !== "auth") throw new Error(`unexpected failure ${JSON.stringify(failure)}`);
+  if (failure?._tag !== "AuthUnavailableError") throw new Error(`unexpected failure ${JSON.stringify(failure)}`);
 };
 await expectAuthFailure("https://example.test");
 await expectAuthFailure("https://other.test");
@@ -1593,7 +1593,7 @@ try {
 } catch (cause) {
   failure = cause;
 }
-if (failure?.kind !== "auth") throw new Error(`unexpected failure ${JSON.stringify(failure)}`);
+if (failure?._tag !== "AuthUnavailableError") throw new Error(`unexpected failure ${JSON.stringify(failure)}`);
 if (fetched) throw new Error("credential reached another origin");
 "#;
     run_bun(&files, harness);
@@ -1711,7 +1711,7 @@ try {
 } catch (cause) {
   failure = cause;
 }
-if (failure?.kind !== "auth") throw new Error(`unexpected failure ${JSON.stringify(failure)}`);
+if (failure?._tag !== "CredentialRedirectError") throw new Error(`unexpected failure ${JSON.stringify(failure)}`);
 if (calls !== 1) throw new Error("credential reached the redirect target");
 "#;
     run_bun(&files, harness);
@@ -1824,7 +1824,7 @@ try {
 } catch (cause) {
   failure = cause;
 }
-if (failure?.kind !== "auth_source") throw new Error(`unexpected failure ${JSON.stringify(failure)}`);
+if (failure?._tag !== "AuthSourceError") throw new Error(`unexpected failure ${JSON.stringify(failure)}`);
 if (fetched) throw new Error("unscoped cookie reached fetch");
 "#;
     run_bun(&files, harness);
@@ -1871,7 +1871,7 @@ const watch = async (store: any) => {
   return failure;
 };
 const expectSourceFailure = (failure: any, message: string) => {
-  if (failure?.kind !== "auth_source") throw new Error(`unexpected failure ${JSON.stringify(failure)}`);
+  if (failure?._tag !== "AuthSourceError") throw new Error(`unexpected failure ${JSON.stringify(failure)}`);
   if (failure?.cause?.message !== message) throw new Error(`unexpected cause ${failure?.cause?.message}`);
 };
 
@@ -2551,7 +2551,7 @@ try {
 } catch (cause) {
   failure = cause;
 }
-if (failure?.kind !== "auth") throw new Error(`unexpected failure ${JSON.stringify(failure)}`);
+if (failure?._tag !== "AuthUnavailableError") throw new Error(`unexpected failure ${JSON.stringify(failure)}`);
 if (calls !== 1) throw new Error("cookie API key reached a rewritten host");
 "#;
     run_bun(&files, harness);
@@ -2778,7 +2778,7 @@ try {
 } catch (cause) {
   failure = cause;
 }
-if (failure?.kind !== "auth") throw new Error(`unexpected failure ${JSON.stringify(failure)}`);
+if (failure?._tag !== "AuthUnavailableError") throw new Error(`unexpected failure ${JSON.stringify(failure)}`);
 if (calls !== 1) throw new Error("cross-origin cookie reached fetch");
 "#;
     run_bun(&files, harness);
@@ -2829,7 +2829,7 @@ try {
 } catch (cause) {
   failure = cause;
 }
-if (failure?.kind !== "auth") throw new Error(`unexpected failure ${JSON.stringify(failure)}`);
+if (failure?._tag !== "AuthUnavailableError") throw new Error(`unexpected failure ${JSON.stringify(failure)}`);
 if (calls !== 1) throw new Error("captured bearer reached a rewritten host");
 "#;
     run_bun(&files, harness);
@@ -2891,7 +2891,7 @@ try {
 } catch (cause) {
   failure = cause;
 }
-if (failure?.kind !== "auth") throw new Error(`unexpected failure ${JSON.stringify(failure)}`);
+if (failure?._tag !== "AuthUnavailableError") throw new Error(`unexpected failure ${JSON.stringify(failure)}`);
 if (calls !== 1) throw new Error("rewritten request reached fetch");
 "#;
     run_bun(&files, harness);
@@ -2946,7 +2946,7 @@ try {
 } catch (cause) {
   failure = cause;
 }
-if (failure?.kind !== "auth") throw new Error(`unexpected failure ${JSON.stringify(failure)}`);
+if (failure?._tag !== "AuthUnavailableError") throw new Error(`unexpected failure ${JSON.stringify(failure)}`);
 if (calls !== 1) throw new Error("cross-origin request reached fetch");
 "#;
     run_bun(&files, harness);
@@ -3026,7 +3026,7 @@ await entered;
 await client.auth.login({ body: { email: "person@example.test" } });
 release();
 const failure: any = await request;
-if (failure?.kind !== "auth") throw new Error(`unexpected failure ${JSON.stringify(failure)}`);
+if (failure?._tag !== "AuthUnavailableError") throw new Error(`unexpected failure ${JSON.stringify(failure)}`);
 if (protectedFetched) throw new Error("stale cookie reached fetch");
 "#;
     run_bun(&files, harness);
@@ -3119,7 +3119,7 @@ await entered;
 await client.auth.login({ body: { email: "person@example.test" } });
 release();
 const failure: any = await request;
-if (failure?.kind !== "auth") throw new Error(`unexpected failure ${JSON.stringify(failure)}`);
+if (failure?._tag !== "AuthUnavailableError") throw new Error(`unexpected failure ${JSON.stringify(failure)}`);
 if (protectedFetched) throw new Error("stale cookie reached fetch");
 "#;
     run_bun(&files, harness);
@@ -3400,7 +3400,7 @@ try {
 } catch (cause) {
   failure = cause;
 }
-if (failure?.kind !== "auth_source") throw new Error(`unexpected failure ${JSON.stringify(failure)}`);
+if (failure?._tag !== "AuthSourceError") throw new Error(`unexpected failure ${JSON.stringify(failure)}`);
 if (fetched) throw new Error("invalid cookie reached fetch");
 "#;
     run_bun(&files, harness);
@@ -3440,7 +3440,7 @@ try {
 } catch (cause) {
   failure = cause;
 }
-if (failure?.kind !== "auth_source") throw new Error(`unexpected failure ${JSON.stringify(failure)}`);
+if (failure?._tag !== "AuthSourceError") throw new Error(`unexpected failure ${JSON.stringify(failure)}`);
 if (fetched) throw new Error("invalid cookie name reached fetch");
 "#;
     run_bun(&files, harness);
@@ -3476,7 +3476,7 @@ try {
 } catch (cause) {
   failure = cause;
 }
-if (failure?.kind !== "auth") throw new Error(`unexpected failure ${JSON.stringify(failure)}`);
+if (failure?._tag !== "AuthUnavailableError") throw new Error(`unexpected failure ${JSON.stringify(failure)}`);
 if (fetched) throw new Error("missing credential reached fetch");
 "#;
     run_bun(&files, harness);
@@ -3567,7 +3567,7 @@ try {
 } catch (cause) {
   failure = cause;
 }
-if (failure?.kind !== "auth") throw new Error(`the scheme id served the adapter: ${JSON.stringify(failure)}`);
+if (failure?._tag !== "AuthUnavailableError") throw new Error(`the scheme id served the adapter: ${JSON.stringify(failure)}`);
 
 const declared: string[] = [];
 const byAdapter = createClient({
@@ -3686,7 +3686,7 @@ try {
 } catch (cause) {
   failure = cause;
 }
-if (failure?.kind !== "auth") throw new Error(`unexpected failure ${JSON.stringify(failure)}`);
+if (failure?._tag !== "AuthUnavailableError") throw new Error(`unexpected failure ${JSON.stringify(failure)}`);
 if (fetched) throw new Error("custom credential reached a rewritten host");
 "#;
     run_bun(&files, harness);
@@ -3760,7 +3760,7 @@ try {
 } catch (cause) {
   failure = cause;
 }
-if (failure?.kind !== "protocol") throw new Error(`unexpected failure ${JSON.stringify(failure)}`);
+if (failure?._tag !== "DecodeError") throw new Error(`unexpected failure ${JSON.stringify(failure)}`);
 "#;
     run_bun(&files, harness);
 }
@@ -4382,7 +4382,7 @@ try {
 } catch (cause) {
   failure = cause;
 }
-if (failure?.kind !== "protocol") throw new Error(`unexpected failure ${JSON.stringify(failure)}`);
+if (failure?._tag !== "DecodeError") throw new Error(`unexpected failure ${JSON.stringify(failure)}`);
 if (!String(failure.message).includes("version=1")) throw new Error("strict media mismatch was lost");
 "#;
     run_bun(&files, harness);
@@ -4438,14 +4438,14 @@ if (!(seen instanceof Uint8Array) || seen.length !== 3) {
 
 const rejected = await request(client(), spec(() => ({ path: ["body"], message: "expected bytes" })));
 if (!rejected.isErr()) throw new Error("a bytes validator issue was ignored");
-if (rejected.error.kind !== "protocol") throw new Error(`unexpected failure ${JSON.stringify(rejected.error)}`);
+if (rejected.error._tag !== "DecodeError") throw new Error(`unexpected failure ${JSON.stringify(rejected.error)}`);
 if (!String(rejected.error.message).includes("body: expected bytes")) {
   throw new Error("the bytes validator issue was lost");
 }
 
 for (const malformed of [undefined, "not an issue", { message: "missing path" }, { path: [], message: 42 }]) {
   const result = await request(client(), spec(() => malformed));
-  if (!result.isErr() || result.error.kind !== "protocol") {
+  if (!result.isErr() || result.error._tag !== "DecodeError") {
     throw new Error(`a malformed validator result escaped: ${JSON.stringify(result)}`);
   }
   if (!String(result.error.message).includes("invalid issue")) {
@@ -4454,7 +4454,7 @@ for (const malformed of [undefined, "not an issue", { message: "missing path" },
 }
 
 const thrown = await request(client(), spec(() => { throw new Error("boom"); }));
-if (!thrown.isErr() || thrown.error.kind !== "protocol") {
+if (!thrown.isErr() || thrown.error._tag !== "DecodeError") {
   throw new Error(`a thrown validator became ${JSON.stringify(thrown)}`);
 }
 if (!String(thrown.error.message).includes("validator threw")) {
@@ -4496,7 +4496,7 @@ try {
 } catch (cause) {
   failure = cause;
 }
-if (failure?.kind !== "protocol") throw new Error(`unexpected failure ${JSON.stringify(failure)}`);
+if (failure?._tag !== "DecodeError") throw new Error(`unexpected failure ${JSON.stringify(failure)}`);
 if (!String(failure.message).includes("unsupported response charset")) {
   throw new Error(`charset error was lost: ${String(failure.message)}`);
 }
@@ -4579,8 +4579,7 @@ fn a_narrowed_untagged_variant_only_tries_the_variant_it_names() {
         .find(|file| file.path == "operations/auth.ts")
         .unwrap();
     assert!(
-        auth.content
-            .contains("{ kind: \"http\"; status: number; body: string; headers: Headers }"),
+        auth.content.contains("ApiError<number, string, Headers>"),
         "the narrowed declaration must not offer the other variant:\n{}",
         auth.content
     );
@@ -4593,7 +4592,7 @@ const named = createClient({
   fetch: async () => new Response(JSON.stringify("late"), { status: 400, headers: { "content-type": "application/json" } }),
 });
 const failure = await named.auth.login({ body: { email: "person@example.test" } }).catch((cause: any) => cause);
-if (failure?.kind !== "http" || failure.body !== "late") {
+if (failure?._tag !== "ApiError" || failure.body !== "late") {
   throw new Error(`the narrowed variant was not decoded: ${JSON.stringify(failure)}`);
 }
 
@@ -4922,7 +4921,7 @@ try {
   await tooShort.auth.login({ body: { email: "\u{1F600}\u{1F600}" } });
   throw new Error("a two code point request was accepted");
 } catch (cause) {
-  if (cause?.kind !== "protocol") throw new Error(JSON.stringify(cause));
+  if (cause?._tag !== "RequestError") throw new Error(JSON.stringify(cause));
 }
 if (shortRequest !== 0) throw new Error("a short request reached the wire");
 
@@ -4938,7 +4937,7 @@ try {
   await tooLong.auth.login({ body: { email: "\u{1F600}\u{1F600}\u{1F600}\u{1F600}\u{1F600}" } });
   throw new Error("a five code point request was accepted");
 } catch (cause) {
-  if (cause?.kind !== "protocol") throw new Error(JSON.stringify(cause));
+  if (cause?._tag !== "RequestError") throw new Error(JSON.stringify(cause));
 }
 if (longRequest !== 0) throw new Error("a long request reached the wire");
 
@@ -4953,7 +4952,7 @@ try {
   await tooShortResponse.auth.login({ body: { email: "\u{1F600}\u{1F600}\u{1F600}" } });
   throw new Error("a two code point response was accepted");
 } catch (cause) {
-  if (cause?.kind !== "protocol") throw new Error(JSON.stringify(cause));
+  if (cause?._tag !== "DecodeError") throw new Error(JSON.stringify(cause));
 }
 
 const tooLongResponse = createClient({
@@ -4967,7 +4966,7 @@ try {
   await tooLongResponse.auth.login({ body: { email: "\u{1F600}\u{1F600}\u{1F600}" } });
   throw new Error("a five code point response was accepted");
 } catch (cause) {
-  if (cause?.kind !== "protocol") throw new Error(JSON.stringify(cause));
+  if (cause?._tag !== "DecodeError") throw new Error(JSON.stringify(cause));
 }
 if (calls !== 1) throw new Error(`unexpected calls ${calls}`);
 "#;
@@ -5063,7 +5062,7 @@ try {
 } catch (cause) {
   failure = cause;
 }
-if (failure?.kind !== "protocol") throw new Error(`unexpected failure ${JSON.stringify(failure)}`);
+if (failure?._tag !== "RedirectError") throw new Error(`unexpected failure ${JSON.stringify(failure)}`);
 if (calls !== 1) throw new Error("a refused redirect was followed");
 if (stored !== 0) throw new Error(`a refused redirect stored ${stored} credentials`);
 "#;
@@ -5194,7 +5193,7 @@ try {
 } catch (cause) {
   failure = cause;
 }
-if (failure?.kind !== "auth_source") throw new Error(`unexpected failure ${JSON.stringify(failure)}`);
+if (failure?._tag !== "AuthSourceError") throw new Error(`unexpected failure ${JSON.stringify(failure)}`);
 if (failure.scheme !== "session") throw new Error(`unexpected scheme ${JSON.stringify(failure)}`);
 if (String(failure.cause?.message).includes("stream") === false) {
   throw new Error(`unhelpful cause ${JSON.stringify(failure.cause)}`);
@@ -5364,8 +5363,8 @@ try {
   await created.auth.login({ body: { email: "person@example.test" } });
   throw new Error("an undeclared 201 was accepted");
 } catch (cause) {
-  if (cause?.kind !== "protocol") throw new Error(JSON.stringify(cause));
-  if (!String(cause.message).includes("undeclared success response 201")) {
+  if (cause?._tag !== "UnexpectedStatusError") throw new Error(JSON.stringify(cause));
+  if (cause.status !== 201) {
     throw new Error(`unhelpful failure ${JSON.stringify(cause)}`);
   }
 }
@@ -5401,7 +5400,7 @@ const missing = createClient({
 });
 const failure: any = await missing.auth.login({ body: { email: "person@example.test" } })
   .then(() => undefined, (cause) => cause);
-if (failure?.kind !== "http") throw new Error(`a declared 4xx produced a success: ${JSON.stringify(failure)}`);
+if (failure?._tag !== "ApiError") throw new Error(`a declared 4xx produced a success: ${JSON.stringify(failure)}`);
 if (failure.status !== 404) throw new Error(`the error status was lost: ${JSON.stringify(failure)}`);
 if (failure.body?.code !== "invalid") throw new Error(`the typed error body was lost: ${JSON.stringify(failure)}`);
 "#;
@@ -5456,7 +5455,7 @@ const answering = (status: number) => createClient({
 for (const status of [200, 201, 503]) {
   const failure: any = await answering(status).auth.login({ body: { email: "person@example.test" } })
     .then(() => undefined, (cause) => cause);
-  if (failure?.kind !== "http") throw new Error(`${status} was not the default error: ${JSON.stringify(failure)}`);
+  if (failure?._tag !== "ApiError") throw new Error(`${status} was not the default error: ${JSON.stringify(failure)}`);
   if (failure.status !== status) throw new Error(`the error status was lost: ${JSON.stringify(failure)}`);
   if (failure.body?.code !== "invalid") throw new Error(`the typed error body was lost: ${JSON.stringify(failure)}`);
 }
@@ -5507,18 +5506,18 @@ const login = async (body: any) => {
   try { value = await client.auth.login({ body }); } catch (cause) { failure = cause; }
   return { failure, value };
 };
-const rejects = (result: any, where: string) => {
-  if (result.failure?.kind !== "protocol") throw new Error(`${where} was accepted: ${JSON.stringify(result)}`);
+const rejects = (result: any, where: string, tag: string) => {
+  if (result.failure?._tag !== tag) throw new Error(`${where} was accepted: ${JSON.stringify(result)}`);
   if (!String(result.failure.message).includes("expected integer string")) {
     throw new Error(`${where} failed with ${JSON.stringify(result.failure)}`);
   }
 };
 
 for (const count of ["007", "00", "-0", "+0", " 7", "7 "]) {
-  rejects(await login({ email: "person@example.test", count, offset: "0" }), `request count ${count}`);
+  rejects(await login({ email: "person@example.test", count, offset: "0" }), `request count ${count}`, "RequestError");
 }
 for (const offset of ["007", "00", "-00"]) {
-  rejects(await login({ email: "person@example.test", count: "7", offset }), `request offset ${offset}`);
+  rejects(await login({ email: "person@example.test", count: "7", offset }), `request offset ${offset}`, "RequestError");
 }
 
 const sent_ok = await login({ email: "person@example.test", count: "70", offset: "-0" });
@@ -5530,11 +5529,11 @@ if (sent_ok.value.id !== "0") throw new Error(`the response was not returned: ${
 
 for (const id of ["007", "00", "-0"]) {
   reply = { id, offset: "0" };
-  rejects(await login({ email: "person@example.test", count: "7", offset: "0" }), `response id ${id}`);
+  rejects(await login({ email: "person@example.test", count: "7", offset: "0" }), `response id ${id}`, "DecodeError");
 }
 for (const offset of ["007", "00", "-00"]) {
   reply = { id: "7", offset };
-  rejects(await login({ email: "person@example.test", count: "7", offset: "0" }), `response offset ${offset}`);
+  rejects(await login({ email: "person@example.test", count: "7", offset: "0" }), `response offset ${offset}`, "DecodeError");
 }
 reply = { id: "0", offset: "-0" };
 const received = await login({ email: "person@example.test", count: "7", offset: "0" });
@@ -5587,7 +5586,7 @@ const login = async (body: any) => {
   return { failure, value };
 };
 const rejects = (result: any, where: string, message: string) => {
-  if (result.failure?.kind !== "protocol") throw new Error(`${where} was accepted: ${JSON.stringify(result)}`);
+  if (result.failure?._tag !== "DecodeError") throw new Error(`${where} was accepted: ${JSON.stringify(result)}`);
   if (!String(result.failure.message).includes(message)) {
     throw new Error(`${where} failed with ${JSON.stringify(result.failure)}`);
   }
@@ -5656,16 +5655,16 @@ const login = async (body: any) => {
   try { value = await client.auth.login({ body }); } catch (cause) { failure = cause; }
   return { failure, value };
 };
-const rejects = (result: any, where: string) => {
-  if (result.failure?.kind !== "protocol") throw new Error(`${where} was accepted: ${JSON.stringify(result)}`);
+const rejects = (result: any, where: string, tag: string) => {
+  if (result.failure?._tag !== tag) throw new Error(`${where} was accepted: ${JSON.stringify(result)}`);
   if (!String(result.failure.message).includes("unknown property extra")) {
     throw new Error(`${where} failed with ${JSON.stringify(result.failure)}`);
   }
 };
 
-rejects(await login({ email: "person@example.test", extra: 1 }), "an unknown text body property");
+rejects(await login({ email: "person@example.test", extra: 1 }), "an unknown text body property", "RequestError");
 reply = { email: "person@example.test", extra: 1 };
-rejects(await login({ email: "person@example.test" }), "an unknown response property");
+rejects(await login({ email: "person@example.test" }), "an unknown response property", "DecodeError");
 reply = { email: "person@example.test" };
 const sent = await login({ email: "person@example.test" });
 if (sent.failure) throw new Error(`a closed body was rejected: ${JSON.stringify(sent.failure)}`);
@@ -5721,8 +5720,8 @@ const login = async (body: any) => {
   try { value = await client.auth.login({ body }); } catch (cause) { failure = cause; }
   return { failure, value };
 };
-const rejects = (result: any, where: string, expected: string) => {
-  if (result.failure?.kind !== "protocol") throw new Error(`${where} was accepted: ${JSON.stringify(result)}`);
+const rejects = (result: any, where: string, expected: string, tag: string) => {
+  if (result.failure?._tag !== tag) throw new Error(`${where} was accepted: ${JSON.stringify(result)}`);
   if (!String(result.failure.message).includes(expected)) {
     throw new Error(`${where} failed with ${JSON.stringify(result.failure)}`);
   }
@@ -5733,14 +5732,14 @@ for (const [body, where, expected] of [
   [{ good: "x" }, "an unknown request value", "expected an exact integer"],
 ] as Array<[any, string, string]>) {
   const result = await login(body);
-  rejects(result, where, expected);
+  rejects(result, where, expected, "RequestError");
 }
 for (const [body, where, expected] of [
   [{ Bad: 1 }, "an unknown response key", "string does not match the contract"],
   [{ good: "x" }, "an unknown response value", "expected an exact integer"],
 ] as Array<[any, string, string]>) {
   reply = body;
-  rejects(await login({ good: 1 }), where, expected);
+  rejects(await login({ good: 1 }), where, expected, "DecodeError");
 }
 reply = { good: 1, other: 2 };
 const sent = await login({ good: 1, other: 2 });
@@ -5805,7 +5804,7 @@ try {
 } catch (cause) {
   failure = cause;
 }
-if (failure?.kind !== "protocol") throw new Error(`unexpected failure ${JSON.stringify(failure)}`);
+if (failure?._tag !== "DecodeError") throw new Error(`unexpected failure ${JSON.stringify(failure)}`);
 if (!String(failure.message).startsWith("the response does not match the contract:")) {
   throw new Error(`the contract prefix is missing: ${String(failure.message)}`);
 }
@@ -5840,7 +5839,7 @@ try {
 } catch (cause) {
   failure = cause;
 }
-if (failure?.kind !== "protocol") throw new Error(`unexpected failure ${JSON.stringify(failure)}`);
+if (failure?._tag !== "DecodeError") throw new Error(`unexpected failure ${JSON.stringify(failure)}`);
 if (!String(failure.message).startsWith("the response does not match the contract:")) {
   throw new Error(`the contract prefix is missing: ${String(failure.message)}`);
 }
@@ -5879,7 +5878,7 @@ for await (const item of stream.value) {
   break;
 }
 if (!failure?.isErr()) throw new Error("the invalid event was admitted");
-if (failure.error.kind !== "invalid_event") throw new Error(`unexpected failure ${JSON.stringify(failure.error)}`);
+if (failure.error._tag !== "StreamDecodeError") throw new Error(`unexpected failure ${JSON.stringify(failure.error)}`);
 if (failure.error.event !== "user") throw new Error(`the wrong event was named: ${failure.error.event}`);
 "#;
     run_bun(&files, harness);
@@ -5913,7 +5912,7 @@ for await (const item of stream.value) {
   break;
 }
 if (!failure?.isErr()) throw new Error("the invalid item was admitted");
-if (failure.error.kind !== "invalid_item") throw new Error(`unexpected failure ${JSON.stringify(failure.error)}`);
+if (failure.error._tag !== "StreamDecodeError") throw new Error(`unexpected failure ${JSON.stringify(failure.error)}`);
 "#;
     run_bun(&files, harness);
 }
