@@ -24,7 +24,9 @@ from .introspection import (
     UnsupportedRoute,
     inspect_app,
 )
+from .media import error_content, media_descriptor, opaque_type
 from .naming import error_name, ident, operation_path, type_base_id, type_name
+from .errors import _error_response, _errors, _errors_inherit
 from .pydantic_types import INPUT, OUTPUT, TypeRegistry
 
 _HEADER_NAME = re.compile(r"^[!#$%&'*+\-.^_`|~0-9A-Za-z]+$")
@@ -97,10 +99,16 @@ def _collect_plan(plan: OperationPlan, registry: TypeRegistry) -> None:
     for header in plan.headers:
         registry.collect(header.annotation, INPUT)
     if plan.body is not None:
-        registry.collect(plan.body.annotation, INPUT)
+        if plan.body.annotation is not None:
+            registry.collect(plan.body.annotation, INPUT)
+        for parameter in plan.body.fields:
+            registry.collect(parameter.annotation, INPUT)
     for response in plan.responses:
         if response.annotation is not None:
             registry.collect(response.annotation, OUTPUT)
+    if plan.stream is not None:
+        for annotation in plan.stream.events.values():
+            registry.collect(annotation, OUTPUT)
     for error in plan.errors:
         if error.annotation is not None:
             registry.collect(error.annotation, OUTPUT)
@@ -179,7 +187,9 @@ def _operation(
     path = _path(plan, registry)
     query = _query(plan, registry)
     headers = _headers(plan, registry)
-    body = _body(plan, registry)
+    diagnostics = list(plan.diagnostics)
+    body = _body(plan, registry, diagnostics)
+    stream = _stream(plan, registry)
     if plan.method == "HEAD":
         if (
             any(response.annotation is not None for response in plan.responses)
@@ -195,7 +205,9 @@ def _operation(
             for response in plan.responses
         ]
     else:
-        responses = [_response(response, registry) for response in plan.responses]
+        responses = [
+            _response(response, registry, diagnostics) for response in plan.responses
+        ]
     errors = _errors(plan, registry)
     errors_inherit, error_diagnostics = _errors_inherit(plan, errors, config)
     auth = _auth(plan, config)
@@ -228,6 +240,8 @@ def _operation(
         operation["headers"] = headers
     if body is not None:
         operation["body"] = body
+    if stream is not None:
+        operation["stream"] = stream
     if provides is not None:
         operation["provides"] = provides
     if not errors_inherit:
@@ -235,8 +249,9 @@ def _operation(
     doc = _operation_doc(plan)
     if doc is not None:
         operation["doc"] = doc
-    if error_diagnostics:
-        operation["diagnostics"] = error_diagnostics
+    diagnostics = diagnostics + error_diagnostics
+    if diagnostics:
+        operation["diagnostics"] = diagnostics
     return operation
 
 
@@ -395,182 +410,162 @@ def _headers(
     return headers
 
 
-def _body(plan: OperationPlan, registry: TypeRegistry) -> dict[str, Any] | None:
+def _body(
+    plan: OperationPlan,
+    registry: TypeRegistry,
+    diagnostics: list[dict[str, Any]],
+) -> dict[str, Any] | None:
     if plan.body is None:
         return None
+    body = plan.body
+    if body.content == "form":
+        type_id = f"{type_base_id(plan.endpoint)}::form"
+        fields = [
+            _form_field(plan, parameter, registry) for parameter in body.fields
+        ]
+        registry.define_struct(
+            type_id,
+            type_name(plan.endpoint) + ["form"],
+            fields,
+            direction=INPUT,
+            openness="reject",
+        )
+        return {
+            "ty": {"ref": type_id},
+            "content": "form",
+            "required": body.required,
+            "media": media_descriptor(body.media_type),
+        }
+    if body.content == "multipart":
+        return {
+            "ty": opaque_type("fastapi.multipart", "unknown"),
+            "content": "multipart",
+            "required": body.required,
+            "media": media_descriptor(body.media_type),
+        }
     ref, _ = registry.reference(
-        plan.body.annotation,
+        body.annotation,
         INPUT,
-        constraints=list(getattr(plan.body.field_info, "metadata", [])),
+        constraints=list(getattr(body.field_info, "metadata", [])),
         site=f"{type_base_id(plan.endpoint)}::body",
     )
-    return {"ty": ref, "content": "json", "required": plan.body.required}
+    ty = _typed_body(
+        ref,
+        body.content,
+        "fastapi.request",
+        registry.definitions(),
+        diagnostics,
+        "request body",
+    )
+    value: dict[str, Any] = {
+        "ty": ty,
+        "content": body.content,
+        "required": body.required,
+    }
+    value["media"] = media_descriptor(body.media_type)
+    return value
 
 
-def _response(response: ResponsePlan, registry: TypeRegistry) -> dict[str, Any]:
+def _form_field(
+    plan: OperationPlan,
+    parameter: ParameterPlan,
+    registry: TypeRegistry,
+) -> dict[str, Any]:
+    ref, diagnostics = registry.reference(
+        parameter.annotation,
+        INPUT,
+        constraints=list(getattr(parameter.field_info, "metadata", [])),
+        site=f"{type_base_id(plan.endpoint)}::form.{parameter.name}",
+    )
+    if parameter.required and _is_nullable(ref):
+        raise UnsupportedRoute(
+            f"form field {parameter.wire} is required and nullable; a urlencoded form has no present null"
+        )
+    if not _is_flat_ref(ref, registry.definitions(), array=True):
+        raise UnsupportedRoute(
+            f"form field {parameter.wire} uses a type that a urlencoded form cannot encode"
+        )
+    field: dict[str, Any] = {
+        "wire": parameter.wire,
+        "ident": ident(parameter.name),
+        "ty": ref,
+        "presence": "required" if parameter.required else "optional",
+    }
+    if not parameter.required:
+        default = _default(parameter.default)
+        if default is not PydanticUndefined:
+            field["default"] = default
+    description = getattr(parameter.field_info, "description", None)
+    if description:
+        field["doc"] = {"description": description}
+    if diagnostics:
+        field["diagnostics"] = diagnostics
+    return field
+
+
+def _stream(plan: OperationPlan, registry: TypeRegistry) -> dict[str, Any] | None:
+    if plan.stream is None:
+        return None
+    events = []
+    for name in sorted(plan.stream.events):
+        ref, _ = registry.reference(
+            plan.stream.events[name],
+            OUTPUT,
+            site=f"{type_base_id(plan.endpoint)}::stream.{name}",
+        )
+        events.append({"event": name, "data": ref})
+    return {"kind": "sse", "events": events}
+
+
+def _typed_body(
+    ref: dict[str, Any],
+    content: str,
+    codec: str,
+    definitions: dict[str, dict[str, Any]],
+    diagnostics: list[dict[str, Any]],
+    label: str,
+) -> dict[str, Any]:
+    if content == "bytes" and not _is_bytes_ref(ref, definitions):
+        diagnostics.append(
+            diagnostic(
+                "fastapi.opaque_media",
+                f"the {label} declares a byte media type, but {ref!r} is not a byte type; the body is opaque",
+            )
+        )
+        return opaque_type(codec, "bytes")
+    if content == "text" and not _is_string_ref(ref, definitions):
+        diagnostics.append(
+            diagnostic(
+                "fastapi.opaque_media",
+                f"the {label} declares a text media type, but {ref!r} is not a string type; the body is opaque",
+            )
+        )
+        return opaque_type(codec, "text")
+    return ref
+
+
+def _response(
+    response: ResponsePlan,
+    registry: TypeRegistry,
+    diagnostics: list[dict[str, Any]],
+) -> dict[str, Any]:
     value: dict[str, Any] = {"status": response.status, "content": response.content}
+    value["media"] = media_descriptor(response.media_type)
     if response.annotation is not None:
         ref, _ = registry.reference(
             response.annotation,
             OUTPUT,
             site=f"response.{response.status}",
         )
-        value["body"] = ref
-    return value
-
-
-def _errors(plan: OperationPlan, registry: TypeRegistry) -> list[dict[str, Any]]:
-    errors: dict[int | str, dict[str, Any]] = {}
-    for error in plan.errors:
-        converted = _error_response(error, registry)
-        errors[_normalize_status(error.status)] = converted
-    if plan.meta is not None:
-        for error in plan.meta.errors:
-            normalized = _normalize_status(error.status)
-            errors[normalized] = _error_response(
-                ErrorPlan(status=normalized, annotation=error.body, explicit=error),
-                registry,
-            )
-    return list(errors.values())
-
-
-def _error_response(error: ErrorPlan, registry: TypeRegistry) -> dict[str, Any]:
-    explicit = error.explicit
-    status = _normalize_status(explicit.status if explicit is not None else error.status)
-    annotation = explicit.body if explicit is not None else error.annotation
-    content = explicit.content if explicit is not None and explicit.content else None
-    if content is None:
-        content = "json" if annotation is not None else "empty"
-    if content not in _ERROR_CONTENT:
-        raise PonsConfigurationError(f"error content {content!r} is not an IR error content")
-    if content == "empty" and annotation is not None:
-        raise PonsConfigurationError("an empty error response cannot carry a body")
-    if content != "empty" and annotation is None:
-        raise PonsConfigurationError(f"error content {content!r} needs a body annotation")
-    if annotation is not None and _body_forbidden(status):
-        raise PonsConfigurationError(f"error status {status!r} cannot carry a body")
-
-    value: dict[str, Any] = {
-        "status": status,
-        "name": _error_ident(explicit, annotation, status),
-        "content": content,
-    }
-    if annotation is not None:
-        ref, _ = registry.reference(
-            annotation,
-            OUTPUT,
-            site=f"error.{status}",
+        value["body"] = _typed_body(
+            ref,
+            response.content,
+            "fastapi.response",
+            registry.definitions(),
+            diagnostics,
+            f"response {response.status}",
         )
-        if explicit is not None and explicit.variant is not None:
-            if not _is_enum(annotation):
-                raise PonsConfigurationError(
-                    f"error variant {explicit.variant!r} narrows {annotation!r}, which is not an enum"
-                )
-            ref = dict(ref)
-            ref["variant"] = explicit.variant
-        value["body"] = ref
-    description = explicit.description if explicit is not None else error.description
-    if description:
-        value["doc"] = {"description": description}
-    if explicit is not None and explicit.retryable is not None:
-        value["retryable"] = explicit.retryable
     return value
-
-
-def _error_ident(
-    explicit: PonsError | None,
-    annotation: Any,
-    status: int | str,
-) -> list[str]:
-    if explicit is not None and explicit.name:
-        return error_name(explicit.name)
-    if _is_named(annotation):
-        return type_name(annotation)
-    if isinstance(status, int):
-        try:
-            return error_name(HTTPStatus(status).phrase)
-        except ValueError:
-            return ["error"]
-    if isinstance(status, str) and status.endswith("xx"):
-        return error_name(
-            {
-                "1": "informational",
-                "2": "success",
-                "3": "redirect",
-                "4": "client",
-                "5": "server",
-            }.get(status[0], "error")
-            + " error"
-        )
-    return ["error"]
-
-
-def _errors_inherit(
-    plan: OperationPlan,
-    errors: list[dict[str, Any]],
-    config: PonsApp,
-) -> tuple[bool, list[dict[str, Any]]]:
-    inherit = plan.meta.errors_inherit if plan.meta is not None else True
-    if not inherit or not config.common_errors:
-        return inherit, []
-    diagnostics: list[dict[str, Any]] = []
-    for error in errors:
-        if any(_shadows(common.status, error["status"]) for common in config.common_errors):
-            inherit = False
-            diagnostics.append(
-                diagnostic(
-                    "fastapi.common_error_collision",
-                    f"operation {plan.endpoint.__qualname__} declares error {error['status']!r}, which a common error already answers for; common errors are not inherited",
-                )
-            )
-            break
-    if inherit:
-        for response in plan.responses:
-            if any(
-                _shadows(common.status, response.status)
-                for common in config.common_errors
-            ):
-                inherit = False
-                diagnostics.append(
-                    diagnostic(
-                        "fastapi.common_error_collision",
-                        f"operation {plan.endpoint.__qualname__} has success response {response.status!r}, which a common error already answers for; common errors are not inherited",
-                    )
-                )
-                break
-    return inherit, diagnostics
-
-
-def _shadows(left: int | str, right: int | str) -> bool:
-    left = _normalize_status(left)
-    right = _normalize_status(right)
-    if left == right or left == "default" or right == "default":
-        return True
-    if isinstance(left, int) and isinstance(right, str) and right.endswith("xx"):
-        return left // 100 == int(right[0])
-    if isinstance(right, int) and isinstance(left, str) and left.endswith("xx"):
-        return right // 100 == int(left[0])
-    return False
-
-
-def _body_forbidden(status: int | str) -> bool:
-    if isinstance(status, str):
-        return status.endswith("xx") and status[0] in {"1", "2", "3"}
-    return 100 <= status < 200 or status in {204, 205, 304}
-
-
-def _normalize_status(value: int | str | HTTPStatus) -> int | str:
-    if isinstance(value, HTTPStatus):
-        return int(value)
-    if isinstance(value, int):
-        return value
-    if isinstance(value, str):
-        lowered = value.lower()
-        if lowered in {"1xx", "2xx", "3xx", "4xx", "5xx", "default"}:
-            return lowered
-        if value.isdigit():
-            return int(value)
-    raise PonsConfigurationError(f"status {value!r} is not an IR status")
 
 
 def _auth(plan: OperationPlan, config: PonsApp) -> dict[str, Any]:
@@ -657,10 +652,17 @@ def _is_nullable(ref: dict[str, Any]) -> bool:
     return ref.get("kind") == "nullable"
 
 
-def _is_flat_ref(ref: dict[str, Any], definitions: dict[str, dict[str, Any]]) -> bool:
+def _is_flat_ref(
+    ref: dict[str, Any],
+    definitions: dict[str, dict[str, Any]],
+    *,
+    array: bool = False,
+) -> bool:
     kind = ref.get("kind")
     if kind == "nullable":
-        return _is_flat_ref(ref["inner"], definitions)
+        return _is_flat_ref(ref["inner"], definitions, array=array)
+    if kind == "array":
+        return array and _is_flat_ref(ref["item"], definitions)
     if kind in {"bool", "int", "float", "decimal", "string"}:
         return True
     if kind == "bytes":
@@ -673,7 +675,43 @@ def _is_flat_ref(ref: dict[str, Any], definitions: dict[str, dict[str, Any]]) ->
     if definition["kind"] == "enum":
         return definition["repr"]["kind"] == "string"
     if definition["kind"] == "newtype":
-        return _is_flat_ref(definition["inner"], definitions)
+        return _is_flat_ref(definition["inner"], definitions, array=array)
+    return False
+
+
+def _is_bytes_ref(ref: dict[str, Any], definitions: dict[str, dict[str, Any]]) -> bool:
+    kind = ref.get("kind")
+    if kind == "nullable":
+        return _is_bytes_ref(ref["inner"], definitions)
+    if kind == "bytes":
+        return True
+    if kind == "opaque":
+        return ref.get("wire") == "bytes"
+    if "ref" not in ref:
+        return False
+    definition = definitions.get(ref["ref"])
+    if definition is None or definition["kind"] != "newtype":
+        return False
+    return _is_bytes_ref(definition["inner"], definitions)
+
+
+def _is_string_ref(ref: dict[str, Any], definitions: dict[str, dict[str, Any]]) -> bool:
+    kind = ref.get("kind")
+    if kind == "nullable":
+        return _is_string_ref(ref["inner"], definitions)
+    if kind in {"string", "bytes"}:
+        return True
+    if kind == "opaque":
+        return ref.get("wire") in {"text", "bytes"}
+    if "ref" not in ref:
+        return False
+    definition = definitions.get(ref["ref"])
+    if definition is None:
+        return False
+    if definition["kind"] == "enum":
+        return definition["repr"]["kind"] == "string"
+    if definition["kind"] == "newtype":
+        return _is_string_ref(definition["inner"], definitions)
     return False
 
 

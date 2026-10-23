@@ -17,6 +17,7 @@ test = [
     "httpx",
     "jsonschema",
     "pytest",
+    "python-multipart",
 ]
 
 [project.scripts]

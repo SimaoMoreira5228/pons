@@ -2,9 +2,11 @@ from __future__ import annotations
 
 from datetime import datetime
 from enum import Enum
+from typing import Annotated
 from uuid import UUID
 
-from fastapi import FastAPI, Header, Query
+from fastapi import Body, FastAPI, File, Form, Header, Query, UploadFile
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, ConfigDict
 
 from pons_fastapi import (
@@ -12,7 +14,10 @@ from pons_fastapi import (
     PonsAuth,
     PonsAuthScheme,
     PonsProvides,
+    pons_media,
     pons_operation,
+    pons_stream,
+    pons_type,
 )
 
 app = FastAPI(
@@ -67,6 +72,47 @@ class UpdateUser(BaseModel):
     nickname: str | None = None
 
 
+class TokenEvent(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    text: str
+
+
+class StreamDone(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    tokens: int
+
+
+class UploadResult(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    id: UUID
+
+
+class FeedbackResult(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    accepted: bool
+
+
+class IngestResult(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    stored: int
+
+
+class Invoice(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    total: Annotated[str, pons_type("decimal", wire="string")]
+    reference: Annotated[str, pons_type("string", format="uuid")]
+
+
+class EventStreamResponse(StreamingResponse):
+    media_type = "text/event-stream"
+
+
 app.state.pons = PonsApp(
     auth_schemes={"session": PonsAuthScheme(kind="bearer", format="jwt")},
 )
@@ -119,6 +165,42 @@ def get_user(
 )
 def update_user(user_id: UUID, body: UpdateUser) -> UpdateUser:
     return body
+
+
+@app.get("/chat/stream", operation_id="chat.stream", response_class=EventStreamResponse)
+@pons_stream(events={"token": TokenEvent, "done": StreamDone})
+def stream_chat() -> EventStreamResponse:
+    async def events():
+        yield b"event: token\ndata: {}\n\n"
+
+    return EventStreamResponse(events())
+
+
+@app.post("/files", operation_id="files.upload")
+def upload_file(file: UploadFile = File(...), label: str = Form(...)) -> UploadResult:
+    return UploadResult(id=UUID(int=0))
+
+
+@app.post("/feedback", operation_id="feedback.create")
+def create_feedback(name: str = Form(...), rating: int = Form(1)) -> FeedbackResult:
+    return FeedbackResult(accepted=True)
+
+
+@app.post("/ingest", operation_id="ingest.raw")
+@pons_media(request="application/octet-stream")
+def ingest(body: bytes = Body(...)) -> IngestResult:
+    return IngestResult(stored=len(body))
+
+
+@app.get("/report.csv", operation_id="reports.csv")
+@pons_media(response="text/csv")
+def report() -> str:
+    return "id,name\n"
+
+
+@app.get("/invoice", operation_id="billing.invoice")
+def invoice(amount: Annotated[str, pons_type("decimal", wire="string")]) -> Invoice:
+    return Invoice(total=amount, reference="00000000-0000-0000-0000-000000000000")
 
 
 @app.get("/legacy")

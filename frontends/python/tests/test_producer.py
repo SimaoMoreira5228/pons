@@ -107,6 +107,63 @@ def test_sample_operations_cover_the_declared_features() -> None:
     assert nickname["presence"] == "required"
     assert nickname["ty"]["kind"] == "nullable"
 
+    chat = operations["chat.stream"]
+    assert chat["responses"] == [{"status": 200, "content": "stream", "media": None}]
+    assert chat["stream"] == {
+        "kind": "sse",
+        "events": [
+            {"event": "done", "data": {"ref": "sample_app.StreamDone"}},
+            {"event": "token", "data": {"ref": "sample_app.TokenEvent"}},
+        ],
+    }
+    assert types["sample_app.StreamDone"]["kind"] == "struct"
+    assert types["sample_app.TokenEvent"]["kind"] == "struct"
+
+    upload = operations["files.upload"]
+    assert upload["body"]["content"] == "multipart"
+    assert upload["body"]["ty"] == {
+        "kind": "opaque",
+        "codec": "fastapi.multipart",
+        "wire": "unknown",
+    }
+    assert upload["body"]["media"] == {"type": "multipart", "subtype": "form-data"}
+
+    feedback = operations["feedback.create"]
+    assert feedback["body"]["content"] == "form"
+    assert feedback["body"]["media"] == {"type": "application", "subtype": "x-www-form-urlencoded"}
+    form = types[feedback["body"]["ty"]["ref"]]
+    form_fields = {field["wire"]: field for field in form["fields"]}
+    assert form_fields["name"]["presence"] == "required"
+    assert form_fields["rating"]["presence"] == "optional"
+    assert form_fields["rating"]["default"] == 1
+
+    ingest = operations["ingest.raw"]
+    assert ingest["body"]["content"] == "bytes"
+    assert ingest["body"]["media"] == {"type": "application", "subtype": "octet-stream"}
+    assert ingest["body"]["ty"] == {
+        "kind": "opaque",
+        "codec": "fastapi.request",
+        "wire": "bytes",
+    }
+
+    report = operations["reports.csv"]
+    assert report["responses"] == [
+        {
+            "status": 200,
+            "content": "text",
+            "media": {"type": "text", "subtype": "csv"},
+            "body": {"kind": "string"},
+        }
+    ]
+
+    invoice = types["sample_app.Invoice"]
+    invoice_fields = {field["wire"]: field for field in invoice["fields"]}
+    assert invoice_fields["total"]["ty"] == {"kind": "decimal", "wire": "string"}
+    assert invoice_fields["reference"]["ty"] == {
+        "kind": "string",
+        "format": "uuid",
+    }
+
 
 def test_unsupported_route_is_skipped_with_a_diagnostic() -> None:
     from sample_app import app
@@ -142,6 +199,7 @@ def test_common_errors_only_appear_when_declared() -> None:
             "status": 429,
             "name": ["rate", "limited"],
             "content": "empty",
+            "media": None,
             "doc": {"description": "Slow down."},
         }
     ]

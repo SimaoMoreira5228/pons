@@ -15,6 +15,7 @@ from pydantic import BaseModel
 from pydantic.fields import FieldInfo
 from pydantic_core import PydanticUndefined, to_jsonable_python
 
+from .config import PonsConfigurationError, PonsType
 from .diagnostics import diagnostic
 from .naming import ident, split_words, type_base_id, type_name
 
@@ -255,6 +256,16 @@ class TypeRegistry:
         annotation, metadata = self._annotated(annotation)
         constraints = _flatten_field_info(constraints + list(metadata))
         diagnostics: list[dict[str, Any]] = []
+        override = next(
+            (constraint for constraint in constraints if isinstance(constraint, PonsType)),
+            None,
+        )
+        if override is not None:
+            if _is_union(get_origin(annotation)):
+                raise PonsConfigurationError(
+                    f"{site} wraps a union with pons_type; annotate the non-null type instead"
+                )
+            return self._type_override(override, site), diagnostics
 
         if annotation is None or annotation is _NONE:
             return {"kind": "null"}, diagnostics
@@ -431,6 +442,66 @@ class TypeRegistry:
             )
         )
         return {"kind": "any"}, diagnostics
+
+    def _type_override(self, override: PonsType, site: str) -> dict[str, Any]:
+        kind = override.kind
+        if kind == "bool":
+            return {"kind": "bool"}
+        if kind == "int":
+            bits = override.bits if override.bits is not None else 64
+            if bits not in {8, 16, 32, 64, 128}:
+                raise PonsConfigurationError(f"{site} pons_type int needs bits 8, 16, 32, 64, or 128")
+            wire = override.wire if override.wire is not None else "number"
+            if wire not in {"number", "string"}:
+                raise PonsConfigurationError(f"{site} pons_type int wire must be number or string")
+            return {
+                "kind": "int",
+                "bits": bits,
+                "signed": True if override.signed is None else override.signed,
+                "wire": wire,
+            }
+        if kind == "float":
+            bits = override.bits if override.bits is not None else 64
+            if bits not in {32, 64}:
+                raise PonsConfigurationError(f"{site} pons_type float needs bits 32 or 64")
+            return {"kind": "float", "bits": bits}
+        if kind == "decimal":
+            wire = override.wire if override.wire is not None else "string"
+            if wire not in {"number", "string"}:
+                raise PonsConfigurationError(f"{site} pons_type decimal wire must be number or string")
+            return {"kind": "decimal", "wire": wire}
+        if kind == "string":
+            value: dict[str, Any] = {"kind": "string"}
+            if override.format is not None:
+                if override.format not in {
+                    "uuid",
+                    "date-time",
+                    "date",
+                    "time",
+                    "duration",
+                    "uri",
+                    "email",
+                    "ipv4",
+                    "ipv6",
+                }:
+                    raise PonsConfigurationError(
+                        f"{site} pons_type string format {override.format!r} is not an IR format"
+                    )
+                value["format"] = override.format
+            return value
+        if kind == "bytes":
+            encoding = override.encoding if override.encoding is not None else "base64"
+            if encoding not in {"base64", "base64url", "hex", "array"}:
+                raise PonsConfigurationError(f"{site} pons_type bytes encoding {encoding!r} is not an IR encoding")
+            return {"kind": "bytes", "encoding": encoding}
+        if kind == "any":
+            return {"kind": "any"}
+        if kind == "opaque":
+            wire = override.wire if override.wire is not None else "unknown"
+            if wire not in {"json", "text", "bytes", "unknown"}:
+                raise PonsConfigurationError(f"{site} pons_type opaque wire {wire!r} is not an IR wire")
+            return {"kind": "opaque", "codec": override.codec, "wire": wire}
+        raise PonsConfigurationError(f"{site} pons_type kind {kind!r} is not supported")
 
     def _annotated(self, annotation: Any) -> tuple[Any, tuple[Any, ...]]:
         if get_origin(annotation) is Annotated:

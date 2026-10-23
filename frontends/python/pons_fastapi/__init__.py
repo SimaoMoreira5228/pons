@@ -5,9 +5,15 @@ from .config import (
     PonsAuthScheme,
     PonsConfigurationError,
     PonsError,
+    PonsMedia,
     PonsOperation,
     PonsProvides,
+    PonsStream,
+    PonsType,
+    pons_media,
     pons_operation,
+    pons_stream,
+    pons_type,
 )
 from .document import build_document
 
@@ -17,9 +23,15 @@ __all__ = [
     "PonsAuthScheme",
     "PonsConfigurationError",
     "PonsError",
+    "PonsMedia",
     "PonsOperation",
     "PonsProvides",
+    "PonsStream",
+    "PonsType",
     "build_document",
     "main",
+    "pons_media",
     "pons_operation",
+    "pons_stream",
+    "pons_type",
 ]
