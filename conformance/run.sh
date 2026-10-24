@@ -7,7 +7,7 @@ trap 'rm -rf "$temporary"' EXIT
 
 cargo run --quiet --manifest-path "$root/Cargo.toml" -p reference-api > "$temporary/axum.json"
 (
-    cd "$root/jvm"
+    cd "$root/frontends"
     ./gradlew --quiet :conformance-reference:ponsExport > "$temporary/spring.json"
 )
 cargo run --quiet --manifest-path "$root/Cargo.toml" -p pons-conformance -- \

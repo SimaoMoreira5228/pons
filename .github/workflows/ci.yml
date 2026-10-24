@@ -42,10 +42,10 @@ jobs:
       # binary, which is what `tsc` resolves to on Windows.
       - name: Install the generated-code toolchain
         run: |
-          npm install --no-package-lock
-          echo "$PWD/node_modules/.bin" >> "$GITHUB_PATH"
-          echo "$PWD/node_modules/bun/bin" >> "$GITHUB_PATH"
-          echo "$PWD"/node_modules/@typescript/*/lib >> "$GITHUB_PATH"
+          npm --prefix tooling install --no-package-lock
+          echo "$PWD/tooling/node_modules/.bin" >> "$GITHUB_PATH"
+          echo "$PWD/tooling/node_modules/bun/bin" >> "$GITHUB_PATH"
+          echo "$PWD"/tooling/node_modules/@typescript/*/lib >> "$GITHUB_PATH"
       - name: Report the toolchain the suites will resolve
         run: |
           tsc --version
@@ -71,7 +71,7 @@ jobs:
           distribution: temurin
           java-version: '21'
       - name: Test
-        working-directory: jvm
+        working-directory: frontends
         run: ./gradlew build --console=plain
 
   go-emitter:
@@ -84,7 +84,7 @@ jobs:
           go-version: '1.27.x'
           cache: false
       - name: Test the emitter
-        run: ./emitters/go/test.sh
+        run: ./emitters/pons-emit-go/test.sh
 
   python-producer:
     name: python producer
@@ -97,9 +97,9 @@ jobs:
       - name: Install the Rust toolchain
         run: rustup toolchain install stable --profile minimal
       - name: Install the producer
-        run: python -m pip install -e "frontends/python[test]"
+        run: python -m pip install -e "frontends/pons-fastapi[test]"
       - name: Test
-        run: python -m pytest frontends/python/tests
+        run: python -m pytest frontends/pons-fastapi/tests
 
   conformance:
     name: conformance

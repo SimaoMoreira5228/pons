@@ -2,3 +2,6 @@ local/
 target/
 .opencode/
 node_modules/
+build/
+.gradle/
+.kotlin/

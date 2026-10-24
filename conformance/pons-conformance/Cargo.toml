@@ -1,0 +1,10 @@
+[package]
+name = "pons-conformance"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+pons-ir = { path = "../../core/rust/pons-ir" }
+serde_json = { workspace = true }

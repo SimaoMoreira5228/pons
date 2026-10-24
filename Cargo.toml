@@ -1,5 +1,5 @@
 [workspace]
-members = ["conformance/reference-api", "crates/pons-actix", "crates/pons-axum", "crates/pons-cli", "crates/pons-conformance", "crates/pons-core", "crates/pons-derive", "crates/pons-emit-openapi", "crates/pons-emit-ts", "crates/pons-ir", "crates/pons-plugin"]
+members = ["conformance/reference-api", "conformance/pons-conformance", "cli/pons-cli", "core/rust/pons-core", "core/rust/pons-derive", "core/rust/pons-ir", "core/rust/pons-plugin", "emitters/pons-emit-openapi", "emitters/pons-emit-ts", "frontends/pons-actix", "frontends/pons-axum"]
 resolver = "3"
 
 [workspace.package]

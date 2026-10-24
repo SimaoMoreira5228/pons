@@ -7,7 +7,7 @@ rust-version.workspace = true
 
 [dependencies]
 axum = { workspace = true }
-pons-axum = { path = "../../crates/pons-axum" }
-pons-core = { path = "../../crates/pons-core" }
-pons-ir = { path = "../../crates/pons-ir" }
+pons-axum = { path = "../../frontends/pons-axum" }
+pons-core = { path = "../../core/rust/pons-core" }
+pons-ir = { path = "../../core/rust/pons-ir" }
 serde = { workspace = true }

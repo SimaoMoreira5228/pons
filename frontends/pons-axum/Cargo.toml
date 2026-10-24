@@ -1,0 +1,26 @@
+[package]
+name = "pons-axum"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "Axum frontend for Pons API contracts"
+keywords = ["axum", "api", "codegen", "openapi"]
+categories = ["web-programming::http-server", "development-tools"]
+
+[dependencies]
+axum = { workspace = true, features = ["ws"] }
+futures-util.workspace = true
+pons-core = { path = "../../core/rust/pons-core" }
+pons-ir = { path = "../../core/rust/pons-ir" }
+serde.workspace = true
+serde_json.workspace = true
+tower-layer.workspace = true
+tower-service.workspace = true
+
+[dev-dependencies]
+axum = { version = "0.8.9", features = ["ws", "tokio", "http1"] }
+serde.workspace = true
+tokio = { version = "1", features = ["macros", "net", "rt-multi-thread"] }
+tokio-tungstenite = "0.29"
+tower = "0.5"
