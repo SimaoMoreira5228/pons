@@ -2,6 +2,7 @@ use std::collections::BTreeSet;
 
 use serde_json::Value;
 
+use super::invariants::{Boundary, field_crosses};
 use super::{Document, Exact, ValidationError, exact_integer};
 use crate::operation::{ErrorResponse, Operation};
 use crate::types::{
@@ -469,9 +470,7 @@ impl Document {
         };
         let path = format!("{owner}.fields.{}", field.wire);
         let mut problems = Vec::new();
-        if super::Boundary::Request.refuses(direction)
-            || !super::field_crosses(field, super::Boundary::Request)
-        {
+        if Boundary::Request.refuses(direction) || !field_crosses(field, Boundary::Request) {
             problems.push(format!(
                 "the aliases of field {} name input spellings of a key that never crosses a request boundary",
                 field.wire
