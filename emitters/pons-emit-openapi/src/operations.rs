@@ -4,7 +4,7 @@ use pons_ir::{ContentKind, Operation, PathSegment, Presence, TypeRef};
 use serde_json::{Map, Value, json};
 
 use crate::responses::{media_content, media_type};
-use crate::schemas::{Place, WireForm};
+use crate::schema::{Place, WireForm};
 use crate::{Builder, EmitError};
 
 impl Builder<'_> {

@@ -5,7 +5,7 @@ use pons_ir::{
 use serde_json::{Map, Value, json};
 
 use crate::operations::operation_id;
-use crate::schemas::{Place, WireForm};
+use crate::schema::{Place, WireForm};
 use crate::{Builder, EmitError};
 
 impl Builder<'_> {
