@@ -59,7 +59,7 @@ jobs:
         run: cargo test -p pons-ir --all-features --test document_model checked_in_schema_matches_the_rust_model
       - name: Fixture matrix
         if: matrix.os == 'ubuntu-latest'
-        run: cargo test -p pons-cli --all-features --test commands every_target_classifies_every_fixture_the_same_way
+        run: cargo test -p pons-cli --all-features --test emit every_target_classifies_every_fixture_the_same_way
 
   jvm:
     name: jvm
