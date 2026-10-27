@@ -141,6 +141,10 @@ pub fn field(wire: &str, ty: Value, presence: &str) -> Value {
     json!({"wire": wire, "ident": [wire], "ty": ty, "presence": presence})
 }
 
+pub fn field_ref(wire: &str, ty: &TypeRef, presence: &str) -> Value {
+    json!({"wire": wire, "ident": [wire], "ty": ty, "presence": presence})
+}
+
 pub fn string() -> Value {
     json!({"kind": "string"})
 }
@@ -191,6 +195,19 @@ pub fn struct_type(
     })
 }
 
+pub fn struct_map(id: &str, openness: &str, fields: Value, flattened: Value) -> Value {
+    json!({
+        id: {
+            "kind": "struct",
+            "name": [id],
+            "direction": "both",
+            "openness": openness,
+            "fields": fields,
+            "flattened": flattened,
+        }
+    })
+}
+
 pub fn violations(
     types: Value,
     ty: &TypeRef,
@@ -230,4 +247,11 @@ pub fn text(minimum: Option<u64>, maximum: Option<u64>, pattern: Option<&str>) -
         "pattern": pattern,
     }))
     .unwrap()
+}
+
+pub fn named(id: &str) -> TypeRef {
+    TypeRef::Named(pons_ir::NamedRef {
+        id: id.into(),
+        variant: None,
+    })
 }
