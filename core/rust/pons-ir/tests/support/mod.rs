@@ -1,6 +1,6 @@
 #![allow(dead_code)]
 
-use pons_ir::{Document, TypeKind, TypeRef};
+use pons_ir::{Direction, Document, TypeKind, TypeRef, Violation, validate_value};
 use serde_json::{Value, json};
 
 pub fn contract(types: Value) -> Document {
@@ -189,4 +189,45 @@ pub fn struct_type(
         "kind": "struct", "name": [name], "direction": "both",
         "openness": openness, "fields": fields, "flattened": flattened
     })
+}
+
+pub fn violations(
+    types: Value,
+    ty: &TypeRef,
+    direction: Direction,
+    value: Value,
+) -> Vec<Violation> {
+    let document = contract(types);
+    document.validate().unwrap();
+    validate_value(&document, ty, direction, &value).unwrap_err()
+}
+
+pub fn messages(found: Vec<Violation>) -> Vec<String> {
+    found.iter().map(ToString::to_string).collect()
+}
+
+pub fn checked(types: Value, ty: &TypeRef, value: Value) {
+    checked_in(types, ty, Direction::Both, value)
+}
+
+pub fn checked_in(types: Value, ty: &TypeRef, direction: Direction, value: Value) {
+    let document = contract(types);
+    document.validate().unwrap();
+    if let Err(found) = validate_value(&document, ty, direction, &value) {
+        panic!("{value} was rejected: {}", messages(found).join(", "));
+    }
+}
+
+pub fn inline(extra: Value) -> TypeRef {
+    serde_json::from_value(extra).unwrap()
+}
+
+pub fn text(minimum: Option<u64>, maximum: Option<u64>, pattern: Option<&str>) -> TypeRef {
+    serde_json::from_value(json!({
+        "kind": "string",
+        "min_length": minimum,
+        "max_length": maximum,
+        "pattern": pattern,
+    }))
+    .unwrap()
 }
