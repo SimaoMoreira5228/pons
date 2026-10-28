@@ -1,4 +1,4 @@
-use pons_ir::{CredentialLocator, CredentialProvision, Doc, Name};
+use pons_ir::{CredentialLocator, CredentialProvision, Doc, Name, Pagination};
 
 pub struct OperationMeta {
     pub(crate) id: Vec<Name>,
@@ -12,6 +12,7 @@ pub struct OperationMeta {
 pub(crate) struct Semantics {
     pub(crate) safe: Option<bool>,
     pub(crate) idempotent: Option<bool>,
+    pub(crate) pagination: Option<Pagination>,
 }
 
 impl OperationMeta {
@@ -89,6 +90,11 @@ impl OperationMeta {
 
     pub fn idempotent(mut self, idempotent: bool) -> Self {
         self.semantics.idempotent = Some(idempotent);
+        self
+    }
+
+    pub fn pagination(mut self, pagination: Pagination) -> Self {
+        self.semantics.pagination = Some(pagination);
         self
     }
 }

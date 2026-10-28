@@ -1,8 +1,12 @@
 mod support;
 
 use pons_axum::routing::{delete, get, get_with, head, post, post_with};
-use pons_axum::{OperationMeta, Router, WithStatus};
-use pons_ir::{AuthScheme, CredentialLocator};
+use pons_axum::{OperationMeta, Query, Router, WithStatus};
+use pons_core::Schema;
+use pons_ir::{
+    AuthScheme, CredentialLocator, JsonPointer, PageSize, Pagination, PaginationRequest,
+};
+use serde::Deserialize;
 use support::router::*;
 use support::*;
 use tower_service::Service;
@@ -25,6 +29,36 @@ async fn create_user(
 ) -> WithStatus<201, axum::Json<User>> {
     let name = input.name;
     WithStatus::new(axum::Json(User { id: 1, name }))
+}
+
+#[derive(Deserialize, Schema)]
+#[serde(deny_unknown_fields)]
+struct PageQuery {
+    #[serde(default)]
+    cursor: Option<String>,
+    #[serde(default)]
+    limit: Option<u16>,
+}
+
+async fn list_page(Query(query): Query<PageQuery>) -> axum::Json<Vec<User>> {
+    let _ = (query.cursor, query.limit);
+    axum::Json(Vec::new())
+}
+
+fn pagination() -> Pagination {
+    Pagination {
+        request: PaginationRequest::Cursor {
+            field: "cursor".into(),
+        },
+        items: JsonPointer::new("/items"),
+        next: Some(JsonPointer::new("/next")),
+        page_size: Some(PageSize {
+            field: "limit".into(),
+            default: Some(20),
+            maximum: Some(100),
+        }),
+        ext: Default::default(),
+    }
 }
 
 #[test]
@@ -172,6 +206,62 @@ fn operation_meta_overrides_the_semantics_the_method_derives() {
         !get.semantics.safe && !get.semantics.idempotent,
         "a GET the handler serves at most once is safe to refuse a repeat: {:?}",
         get.semantics
+    );
+}
+
+#[test]
+fn operation_meta_publishes_the_pagination_it_declares() {
+    let document = Router::<()>::new(info())
+        .route(
+            "/page",
+            get_with(
+                list_page,
+                OperationMeta::new("users.page").pagination(pagination()),
+            ),
+        )
+        .into_document()
+        .unwrap();
+    let published = operation(&document, "page")
+        .semantics
+        .pagination
+        .as_ref()
+        .expect("the operation declares its pagination");
+    assert_eq!(
+        published.request,
+        PaginationRequest::Cursor {
+            field: "cursor".into(),
+        }
+    );
+    assert_eq!(published.items.as_str(), "/items");
+    assert_eq!(
+        published.next.as_ref().map(JsonPointer::as_str),
+        Some("/next")
+    );
+    assert_eq!(
+        published.page_size,
+        Some(PageSize {
+            field: "limit".into(),
+            default: Some(20),
+            maximum: Some(100),
+        })
+    );
+
+    let refusal = refused(Router::<()>::new(info()).route(
+        "/page",
+        get_with(
+            list_page,
+            OperationMeta::new("users.page").pagination(Pagination {
+                request: PaginationRequest::Offset {
+                    field: "offset".into(),
+                },
+                ..pagination()
+            }),
+        ),
+    ));
+    assert!(
+        refusal
+            .contains("pagination field \"offset\" is not declared on the operation query or body"),
+        "{refusal}"
     );
 }
 
