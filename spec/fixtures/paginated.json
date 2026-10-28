@@ -1,0 +1,92 @@
+{
+  "ir_version": "0.2",
+  "info": {
+    "title": "Paginated",
+    "version": "1",
+    "servers": ["https://api.example.test"]
+  },
+  "types": {
+    "User": {
+      "kind": "struct",
+      "openness": "reject",
+      "name": ["user"],
+      "direction": "output",
+      "fields": [
+        {
+          "wire": "id",
+          "ident": ["id"],
+          "ty": {"kind": "int", "bits": 32, "signed": false, "wire": "number"},
+          "presence": "required"
+        },
+        {
+          "wire": "handle",
+          "ident": ["handle"],
+          "ty": {"kind": "string"},
+          "presence": "required"
+        }
+      ]
+    },
+    "Page": {
+      "kind": "struct",
+      "openness": "reject",
+      "name": ["page"],
+      "direction": "output",
+      "fields": [
+        {
+          "wire": "items",
+          "ident": ["items"],
+          "ty": {"kind": "array", "item": {"ref": "User"}},
+          "presence": "required"
+        },
+        {
+          "wire": "next_cursor",
+          "ident": ["next", "cursor"],
+          "ty": {"kind": "nullable", "inner": {"kind": "string"}},
+          "presence": "optional"
+        }
+      ]
+    },
+    "PageQuery": {
+      "kind": "struct",
+      "openness": "reject",
+      "name": ["page", "query"],
+      "direction": "input",
+      "fields": [
+        {
+          "wire": "cursor",
+          "ident": ["cursor"],
+          "ty": {"kind": "string"},
+          "presence": "optional"
+        },
+        {
+          "wire": "limit",
+          "ident": ["limit"],
+          "ty": {"kind": "int", "bits": 32, "signed": false, "wire": "number"},
+          "presence": "optional"
+        }
+      ]
+    }
+  },
+  "operations": [
+    {
+      "id": [["users"], ["list"]],
+      "method": "GET",
+      "path": [{"lit": "users"}],
+      "query": {"ref": "PageQuery"},
+      "responses": [{"status": 200, "content": "json", "body": {"ref": "Page"}}],
+      "errors_inherit": false,
+      "auth": {"alternatives": [], "optional": false},
+      "semantics": {
+        "safe": true,
+        "idempotent": true,
+        "pagination": {
+          "request": {"kind": "cursor", "field": "cursor"},
+          "items": "/items",
+          "next": "/next_cursor",
+          "page_size": {"field": "limit", "default": 20, "maximum": 100}
+        }
+      },
+      "doc": {"summary": "List users."}
+    }
+  ]
+}

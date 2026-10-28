@@ -170,6 +170,18 @@ pub(crate) const EVERY_SUBJECT_EXACT: Levels = Levels {
     unsupported: &[],
 };
 
+pub(crate) const PAGINATED_EXACT: Levels = Levels {
+    exact: &[
+        "operations.users.list",
+        "types.Page",
+        "types.PageQuery",
+        "types.User",
+    ],
+    opaque: &[],
+    lossy: &[],
+    unsupported: &[],
+};
+
 pub(crate) const WIDE_INTEGER_LOSSY: Levels = Levels {
     exact: &["types.EventQuery", "types.LoginError"],
     opaque: &["types.LoginRequest"],
@@ -188,7 +200,7 @@ pub(crate) struct Row {
     pub(crate) lossy: [Levels; 2],
 }
 
-pub(crate) const FIXTURES: [Row; 4] = [
+pub(crate) const FIXTURES: [Row; 5] = [
     Row {
         file: "login.json",
         carries: "opaque",
@@ -200,6 +212,12 @@ pub(crate) const FIXTURES: [Row; 4] = [
         carries: "exact",
         strict: [EVERY_SUBJECT_EXACT; 2],
         lossy: [EVERY_SUBJECT_EXACT; 2],
+    },
+    Row {
+        file: "paginated.json",
+        carries: "pagination",
+        strict: [PAGINATED_EXACT; 2],
+        lossy: [PAGINATED_EXACT; 2],
     },
     Row {
         file: "lossy.json",
