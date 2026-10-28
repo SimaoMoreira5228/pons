@@ -3,14 +3,15 @@ use std::collections::BTreeMap;
 mod operations;
 mod signatures;
 
-use pons_ir::{Document, PathSegment, ResponseStatus, StreamKind};
+use pons_ir::{Document, PathSegment, ResponseStatus, StreamKind, operation_subject};
 
 use self::operations::operation_function;
 use self::signatures::{Node, auth_types, operation_type_names, option_types};
 use crate::naming::{camel, identifier, is_plain_identifier};
 use crate::render::{jsdoc, string};
 use crate::{
-    EmitError, EmitMode, ErrorStrategy, GeneratedFile, Namespaces, Runtime, TsOptions, validation,
+    EmitError, EmitMode, ErrorStrategy, GeneratedFile, Namespaces, Runtime, TsOptions, pagination,
+    validation,
 };
 
 pub(crate) use self::operations::{normalize_integer_constraints, tag_carriers, type_ref_json};
@@ -33,12 +34,17 @@ pub(super) fn emit(
     options: &TsOptions,
     preserve_wide_integers: bool,
     validation: &mut validation::Backend,
+    pagination_plans: &BTreeMap<usize, pagination::Plan>,
 ) -> Result<Vec<GeneratedFile>, EmitError> {
     let opaque_required = options.mode == EmitMode::Strict && document.has_reachable_opaque();
     let mut namespaces: BTreeMap<String, Namespace> = BTreeMap::new();
     let operation_names = operation_type_names(document);
-    for (operation, declaration_names) in document.operations.iter().zip(operation_names) {
-        let (declarations, function) = operation_function(
+    let mut pending_iterators = Vec::new();
+    for (index, (operation, declaration_names)) in
+        document.operations.iter().zip(operation_names).enumerate()
+    {
+        let plan = pagination_plans.get(&index);
+        let (declarations, function, iterator) = operation_function(
             operation,
             &declaration_names,
             document,
@@ -46,6 +52,7 @@ pub(super) fn emit(
             options,
             preserve_wide_integers,
             validation,
+            plan,
         )?;
         let imports = validation.take_imports();
         let (parents, leaf) = operation
@@ -107,6 +114,7 @@ pub(super) fn emit(
         namespace.ndjson |= ndjson;
         namespace.streams |= sse || ndjson;
         namespace.websockets |= websocket;
+        namespace.paginates |= iterator.is_some();
         namespace.uses_request |= !websocket;
         if !websocket {
             namespace.wraps_status |= operation.responses.iter().any(|response| {
@@ -126,6 +134,10 @@ pub(super) fn emit(
                 .iter()
                 .any(|error| !error.headers.is_empty());
         let mut node = &mut namespace.node;
+        let path = rest
+            .iter()
+            .map(|segment| camel(segment))
+            .collect::<Vec<_>>();
         for parent in rest {
             let segment = camel(parent);
             if node.operations.iter().any(|(_, name, _)| name == &segment) {
@@ -139,7 +151,41 @@ pub(super) fn emit(
             return Err(EmitError(format!("client member collision at {leaf}")));
         }
         node.operations
-            .push((operation.doc.clone(), leaf, function));
+            .push((operation.doc.clone(), leaf.clone(), function));
+        if let Some(iterator) = iterator {
+            pending_iterators.push(PendingIterator {
+                namespace: member.clone(),
+                path,
+                name: format!("{leaf}All"),
+                owner: format!("operations.{}", operation_subject(operation)),
+                member: iterator,
+            });
+        }
+    }
+    for pending in pending_iterators {
+        let namespace = namespaces
+            .get_mut(&pending.namespace)
+            .expect("a pending iterator names an emitted namespace");
+        let mut node = &mut namespace.node;
+        for segment in &pending.path {
+            node = node
+                .children
+                .get_mut(segment)
+                .expect("a pending iterator names an emitted namespace path");
+        }
+        if node.children.contains_key(&pending.name)
+            || node
+                .operations
+                .iter()
+                .any(|(_, name, _)| name == &pending.name)
+        {
+            return Err(EmitError(format!(
+                "the TypeScript emitter cannot emit the pagination iterator {} for {}, because \
+                 the client already has a member named {}",
+                pending.name, pending.owner, pending.name
+            )));
+        }
+        node.operations.push((None, pending.name, pending.member));
     }
     let mut files = Vec::new();
     for (member, namespace) in &namespaces {
@@ -161,6 +207,14 @@ pub(super) fn emit(
     Ok(files)
 }
 
+struct PendingIterator {
+    namespace: String,
+    path: Vec<String>,
+    name: String,
+    owner: String,
+    member: String,
+}
+
 #[derive(Default)]
 struct Namespace {
     node: Node,
@@ -172,6 +226,7 @@ struct Namespace {
     sse: bool,
     ndjson: bool,
     websockets: bool,
+    paginates: bool,
     declares_api_error: bool,
     uses_request: bool,
     wraps_status: bool,
@@ -202,6 +257,9 @@ fn namespace_file(
     }
     if namespace.websockets {
         members.push("websocket".into());
+    }
+    if namespace.paginates {
+        members.push("paginate".into());
     }
     members.push("type ConfiguredClient".into());
     let mut output = String::new();

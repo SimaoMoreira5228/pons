@@ -8,6 +8,7 @@ const MODULES: &[(&str, &str)] = &[
     ("codec.ts", include_str!("../runtime/codec.ts")),
     ("validate.ts", include_str!("../runtime/validate.ts")),
     ("stream.ts", include_str!("../runtime/stream.ts")),
+    ("pagination.ts", include_str!("../runtime/pagination.ts")),
     ("credentials.ts", include_str!("../runtime/credentials.ts")),
     ("transport.ts", include_str!("../runtime/transport.ts")),
     ("websocket.ts", include_str!("../runtime/websocket.ts")),

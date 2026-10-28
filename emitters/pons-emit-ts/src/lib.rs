@@ -4,6 +4,7 @@ mod errors;
 mod extensions;
 mod naming;
 mod options;
+mod pagination;
 mod render;
 mod runtime;
 mod types;
@@ -13,7 +14,7 @@ use std::collections::BTreeMap;
 
 use pons_ir::{
     ApiKeyLocation, AuthScheme, Coverage, Document, StreamKind, ValidationCoverage,
-    coverage_for_document,
+    coverage_for_document, operation_subject,
 };
 
 use crate::analysis::{
@@ -149,18 +150,6 @@ pub fn emit_with_options(document: &Document, options: TsOptions) -> Result<Emit
             "a WebSocket operation cannot declare a request body, because the upgrade request does not carry one".into(),
         ));
     }
-    let paginated = document
-        .operations
-        .iter()
-        .filter(|operation| operation.semantics.pagination.is_some())
-        .map(|operation| format!("operations.{}", pons_ir::operation_path(&operation.id)))
-        .collect::<Vec<_>>();
-    if mode == EmitMode::Strict && !paginated.is_empty() {
-        return Err(EmitError(format!(
-            "the TypeScript emitter does not generate pagination iterators at {}; run in lossy mode to describe the operations without them",
-            paginated.join(", ")
-        )));
-    }
     let api_key_headers: BTreeMap<String, &str> = document
         .auth_schemes
         .iter()
@@ -188,6 +177,27 @@ pub fn emit_with_options(document: &Document, options: TsOptions) -> Result<Emit
         mode == EmitMode::Lossy || options.int64 == Int64::Number,
     )
     .map_err(EmitError)?;
+    let mut pagination_plans = BTreeMap::new();
+    let mut pagination_warnings = Vec::new();
+    for (index, operation) in document.operations.iter().enumerate() {
+        match pagination::plan(&document, operation)? {
+            pagination::Planning::Absent => {}
+            pagination::Planning::Emitted(plan) => {
+                pagination_plans.insert(index, plan);
+            }
+            pagination::Planning::Lossy { pointer, reason } => {
+                let subject = format!("operations.{}", operation_subject(operation));
+                coverage.exact.remove(&subject);
+                coverage.opaque.remove(&subject);
+                coverage.lossy.insert(subject.clone());
+                pagination_warnings.push(format!(
+                    "TypeScript cannot generate a pagination iterator at {subject}, because the \
+                     items pointer {} does not resolve to an array: {reason}",
+                    crate::render::string(&pointer)
+                ));
+            }
+        }
+    }
     let type_scan = scan_type_references(&document);
     if let Some(path) = type_scan.fractional_constraint_paths.first() {
         return Err(EmitError(format!(
@@ -231,6 +241,7 @@ pub fn emit_with_options(document: &Document, options: TsOptions) -> Result<Emit
         &options,
         preserve_wide_integers,
         &mut validation,
+        &pagination_plans,
     )?;
     let validation_coverage = validation.coverage(&document)?;
     if let Some(file) = validation.render()? {
@@ -265,12 +276,7 @@ pub fn emit_with_options(document: &Document, options: TsOptions) -> Result<Emit
                 opaque_paths.join(", ")
             ));
         }
-        if !paginated.is_empty() {
-            warnings.push(format!(
-                "TypeScript does not generate pagination iterators at {}",
-                paginated.join(", ")
-            ));
-        }
+        warnings.extend(pagination_warnings);
         warnings.extend(validation_warnings(
             options.validation.backend,
             &validation_coverage,

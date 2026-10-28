@@ -231,6 +231,58 @@ pub fn validated_files(document: &pons_ir::Document) -> Vec<GeneratedFile> {
     .files
 }
 
+pub fn paginated_document(pagination: serde_json::Value) -> pons_ir::Document {
+    let document: pons_ir::Document = serde_json::from_value(serde_json::json!({
+        "ir_version": "0.2",
+        "info": {"title": "Pages", "version": "1"},
+        "types": {
+            "EventQuery": {
+                "kind": "struct",
+                "name": ["event", "query"],
+                "direction": "input",
+                "openness": "reject",
+                "fields": [
+                    {"wire": "cursor", "ident": ["cursor"], "ty": {"kind": "string"}, "presence": "optional"},
+                    {"wire": "offset", "ident": ["offset"], "ty": {"kind": "int", "bits": 32, "signed": false, "wire": "number"}, "presence": "optional"},
+                    {"wire": "limit", "ident": ["limit"], "ty": {"kind": "int", "bits": 32, "signed": false, "wire": "number"}, "presence": "optional"}
+                ]
+            },
+            "Event": {
+                "kind": "struct",
+                "name": ["event"],
+                "direction": "output",
+                "openness": "reject",
+                "fields": [
+                    {"wire": "id", "ident": ["id"], "ty": {"kind": "string"}, "presence": "required"}
+                ]
+            },
+            "EventPage": {
+                "kind": "struct",
+                "name": ["event", "page"],
+                "direction": "output",
+                "openness": "reject",
+                "fields": [
+                    {"wire": "items", "ident": ["items"], "ty": {"kind": "array", "item": {"ref": "Event"}}, "presence": "required"},
+                    {"wire": "next_cursor", "ident": ["next", "cursor"], "ty": {"kind": "nullable", "inner": {"kind": "string"}}, "presence": "optional"}
+                ]
+            }
+        },
+        "operations": [{
+            "id": [["events"], ["list"]],
+            "method": "GET",
+            "path": [{"lit": "events"}],
+            "query": {"ref": "EventQuery"},
+            "responses": [{"status": 200, "content": "json", "body": {"ref": "EventPage"}}],
+            "errors": [{"status": 404, "name": ["missing"], "content": "json", "body": {"kind": "string"}}],
+            "auth": {"alternatives": [], "optional": false},
+            "semantics": {"safe": true, "idempotent": true, "pagination": pagination}
+        }]
+    }))
+    .unwrap();
+    document.validate().unwrap();
+    document
+}
+
 pub fn run_bun(files: &[GeneratedFile], harness: &str) {
     let version = Command::new("bun")
         .arg("--version")

@@ -921,6 +921,7 @@ fn runtime_package_writes_no_runtime_and_imports_the_package_instead() {
             "runtime/codec.ts",
             "runtime/credentials.ts",
             "runtime/index.ts",
+            "runtime/pagination.ts",
             "runtime/stream.ts",
             "runtime/transport.ts",
             "runtime/validate.ts",

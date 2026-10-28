@@ -213,26 +213,116 @@ fn rejects_documents_with_an_unsupported_ir_version() {
 }
 
 #[test]
-fn pagination_is_an_explicit_unsupported_capability() {
-    let mut document: Document =
-        serde_json::from_str(include_str!("../../../../spec/fixtures/login.json")).unwrap();
-    document.operations[1].semantics.pagination = Some(
-        serde_json::from_value(json!({
-            "request": {"kind": "cursor", "field": "limit"},
-            "items": "/items"
-        }))
-        .unwrap(),
-    );
-    let error = crate::emit(&document).unwrap_err();
-    assert!(error.0.contains("does not generate pagination iterators"));
+fn an_items_pointer_that_does_not_reach_an_array_is_lossy() {
+    let document = paginated_document(json!({
+        "kind": "struct",
+        "name": ["event", "page"],
+        "direction": "output",
+        "openness": "reject",
+        "fields": [
+            {"wire": "items", "ident": ["items"], "ty": {
+                "kind": "map", "key": {"kind": "string"}, "value": {"kind": "string"}
+            }, "presence": "required"}
+        ]
+    }));
+    let strict = crate::emit_with_mode(&document, crate::EmitMode::Strict)
+        .unwrap_err()
+        .0;
+    assert!(strict.contains("operations.events.list"), "{strict}");
+    assert!(strict.contains("lossy coverage"), "{strict}");
 
     let emitted = crate::emit_with_mode(&document, crate::EmitMode::Lossy).unwrap();
     assert!(
-        emitted
-            .warnings
-            .iter()
-            .any(|warning| warning.contains("does not generate pagination iterators"))
+        emitted.coverage.lossy.contains("operations.events.list"),
+        "{:?}",
+        emitted.coverage
     );
+    let events = emitted
+        .files
+        .iter()
+        .find(|file| file.path == "operations/events.ts")
+        .unwrap();
+    assert!(!events.content.contains("listAll"), "{}", events.content);
+    assert!(!events.content.contains("paginate"), "{}", events.content);
+    let warning = emitted
+        .warnings
+        .iter()
+        .find(|warning| warning.contains("operations.events.list"))
+        .unwrap();
+    assert!(warning.contains("\"/items/values\""), "{warning}");
+}
+
+#[test]
+fn a_pagination_field_declared_on_both_carriers_is_refused() {
+    let mut document = paginated_document(json!({
+        "kind": "struct",
+        "name": ["event", "page"],
+        "direction": "output",
+        "openness": "reject",
+        "fields": [
+            {"wire": "items", "ident": ["items"], "ty": {
+                "kind": "array", "item": {"ref": "Event"}
+            }, "presence": "required"}
+        ]
+    }));
+    document.operations[0].body = Some(
+        serde_json::from_value(json!({
+            "ty": {"ref": "EventQuery"},
+            "content": "json",
+            "required": true
+        }))
+        .unwrap(),
+    );
+    document.validate().unwrap();
+    let error = crate::emit_with_mode(&document, crate::EmitMode::Lossy)
+        .unwrap_err()
+        .0;
+    assert!(error.contains("both the query and the body"), "{error}");
+}
+
+fn paginated_document(page: serde_json::Value) -> Document {
+    serde_json::from_value(json!({
+        "ir_version": IR_VERSION,
+        "info": {"title": "Pages", "version": "1"},
+        "types": {
+            "EventQuery": {
+                "kind": "struct",
+                "name": ["event", "query"],
+                "direction": "input",
+                "openness": "reject",
+                "fields": [
+                    {"wire": "cursor", "ident": ["cursor"], "ty": {"kind": "string"}, "presence": "optional"}
+                ]
+            },
+            "Event": {
+                "kind": "struct",
+                "name": ["event"],
+                "direction": "output",
+                "openness": "reject",
+                "fields": [
+                    {"wire": "id", "ident": ["id"], "ty": {"kind": "string"}, "presence": "required"}
+                ]
+            },
+            "EventPage": page
+        },
+        "operations": [{
+            "id": [["events"], ["list"]],
+            "method": "GET",
+            "path": [{"lit": "events"}],
+            "query": {"ref": "EventQuery"},
+            "responses": [{"status": 200, "content": "json", "body": {"ref": "EventPage"}}],
+            "auth": {"alternatives": [], "optional": false},
+            "semantics": {
+                "safe": true,
+                "idempotent": true,
+                "pagination": {
+                    "request": {"kind": "cursor", "field": "cursor"},
+                    "items": "/items/values"
+                }
+            }
+        }]
+    }))
+    .unwrap()
 }
 
 #[test]

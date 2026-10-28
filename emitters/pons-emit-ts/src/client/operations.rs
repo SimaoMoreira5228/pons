@@ -6,11 +6,13 @@ use pons_ir::{
     operation_subject,
 };
 
+use crate::pagination::{Carrier, Plan, RequestKind};
 use crate::render::string;
 use crate::{DateMode, EmitError, EmitMode, ErrorStrategy, Int64, TsOptions, types, validation};
 
 use super::signatures::{error_type, response_type};
 
+#[allow(clippy::too_many_arguments)]
 pub(super) fn operation_function(
     operation: &Operation,
     declaration_names: &[String],
@@ -19,7 +21,8 @@ pub(super) fn operation_function(
     options: &TsOptions,
     preserve_wide_integers: bool,
     validation: &mut validation::Backend,
-) -> Result<(String, String), EmitError> {
+    pagination: Option<&Plan>,
+) -> Result<(String, String, Option<String>), EmitError> {
     let args_name = &declaration_names[0];
     let success_name = &declaration_names[1];
     let error_name = &declaration_names[2];
@@ -72,7 +75,7 @@ pub(super) fn operation_function(
         } else {
             format!("{args_type} {call}")
         };
-        return Ok((declarations, function));
+        return Ok((declarations, function, None));
     }
     let mut spec = vec![
         format!("method: {method:?}"),
@@ -143,7 +146,95 @@ pub(super) fn operation_function(
     } else {
         format!("{args_type} {request}")
     };
-    Ok((declarations, function))
+    let iterator = pagination
+        .map(|plan| {
+            let item = types::type_ref(&plan.item, document, names, options)?;
+            pagination_member(plan, &spec, &args_type, success_name, error_name, &item)
+        })
+        .transpose()?;
+    Ok((declarations, function, iterator))
+}
+
+fn pagination_member(
+    plan: &Plan,
+    spec: &[String],
+    args_type: &str,
+    success_name: &str,
+    error_name: &str,
+    item: &str,
+) -> Result<String, EmitError> {
+    let query_override = plan.carrier == Carrier::Query
+        || plan
+            .page_size
+            .as_ref()
+            .is_some_and(|size| size.carrier == Carrier::Query);
+    let body_override = plan.carrier == Carrier::Body
+        || plan
+            .page_size
+            .as_ref()
+            .is_some_and(|size| size.carrier == Carrier::Body);
+    let page_spec = spec
+        .iter()
+        .map(|part| match part.as_str() {
+            "query: args.query" if query_override => {
+                "query: { ...args.query, ...overrides.query }".to_owned()
+            }
+            "body: args.body" if body_override => {
+                "body: { ...args.body, ...overrides.body }".to_owned()
+            }
+            _ => part.clone(),
+        })
+        .collect::<Vec<_>>()
+        .join(", ");
+    let descriptor = pagination_descriptor(plan);
+    Ok(format!(
+        "{args_type} paginate<{item}, {error_name}>((overrides) => \
+         request<{success_name}, {error_name}>(configured, {{ {page_spec} }}), {descriptor})"
+    ))
+}
+
+fn pagination_descriptor(plan: &Plan) -> String {
+    let mut parts = vec![
+        format!("kind: {}", string(plan.kind.name())),
+        format!("field: {}", string(&plan.field)),
+        format!("carrier: {}", string(plan.carrier.name())),
+        format!("items: {}", string(&plan.items)),
+    ];
+    if let Some(next) = &plan.next {
+        parts.push(format!("next: {}", string(next)));
+    }
+    if plan.kind == RequestKind::Offset {
+        parts.push(format!(
+            "initial: {}",
+            field_read(plan.carrier, &plan.field)
+        ));
+    }
+    if let Some(size) = &plan.page_size {
+        let mut descriptor = vec![
+            format!("field: {}", string(&size.field)),
+            format!("carrier: {}", string(size.carrier.name())),
+        ];
+        if let Some(default) = size.default {
+            descriptor.push(format!("default: {default}"));
+        }
+        descriptor.push(format!(
+            "initial: {}",
+            field_read(size.carrier, &size.field)
+        ));
+        parts.push(format!("pageSize: {{ {} }}", descriptor.join(", ")));
+    }
+    parts.push(format!(
+        "wrap: {{ status: {}, headers: {} }}",
+        plan.wrap_status, plan.wrap_headers
+    ));
+    format!("{{ {} }}", parts.join(", "))
+}
+
+fn field_read(carrier: Carrier, field: &str) -> String {
+    match carrier {
+        Carrier::Query => format!("args.query[{}]", string(field)),
+        Carrier::Body => format!("args.body?.[{}]", string(field)),
+    }
 }
 
 fn auth_requirement(auth: &AuthRequirement) -> String {

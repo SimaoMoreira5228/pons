@@ -427,6 +427,7 @@ fn the_check_covers_the_vendored_runtime_sources() {
         "runtime/codec.ts",
         "runtime/validate.ts",
         "runtime/stream.ts",
+        "runtime/pagination.ts",
         "runtime/credentials.ts",
         "runtime/transport.ts",
         "runtime/websocket.ts",
@@ -1239,6 +1240,31 @@ const wrongForce: RetryOptions = { force: "yes" };
 // @ts-expect-error the hooks live under transport
 const oldHooks: ClientOptions = { baseUrl: "https://api.example.test", interceptors: { request: () => {} } };
 console.log(oldTimeout, oldCodecs, oldCall, oldHooks, wrongForce);
+"#,
+    );
+}
+
+#[test]
+fn a_pagination_iterator_is_typed_with_the_item_the_items_pointer_names() {
+    let document = support::runtime::paginated_document(serde_json::json!({
+        "request": {"kind": "cursor", "field": "cursor"},
+        "items": "/items",
+        "next": "/next_cursor"
+    }));
+    let files = emit_with_strategy(&document, EmitMode::Strict, ErrorStrategy::Throw)
+        .unwrap()
+        .files;
+    type_checks(
+        &files,
+        r#"
+import { createClient } from "./client.js";
+import type { EventsListError } from "./client.js";
+import type { Event } from "./types.js";
+import type { Result } from "./errors.js";
+
+const client = createClient({ baseUrl: "https://api.example.test" });
+const all: AsyncIterable<Result<Event, EventsListError>> = client.events.listAll({ query: {} });
+console.log(all);
 "#,
     );
 }
