@@ -31,6 +31,7 @@ assert manifest["protocol"] == {"min": "3.0", "max": "3.0"}, manifest
 assert manifest["ir_version"] == {"min": "0.2", "max": "0.2"}, manifest
 capabilities = manifest["capabilities"]
 assert capabilities["streaming"] == [], capabilities
+assert capabilities["pagination"] == [], capabilities
 assert capabilities["enum_reprs"] == ["string"], capabilities
 assert capabilities["object_openness"] == ["reject"], capabilities
 assert capabilities["wide_integers"] is True, capabilities

@@ -59,6 +59,8 @@ pub struct EmitterCapabilities {
     #[serde(default)]
     pub streaming: Vec<String>,
     #[serde(default)]
+    pub pagination: Vec<String>,
+    #[serde(default)]
     pub enum_reprs: Vec<String>,
     #[serde(default)]
     pub direction_split: bool,
@@ -90,6 +92,7 @@ pub struct ValidationCapabilities {
 }
 
 const STREAMING: &[&str] = &["sse", "ndjson", "bytes", "websocket"];
+const PAGINATION: &[&str] = &["cursor", "offset"];
 const ENUM_REPRS: &[&str] = &["string", "external", "internal", "adjacent", "untagged"];
 const OBJECT_OPENNESS: &[&str] = &["reject", "preserve_typed", "preserve_opaque"];
 const VALIDATION_LEVELS: &[&str] = &["exact", "lossy", "unsupported"];
@@ -119,6 +122,7 @@ impl EmitterManifest {
         }
         for (list, values, allowed) in [
             ("streaming", &self.capabilities.streaming, STREAMING),
+            ("pagination", &self.capabilities.pagination, PAGINATION),
             ("enum_reprs", &self.capabilities.enum_reprs, ENUM_REPRS),
             (
                 "object_openness",

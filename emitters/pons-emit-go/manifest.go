@@ -16,6 +16,7 @@ type versionRange struct {
 
 type capabilities struct {
 	Streaming      []string          `json:"streaming"`
+	Pagination     []string          `json:"pagination"`
 	EnumReprs      []string          `json:"enum_reprs"`
 	DirectionSplit bool              `json:"direction_split"`
 	Provides       bool              `json:"provides"`
@@ -49,6 +50,7 @@ func buildManifest() manifest {
 		IRVersion: versionRange{Min: "0.2", Max: "0.2"},
 		Capabilities: capabilities{
 			Streaming:      []string{},
+			Pagination:     []string{},
 			EnumReprs:      []string{"string"},
 			DirectionSplit: true,
 			Provides:       false,

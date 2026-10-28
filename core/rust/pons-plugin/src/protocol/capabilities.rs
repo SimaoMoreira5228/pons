@@ -1,8 +1,8 @@
 use std::collections::BTreeMap;
 
 use pons_ir::{
-    AuthScheme, Direction, Document, EnumRepr, Fidelity, ObjectOpenness, StreamKind,
-    coverage_for_document, operation_subject,
+    AuthScheme, Direction, Document, EnumRepr, Fidelity, ObjectOpenness, PaginationRequest,
+    StreamKind, coverage_for_document, operation_subject,
 };
 use serde_json::Value;
 
@@ -105,6 +105,21 @@ impl EmitterManifest {
                 {
                     warnings.push(CapabilityWarning(format!(
                         "{} does not declare support for {kind} streams in {}",
+                        self.name,
+                        operation_subject(operation)
+                    )));
+                }
+            }
+            if let Some(pagination) = &operation.semantics.pagination {
+                let kind = pagination_kind(&pagination.request);
+                if !self
+                    .capabilities
+                    .pagination
+                    .iter()
+                    .any(|value| value == kind)
+                {
+                    warnings.push(CapabilityWarning(format!(
+                        "{} does not declare support for {kind} pagination in {}",
                         self.name,
                         operation_subject(operation)
                     )));
@@ -236,6 +251,13 @@ fn stream_kinds(operation: &pons_ir::Operation) -> Vec<&'static str> {
     kinds
 }
 
+fn pagination_kind(request: &PaginationRequest) -> &'static str {
+    match request {
+        PaginationRequest::Cursor { .. } => "cursor",
+        PaginationRequest::Offset { .. } => "offset",
+    }
+}
+
 fn enum_name(repr: &EnumRepr) -> &'static str {
     match repr {
         EnumRepr::String => "string",
@@ -251,5 +273,106 @@ fn object_openness_name(openness: &ObjectOpenness) -> &'static str {
         ObjectOpenness::Reject => "reject",
         ObjectOpenness::PreserveTyped { .. } => "preserve_typed",
         ObjectOpenness::PreserveOpaque => "preserve_opaque",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use serde_json::json;
+
+    use super::*;
+
+    fn manifest(pagination: &[&str]) -> EmitterManifest {
+        serde_json::from_value(json!({
+            "name": "go",
+            "version": "0.1.0",
+            "protocol": {"min": "3.0", "max": "3.0"},
+            "ir_version": {"min": "0.2", "max": "0.2"},
+            "capabilities": {
+                "pagination": pagination,
+                "object_openness": ["reject"],
+            }
+        }))
+        .unwrap()
+    }
+
+    fn paginated(kind: &str) -> Document {
+        let document = json!({
+            "ir_version": "0.2",
+            "info": {"title": "Events", "version": "1"},
+            "types": {
+                "ListQuery": {
+                    "kind": "struct",
+                    "openness": "reject",
+                    "name": ["list", "query"],
+                    "direction": "input",
+                    "fields": [{
+                        "wire": kind,
+                        "ident": [kind],
+                        "ty": {"kind": "string"},
+                        "presence": "optional"
+                    }]
+                }
+            },
+            "operations": [{
+                "id": [["events"], ["list"]],
+                "method": "GET",
+                "path": [{"lit": "events"}],
+                "query": {"ref": "ListQuery"},
+                "responses": [{
+                    "status": 200,
+                    "content": "json",
+                    "body": {"kind": "array", "item": {"kind": "string"}}
+                }],
+                "auth": {"alternatives": [], "optional": false},
+                "semantics": {
+                    "safe": true,
+                    "idempotent": true,
+                    "pagination": {
+                        "request": {"kind": kind, "field": kind},
+                        "items": "",
+                        "next": "/next"
+                    }
+                }
+            }]
+        });
+        pons_ir::decode(&serde_json::to_vec(&document).unwrap()).unwrap()
+    }
+
+    #[test]
+    fn warns_for_undeclared_pagination_kinds() {
+        let cursor = paginated("cursor");
+        assert_eq!(
+            manifest(&[]).unsupported_features(&cursor),
+            vec![CapabilityWarning(
+                "go does not declare support for cursor pagination in events.list".into()
+            )]
+        );
+
+        let offset = paginated("offset");
+        assert_eq!(
+            manifest(&["cursor"]).unsupported_features(&offset),
+            vec![CapabilityWarning(
+                "go does not declare support for offset pagination in events.list".into()
+            )]
+        );
+    }
+
+    #[test]
+    fn stays_quiet_for_declared_and_absent_pagination() {
+        assert!(
+            manifest(&["cursor"])
+                .unsupported_features(&paginated("cursor"))
+                .is_empty()
+        );
+        assert!(
+            manifest(&["offset"])
+                .unsupported_features(&paginated("offset"))
+                .is_empty()
+        );
+
+        let mut unpaginated = paginated("cursor");
+        unpaginated.operations[0].semantics.pagination = None;
+        assert!(manifest(&[]).unsupported_features(&unpaginated).is_empty());
     }
 }
