@@ -10,7 +10,24 @@ annotation class PonsOperation(
     val description: String = "",
     val tags: Array<String> = [],
     val provides: Provides = Provides(scheme = ""),
+    val pagination: PonsPagination = PonsPagination(),
 )
+
+@Retention(AnnotationRetention.RUNTIME)
+annotation class PonsPagination(
+    val kind: PonsPaginationKind = PonsPaginationKind.CURSOR,
+    val field: String = "",
+    val items: String = "",
+    val next: String = "",
+    val pageSize: String = "",
+    val pageSizeDefault: Int = 0,
+    val pageSizeMaximum: Int = 0,
+)
+
+enum class PonsPaginationKind {
+    CURSOR,
+    OFFSET,
+}
 
 @Retention(AnnotationRetention.RUNTIME)
 annotation class Provides(

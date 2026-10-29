@@ -21,6 +21,7 @@ import com.pons.spring.PonsOAuthFlow
 import com.pons.spring.PonsOAuthFlowKind
 import com.pons.spring.PonsOAuthScope
 import com.pons.spring.PonsOperation
+import com.pons.spring.PonsPagination
 import com.pons.spring.PonsResponseHeader
 import com.pons.spring.Provides
 import org.springframework.context.annotation.Bean
@@ -113,6 +114,11 @@ data class User(
     val deletedAt: Instant? = null,
 )
 
+data class UserPage(
+    val items: List<User>,
+    val next: String? = null,
+)
+
 @JsonTypeInfo(use = JsonTypeInfo.Id.NAME, include = JsonTypeInfo.As.PROPERTY, property = "kind")
 @JsonSubTypes(
     JsonSubTypes.Type(value = EmailNotification::class, name = "email"),
@@ -162,6 +168,25 @@ class AuthController {
 @RestController
 @RequestMapping("/users")
 class UserController {
+    @GetMapping(produces = [MediaType.APPLICATION_JSON_VALUE])
+    @PonsOperation(
+        name = "users.list",
+        summary = "List users.",
+        pagination = PonsPagination(
+            field = "cursor",
+            items = "/items",
+            next = "/next",
+            pageSize = "limit",
+            pageSizeDefault = 20,
+            pageSizeMaximum = 100,
+        ),
+    )
+    @PonsAuth(scheme = "session")
+    fun list(
+        @RequestParam(required = false) cursor: String?,
+        @RequestParam(required = false) limit: Int?,
+    ): UserPage = UserPage(items = emptyList(), next = null)
+
     @GetMapping("/{id}", produces = [MediaType.APPLICATION_JSON_VALUE])
     @PonsOperation(name = "users.get", summary = "Read a user.")
     @PonsAuth(scheme = "session")

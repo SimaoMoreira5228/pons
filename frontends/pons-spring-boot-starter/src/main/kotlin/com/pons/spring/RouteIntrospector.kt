@@ -20,6 +20,9 @@ import com.pons.ir.IntegerWire
 import com.pons.ir.Method as IrMethod
 import com.pons.ir.OperationSemantics
 import com.pons.ir.Origin
+import com.pons.ir.PageSize
+import com.pons.ir.Pagination
+import com.pons.ir.PaginationRequest
 import com.pons.ir.PathSegment
 import com.pons.ir.Presence
 import com.pons.ir.Response as IrResponse
@@ -326,6 +329,7 @@ internal class RouteIntrospector(
             semantics = OperationSemantics(
                 safe = method == IrMethod.Get || method == IrMethod.Head || method == IrMethod.Options,
                 idempotent = method != IrMethod.Post && method != IrMethod.Patch,
+                pagination = meta.pagination,
             ),
             doc = meta.doc,
             origin = Origin(source = "${handler.beanType.name}#${handler.method.name}"),
@@ -629,7 +633,7 @@ internal class RouteIntrospector(
         val annotation = AnnotatedElementUtils.findMergedAnnotation(
             handler.method,
             PonsOperation::class.java,
-        ) ?: return Meta(null, null)
+        ) ?: return Meta(doc = null, provides = null, pagination = null)
         val doc = if (annotation.summary.isNotEmpty() ||
             annotation.description.isNotEmpty() ||
             annotation.tags.isNotEmpty()
@@ -643,7 +647,28 @@ internal class RouteIntrospector(
             null
         }
         val provides = provision(annotation.provides, handler)
-        return Meta(doc, provides)
+        return Meta(doc, provides, pagination(annotation.pagination))
+    }
+
+    private fun pagination(declaration: PonsPagination): Pagination? {
+        if (declaration.field.isEmpty() || declaration.items.isEmpty()) return null
+        val request = when (declaration.kind) {
+            PonsPaginationKind.CURSOR -> PaginationRequest.Cursor(declaration.field)
+            PonsPaginationKind.OFFSET -> PaginationRequest.Offset(declaration.field)
+        }
+        val pageSize = declaration.pageSize.takeIf { it.isNotEmpty() }?.let { field ->
+            PageSize(
+                field = field,
+                default = declaration.pageSizeDefault.takeIf { it != 0 }?.toUInt(),
+                maximum = declaration.pageSizeMaximum.takeIf { it != 0 }?.toUInt(),
+            )
+        }
+        return Pagination(
+            request = request,
+            items = declaration.items,
+            next = declaration.next.takeIf { it.isNotEmpty() },
+            pageSize = pageSize,
+        )
     }
 
     private fun provision(provides: Provides, handler: HandlerMethod): CredentialProvision? {
@@ -684,5 +709,9 @@ internal class RouteIntrospector(
 
     private data class RequestContent(val kind: ContentKind, val mediaType: String?)
 
-    private data class Meta(val doc: Doc?, val provides: CredentialProvision?)
+    private data class Meta(
+        val doc: Doc?,
+        val provides: CredentialProvision?,
+        val pagination: Pagination?,
+    )
 }

@@ -14,6 +14,8 @@ import com.pons.ir.Info
 import com.pons.ir.NamedRef
 import com.pons.ir.OAuthFlowKind
 import com.pons.ir.ObjectOpenness
+import com.pons.ir.PageSize
+import com.pons.ir.PaginationRequest
 import com.pons.ir.PonsIrJson
 import com.pons.ir.Presence
 import com.pons.ir.ResponseStatus
@@ -87,7 +89,7 @@ class PonsExportTest {
         assertTrue(document.diagnostics.none { it.severity == DiagnosticSeverity.Error })
         val operations = document.operations.associateBy { it.id.flatten().joinToString(".") }
         assertEquals(
-            setOf("auth.login", "users.get", "notifications.latest"),
+            setOf("auth.login", "users.list", "users.get", "notifications.latest"),
             operations.keys,
         )
 
@@ -108,6 +110,23 @@ class PonsExportTest {
         assertEquals(64, (pathParameter.ty as TypeRef.Inline).type.let {
             (it as com.pons.ir.InlineType.IntType).bits
         })
+    }
+
+    @Test
+    fun lowersTheDeclaredCursorPagination() {
+        val list = document.operations.first { it.id.flatten() == listOf("users", "list") }
+        val pagination = list.semantics.pagination
+        assertNotNull(pagination)
+        assertEquals(PaginationRequest.Cursor("cursor"), pagination!!.request)
+        assertEquals("/items", pagination.items)
+        assertEquals("/next", pagination.next)
+        assertEquals(
+            PageSize(field = "limit", default = 20u, maximum = 100u),
+            pagination.pageSize,
+        )
+
+        val get = document.operations.first { it.id.flatten() == listOf("users", "get") }
+        assertNull(get.semantics.pagination)
     }
 
     @Test
