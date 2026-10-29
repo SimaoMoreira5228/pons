@@ -13,6 +13,7 @@ from .config import (
     PonsAuthScheme,
     PonsConfigurationError,
     PonsError,
+    PonsPagination,
     app_config,
 )
 from .diagnostics import diagnostic
@@ -234,6 +235,9 @@ def _operation(
             "idempotent": plan.method in _IDEMPOTENT,
         },
     }
+    pagination = _pagination(plan.meta.pagination if plan.meta is not None else None)
+    if pagination is not None:
+        operation["semantics"]["pagination"] = pagination
     if query is not None:
         operation["query"] = query
     if headers:
@@ -279,6 +283,25 @@ def _operation_doc(plan: OperationPlan) -> dict[str, Any] | None:
     if deprecated:
         value["deprecated"] = True
     return value or None
+
+
+def _pagination(declaration: PonsPagination | None) -> dict[str, Any] | None:
+    if declaration is None:
+        return None
+    value: dict[str, Any] = {
+        "request": {"kind": declaration.kind, "field": declaration.field},
+        "items": declaration.items,
+    }
+    if declaration.next is not None:
+        value["next"] = declaration.next
+    if declaration.page_size is not None:
+        page_size: dict[str, Any] = {"field": declaration.page_size.field}
+        if declaration.page_size.default is not None:
+            page_size["default"] = declaration.page_size.default
+        if declaration.page_size.maximum is not None:
+            page_size["maximum"] = declaration.page_size.maximum
+        value["page_size"] = page_size
+    return value
 
 
 def _path(

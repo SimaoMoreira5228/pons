@@ -51,6 +51,7 @@ class PonsOperation:
     provides: PonsProvides | None = None
     errors: tuple[PonsError, ...] = ()
     errors_inherit: bool = True
+    pagination: PonsPagination | None = None
 
 
 @dataclass(frozen=True)
@@ -62,6 +63,22 @@ class PonsStream:
 class PonsMedia:
     request: str | None = None
     response: str | None = None
+
+
+@dataclass(frozen=True)
+class PonsPageSize:
+    field: str
+    default: int | None = None
+    maximum: int | None = None
+
+
+@dataclass(frozen=True)
+class PonsPagination:
+    kind: str
+    field: str
+    items: str
+    next: str | None = None
+    page_size: PonsPageSize | None = None
 
 
 @dataclass(frozen=True)
@@ -93,6 +110,9 @@ class PonsApp:
     servers: tuple[str, ...] | None = None
 
 
+_PAGINATION_KINDS = frozenset({"cursor", "offset"})
+
+
 def pons_operation(
     *,
     operation_id: str | None = None,
@@ -104,7 +124,12 @@ def pons_operation(
     provides: PonsProvides | None = None,
     errors: Sequence[PonsError] = (),
     errors_inherit: bool = True,
+    pagination: PonsPagination | None = None,
 ) -> Callable[[Callable[..., Any]], Callable[..., Any]]:
+    if pagination is not None and pagination.kind not in _PAGINATION_KINDS:
+        raise PonsConfigurationError(
+            f"pagination kind {pagination.kind!r} is not one of {sorted(_PAGINATION_KINDS)}"
+        )
     operation = PonsOperation(
         operation_id=operation_id,
         summary=summary,
@@ -115,6 +140,7 @@ def pons_operation(
         provides=provides,
         errors=tuple(errors),
         errors_inherit=errors_inherit,
+        pagination=pagination,
     )
 
     def decorate(endpoint: Callable[..., Any]) -> Callable[..., Any]:

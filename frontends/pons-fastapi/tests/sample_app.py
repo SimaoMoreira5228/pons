@@ -13,6 +13,8 @@ from pons_fastapi import (
     PonsApp,
     PonsAuth,
     PonsAuthScheme,
+    PonsPageSize,
+    PonsPagination,
     PonsProvides,
     pons_media,
     pons_operation,
@@ -70,6 +72,13 @@ class UpdateUser(BaseModel):
 
     name: str
     nickname: str | None = None
+
+
+class UserPage(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    users: list[User]
+    next_cursor: str | None = None
 
 
 class TokenEvent(BaseModel):
@@ -165,6 +174,26 @@ def get_user(
 )
 def update_user(user_id: UUID, body: UpdateUser) -> UpdateUser:
     return body
+
+
+@app.get("/users", operation_id="users.list")
+@pons_operation(
+    operation_id="users.list",
+    summary="List users.",
+    tags=("users",),
+    pagination=PonsPagination(
+        kind="cursor",
+        field="cursor",
+        items="/users",
+        next="/next_cursor",
+        page_size=PonsPageSize(field="limit", default=20, maximum=100),
+    ),
+)
+def list_users(
+    cursor: str | None = Query(None),
+    limit: int = Query(20, ge=1, le=100),
+) -> UserPage:
+    return UserPage(users=[])
 
 
 @app.get("/chat/stream", operation_id="chat.stream", response_class=EventStreamResponse)

@@ -8,10 +8,18 @@ import sys
 from pathlib import Path
 
 import jsonschema
+import pytest
 from fastapi import FastAPI
 from pydantic import BaseModel
 
-from pons_fastapi import PonsApp, PonsError, build_document
+from pons_fastapi import (
+    PonsApp,
+    PonsConfigurationError,
+    PonsError,
+    PonsPagination,
+    build_document,
+    pons_operation,
+)
 
 PACKAGE_ROOT = Path(__file__).resolve().parents[1]
 TESTS_ROOT = Path(__file__).resolve().parent
@@ -96,6 +104,15 @@ def test_sample_operations_cover_the_declared_features() -> None:
     assert update["body"]["ty"]["ref"].endswith("UpdateUser#input")
     assert update["responses"][0]["body"]["ref"].endswith("UpdateUser#output")
 
+    listing = operations["users.list"]
+    assert listing["semantics"]["pagination"] == {
+        "request": {"kind": "cursor", "field": "cursor"},
+        "items": "/users",
+        "next": "/next_cursor",
+        "page_size": {"field": "limit", "default": 20, "maximum": 100},
+    }
+    assert "pagination" not in read["semantics"]
+
     types = document["types"]
     role = types["sample_app.Role"]
     assert role["kind"] == "enum"
@@ -179,6 +196,13 @@ def test_unsupported_route_is_skipped_with_a_diagnostic() -> None:
         ".".join(".".join(name) for name in operation["id"]) != "legacy"
         for operation in document["operations"]
     )
+
+
+def test_pagination_declaration_rejects_an_unknown_kind() -> None:
+    with pytest.raises(PonsConfigurationError, match="'page'"):
+        pons_operation(
+            pagination=PonsPagination(kind="page", field="cursor", items="/items")
+        )
 
 
 def test_common_errors_only_appear_when_declared() -> None:
