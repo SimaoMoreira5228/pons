@@ -6,7 +6,8 @@ use crate::operation::{
     ApiKeyLocation, AuthScheme, ContentKind, CredentialLocator, ErrorContent, ErrorResponse,
     ErrorStatus, Method, OAuthFlowKind, Operation, ResponseStatus, StreamKind,
 };
-use crate::types::{Diagnostic, DiagnosticSeverity, Presence};
+use crate::pagination::PaginationRequest;
+use crate::types::{Diagnostic, DiagnosticSeverity, Presence, TypeRef};
 
 use super::{Document, ValidationError};
 
@@ -381,7 +382,7 @@ impl Document {
                 for field in std::iter::once(pagination.request.field())
                     .chain(pagination.page_size.iter().map(|size| size.field.as_str()))
                 {
-                    if !self.request_field_declared(operation, field) {
+                    if self.request_field_type(operation, field).is_none() {
                         errors.push(ValidationError::InvalidValue {
                             path: owner.clone(),
                             message: format!(
@@ -389,6 +390,17 @@ impl Document {
                             ),
                         });
                     }
+                }
+                if let PaginationRequest::Offset { field } = &pagination.request
+                    && let Some(ty) = self.request_field_type(operation, field)
+                    && !self.is_integer_type(ty, &mut BTreeSet::new())
+                {
+                    errors.push(ValidationError::InvalidValue {
+                        path: owner.clone(),
+                        message: format!(
+                            "offset pagination field {field:?} must be an integer, because the client advances it by the number of items the page returned"
+                        ),
+                    });
                 }
             }
             self.visit_operation_refs(&owner, operation, &mut errors);
@@ -718,17 +730,21 @@ impl Document {
         }
     }
 
-    fn request_field_declared(&self, operation: &Operation, wire: &str) -> bool {
-        if operation.query.as_ref().is_some_and(|query| {
-            crate::query::query_fields(self, query)
-                .is_ok_and(|fields| fields.iter().any(|field| field.wire == wire))
-        }) {
-            return true;
+    fn request_field_type<'a>(
+        &'a self,
+        operation: &'a Operation,
+        wire: &str,
+    ) -> Option<&'a TypeRef> {
+        if let Some(query) = &operation.query
+            && let Ok(fields) = crate::query::query_fields(self, query)
+            && let Some(field) = fields.iter().find(|field| field.wire == wire)
+        {
+            return Some(&field.ty);
         }
         operation
             .body
             .as_ref()
-            .is_some_and(|body| self.struct_field_named(&body.ty, wire, &mut BTreeSet::new()))
+            .and_then(|body| self.struct_field_type(&body.ty, wire, &mut BTreeSet::new()))
     }
 
     pub(super) fn validate_diagnostics(

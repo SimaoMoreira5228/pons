@@ -67,7 +67,8 @@ fn a_page_fields_must_name_the_operation_query_or_body() {
         json!({"ref": "EventQuery"}),
         json!({
             "request": {"kind": "cursor", "field": "after"},
-            "items": "/items"
+            "items": "/items",
+            "next": "/next"
         }),
     );
     refuses(
@@ -95,7 +96,8 @@ fn pagination_locators_are_json_pointers() {
         json!({"ref": "EventQuery"}),
         json!({
             "request": {"kind": "cursor", "field": "cursor"},
-            "items": "items"
+            "items": "items",
+            "next": "/next"
         }),
     );
     refuses(
@@ -120,10 +122,102 @@ fn pagination_locators_are_json_pointers() {
         json!({"ref": "EventQuery"}),
         json!({
             "request": {"kind": "cursor", "field": "cursor"},
-            "items": ""
+            "items": "",
+            "next": "/next"
         }),
     );
     empty.validate().unwrap();
+}
+
+#[test]
+fn a_cursor_request_without_a_next_pointer_is_refused() {
+    let document = paginated(
+        json!({"ref": "EventQuery"}),
+        json!({
+            "request": {"kind": "cursor", "field": "cursor"},
+            "items": "/items"
+        }),
+    );
+    refuses(&document, "a cursor request needs a next pointer");
+}
+
+#[test]
+fn a_cursor_request_with_a_next_pointer_is_accepted() {
+    let document = paginated(
+        json!({"ref": "EventQuery"}),
+        json!({
+            "request": {"kind": "cursor", "field": "cursor"},
+            "items": "/items",
+            "next": "/next"
+        }),
+    );
+    document.validate().unwrap();
+}
+
+fn offset_field(ty: Value) -> Document {
+    let mut document = paginated(
+        json!({"ref": "EventQuery"}),
+        json!({
+            "request": {"kind": "offset", "field": "offset"},
+            "items": "/items"
+        }),
+    );
+    let pons_ir::TypeKind::Struct { fields, .. } =
+        &mut document.types.get_mut("EventQuery").unwrap().definition
+    else {
+        unreachable!()
+    };
+    let field = fields
+        .iter_mut()
+        .find(|field| field.wire == "offset")
+        .unwrap();
+    field.ty = serde_json::from_value(ty).unwrap();
+    document
+}
+
+#[test]
+fn an_offset_field_can_be_a_plain_integer() {
+    let document = offset_field(json!({
+        "kind": "int", "bits": 32, "signed": false, "wire": "number"
+    }));
+    document.validate().unwrap();
+}
+
+#[test]
+fn an_offset_field_can_be_a_newtype_over_an_integer() {
+    let mut document = offset_field(json!({"ref": "Offset"}));
+    document.types.insert(
+        "Offset".into(),
+        serde_json::from_value(json!({
+            "kind": "newtype",
+            "name": ["offset"],
+            "direction": "input",
+            "inner": {"kind": "int", "bits": 64, "signed": false, "wire": "string"}
+        }))
+        .unwrap(),
+    );
+    document.validate().unwrap();
+}
+
+#[test]
+fn an_offset_field_cannot_be_a_string() {
+    let document = offset_field(json!({"kind": "string"}));
+    refuses(
+        &document,
+        "offset pagination field \"offset\" must be an integer",
+    );
+}
+
+#[test]
+fn an_offset_field_cannot_be_a_nullable_integer() {
+    let document = offset_field(json!({
+        "kind": "nullable",
+        "inner": {"kind": "int", "bits": 32, "signed": false, "wire": "number"}
+    }));
+    refuses(
+        &document,
+        "offset pagination field \"offset\" must be an integer",
+    );
 }
 
 #[test]

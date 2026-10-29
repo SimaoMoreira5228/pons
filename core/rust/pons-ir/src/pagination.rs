@@ -78,6 +78,12 @@ impl Pagination {
         if self.request.field().is_empty() {
             return Err("pagination request field cannot be empty".into());
         }
+        if matches!(self.request, PaginationRequest::Cursor { .. }) && self.next.is_none() {
+            return Err(
+                "a cursor request needs a next pointer, because the iterator cannot advance past the first page without one"
+                    .into(),
+            );
+        }
         self.items
             .validate()
             .map_err(|message| format!("pagination item locator: {message}"))?;

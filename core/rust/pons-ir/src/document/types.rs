@@ -325,32 +325,52 @@ impl Document {
         found
     }
 
-    pub(super) fn struct_field_named(
-        &self,
-        ty: &TypeRef,
+    pub(super) fn struct_field_type<'a>(
+        &'a self,
+        ty: &'a TypeRef,
         wire: &str,
         visited: &mut BTreeSet<String>,
-    ) -> bool {
+    ) -> Option<&'a TypeRef> {
         let TypeRef::Named(named) = ty else {
-            return false;
+            return None;
         };
         if named.variant.is_some() || !visited.insert(named.id.clone()) {
-            return false;
+            return None;
         }
         let found = match self.types.get(&named.id).map(|found| &found.definition) {
             Some(TypeKind::Struct {
                 fields, flattened, ..
-            }) => {
-                fields.iter().any(|field| field.wire == wire)
-                    || flattened
-                        .iter()
-                        .any(|member| self.struct_field_named(member, wire, visited))
-            }
-            Some(TypeKind::Newtype { inner }) => self.struct_field_named(inner, wire, visited),
-            _ => false,
+            }) => match fields.iter().find(|field| field.wire == wire) {
+                Some(field) => Some(&field.ty),
+                None => flattened
+                    .iter()
+                    .find_map(|member| self.struct_field_type(member, wire, visited)),
+            },
+            Some(TypeKind::Newtype { inner }) => self.struct_field_type(inner, wire, visited),
+            _ => None,
         };
         visited.remove(&named.id);
         found
+    }
+
+    pub(super) fn is_integer_type(&self, ty: &TypeRef, visited: &mut BTreeSet<String>) -> bool {
+        match ty {
+            TypeRef::Inline(InlineType::Int { .. }) => true,
+            TypeRef::Named(named) => {
+                if !visited.insert(named.id.clone()) {
+                    return false;
+                }
+                let result = self.types.get(&named.id).is_some_and(|definition| {
+                    matches!(
+                        &definition.definition,
+                        TypeKind::Newtype { inner } if self.is_integer_type(inner, visited)
+                    )
+                });
+                visited.remove(&named.id);
+                result
+            }
+            _ => false,
+        }
     }
 
     pub(super) fn is_byte_type(&self, ty: &TypeRef, visited: &mut BTreeSet<String>) -> bool {

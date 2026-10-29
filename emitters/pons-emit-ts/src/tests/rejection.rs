@@ -317,7 +317,8 @@ fn paginated_document(page: serde_json::Value) -> Document {
                 "idempotent": true,
                 "pagination": {
                     "request": {"kind": "cursor", "field": "cursor"},
-                    "items": "/items/values"
+                    "items": "/items/values",
+                    "next": "/next_cursor"
                 }
             }
         }]
