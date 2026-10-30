@@ -208,8 +208,28 @@ type authScheme struct {
 }
 
 type operationSemantics struct {
-	Safe       bool `json:"safe"`
-	Idempotent bool `json:"idempotent"`
+	Safe       bool        `json:"safe"`
+	Idempotent bool        `json:"idempotent"`
+	Pagination *pagination `json:"pagination"`
+}
+
+type pagination struct {
+	Request  paginationRequest          `json:"request"`
+	Items    string                     `json:"items"`
+	Next     *string                    `json:"next"`
+	PageSize *pageSize                  `json:"page_size"`
+	Ext      map[string]json.RawMessage `json:"ext"`
+}
+
+type paginationRequest struct {
+	Kind  string `json:"kind"`
+	Field string `json:"field"`
+}
+
+type pageSize struct {
+	Field   string  `json:"field"`
+	Default *uint32 `json:"default"`
+	Maximum *uint32 `json:"maximum"`
 }
 
 type doc struct {

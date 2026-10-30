@@ -176,6 +176,20 @@ fn offset_field(ty: Value) -> Document {
 }
 
 #[test]
+fn an_offset_request_cannot_declare_a_next_pointer() {
+    let mut document = offset_field(json!({
+        "kind": "int", "bits": 32, "signed": false, "wire": "number"
+    }));
+    document.operations[0]
+        .semantics
+        .pagination
+        .as_mut()
+        .unwrap()
+        .next = Some(pons_ir::JsonPointer::new("/next"));
+    refuses(&document, "an offset request cannot declare a next pointer");
+}
+
+#[test]
 fn an_offset_field_can_be_a_plain_integer() {
     let document = offset_field(json!({
         "kind": "int", "bits": 32, "signed": false, "wire": "number"

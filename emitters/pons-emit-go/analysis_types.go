@@ -83,6 +83,7 @@ func (a *analysis) buildStructPlan(plan *typePlan) {
 			Name:     name,
 			GoType:   goType,
 			Tag:      tag,
+			Ty:       field.Ty,
 			Optional: optional,
 		})
 	}

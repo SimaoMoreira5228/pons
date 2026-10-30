@@ -36,11 +36,14 @@ func emit(stdin io.Reader, stdout io.Writer) error {
 	if len(analysis.problems) > 0 {
 		return writeJSON(stdout, failureResponse(analysis.problems))
 	}
+	if request.Mode == "strict" && len(analysis.lossy) > 0 {
+		return writeJSON(stdout, failureResponse(analysis.lossyProblems()))
+	}
 	files, err := generatedFiles(analysis)
 	if err != nil {
 		return writeJSON(stdout, requestFailure("%v", err))
 	}
-	return writeJSON(stdout, successResponse(files, document))
+	return writeJSON(stdout, successResponse(files, document, analysis))
 }
 
 func validatePackageName(name string) error {

@@ -12,11 +12,17 @@ type problem struct {
 	origin  string
 }
 
+type lossyOperation struct {
+	subject string
+	message string
+}
+
 type analysis struct {
 	doc          *document
 	pkg          string
 	packageNames *nameRegistry
 	methodNames  *nameRegistry
+	methodOwners map[string]string
 
 	typeNames  map[string]string
 	types      []*typePlan
@@ -37,6 +43,7 @@ type analysis struct {
 	usesPayload    bool
 
 	problems []problem
+	lossy    []lossyOperation
 }
 
 type typePlan struct {
@@ -54,6 +61,7 @@ type fieldPlan struct {
 	Name     string
 	GoType   string
 	Tag      string
+	Ty       typeRef
 	Optional bool
 }
 
@@ -84,6 +92,7 @@ type operationPlan struct {
 	Success    *successPlan
 	ErrorKeys  []string
 	Auth       authPlan
+	Pagination *paginationPlan
 }
 
 type paramPlan struct {
@@ -125,6 +134,7 @@ func newAnalysis(doc *document, pkg string) *analysis {
 		pkg:           pkg,
 		packageNames:  newNameRegistry(),
 		methodNames:   newNameRegistry(),
+		methodOwners:  map[string]string{},
 		typeNames:     map[string]string{},
 		typeByID:      map[string]*typePlan{},
 		queryTypes:    map[string]bool{},
@@ -137,6 +147,7 @@ func newAnalysis(doc *document, pkg string) *analysis {
 	}
 	for _, reserved := range []string{"BaseURL", "HTTPClient", "BearerToken", "APIKey"} {
 		a.methodNames.reserve(reserved)
+		a.methodOwners[reserved] = "Client." + reserved
 	}
 	a.assignTypeNames()
 	a.buildTypePlans()
@@ -151,6 +162,13 @@ func (a *analysis) addProblem(origin, format string, args ...any) {
 		code:    "GO-E002",
 		message: fmt.Sprintf(format, args...),
 		origin:  origin,
+	})
+}
+
+func (a *analysis) markLossy(origin, format string, args ...any) {
+	a.lossy = append(a.lossy, lossyOperation{
+		subject: "operations." + origin,
+		message: fmt.Sprintf(format, args...),
 	})
 }
 

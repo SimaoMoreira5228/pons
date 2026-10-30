@@ -27,6 +27,11 @@ func renderOperations(a *analysis) string {
 	for _, plan := range a.operations {
 		renderOperation(&builder, a, plan)
 	}
+	for _, plan := range a.operations {
+		if plan.Pagination != nil {
+			renderOperationAll(&builder, plan)
+		}
+	}
 	return builder.String()
 }
 

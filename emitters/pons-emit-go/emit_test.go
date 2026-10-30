@@ -27,10 +27,15 @@ func decodeFixture(t *testing.T) *document {
 
 func emitFixture(t *testing.T, raw []byte, options map[string]any) emitResponse {
 	t.Helper()
+	return emitFixtureMode(t, raw, options, "strict")
+}
+
+func emitFixtureMode(t *testing.T, raw []byte, options map[string]any, mode string) emitResponse {
+	t.Helper()
 	request := map[string]any{
 		"protocol":          protocolVersion,
 		"source_ir_version": "0.2",
-		"mode":              "strict",
+		"mode":              mode,
 		"ir":                json.RawMessage(raw),
 		"options":           options,
 		"target":            "go",
@@ -48,6 +53,17 @@ func emitFixture(t *testing.T, raw []byte, options map[string]any) emitResponse 
 		t.Fatal(err)
 	}
 	return response
+}
+
+func invokeResponse(t *testing.T, response emitResponse, path string) string {
+	t.Helper()
+	for _, file := range response.Files {
+		if file.Path == path {
+			return file.Content
+		}
+	}
+	t.Fatalf("emit returned no %s", path)
+	return ""
 }
 
 func mutateFixture(t *testing.T) map[string]any {
@@ -85,6 +101,90 @@ func TestFixtureEmitsEverySubjectExactly(t *testing.T) {
 	}
 	if len(response.Files) != 5 {
 		t.Fatalf("files = %d", len(response.Files))
+	}
+}
+
+func TestCursorPaginationEmitsAnIterator(t *testing.T) {
+	response := emitFixture(t, fixtureDocument(t), map[string]any{"package": "fixture"})
+	if response.Error != "" {
+		t.Fatalf("emit failed: %s", response.Error)
+	}
+	operations := invokeResponse(t, response, "operations.go")
+	want := "func (c *Client) EventsListAll(ctx context.Context, query EventQuery, yield func(Event) error) error"
+	if !bytes.Contains([]byte(operations), []byte(want)) {
+		t.Fatalf("operations.go does not declare the iterator:\n%s", operations)
+	}
+	if bytes.Contains([]byte(operations), []byte("go func")) || bytes.Contains([]byte(operations), []byte("chan ")) {
+		t.Fatalf("the iterator starts a goroutine or channel:\n%s", operations)
+	}
+}
+
+func TestOffsetPaginationIsLossy(t *testing.T) {
+	raw, err := os.ReadFile("testdata/offset.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	strict := emitFixture(t, raw, map[string]any{"package": "fixture"})
+	if strict.Error == "" || !bytes.Contains([]byte(strict.Error), []byte("offset pagination")) {
+		t.Fatalf("strict response = %#v", strict)
+	}
+	lossy := emitFixtureMode(t, raw, map[string]any{"package": "fixture"}, "lossy")
+	if lossy.Error != "" {
+		t.Fatalf("lossy emit failed: %s", lossy.Error)
+	}
+	if lossy.Coverage == nil || len(lossy.Coverage.Lossy) != 1 || lossy.Coverage.Lossy[0] != "operations.events.list" {
+		t.Fatalf("coverage = %#v", lossy.Coverage)
+	}
+	if operations := invokeResponse(t, lossy, "operations.go"); bytes.Contains([]byte(operations), []byte("EventsListAll(")) {
+		t.Fatalf("offset pagination emitted an iterator:\n%s", operations)
+	}
+	if len(lossy.Diagnostics) != 1 || !bytes.Contains([]byte(lossy.Diagnostics[0].Message), []byte("operations.events.list")) {
+		t.Fatalf("diagnostics = %#v", lossy.Diagnostics)
+	}
+}
+
+func TestIteratorNameCollisionIsAnError(t *testing.T) {
+	value := mutateFixture(t)
+	operations := value["operations"].([]any)
+	operations[0].(map[string]any)["id"] = []any{[]any{"events"}, []any{"list"}, []any{"all"}}
+	raw, err := json.Marshal(value)
+	if err != nil {
+		t.Fatal(err)
+	}
+	response := emitFixtureMode(t, raw, map[string]any{"package": "fixture"}, "lossy")
+	if response.Error == "" {
+		t.Fatalf("emit accepted the collision: %#v", response)
+	}
+	for _, want := range []string{"EventsListAll", "operations.events.list", "operations.events.list.all"} {
+		if !bytes.Contains([]byte(response.Error), []byte(want)) {
+			t.Fatalf("error %q does not name %q", response.Error, want)
+		}
+	}
+}
+
+func TestUnresolvedPaginationPointerIsLossy(t *testing.T) {
+	value := mutateFixture(t)
+	operations := value["operations"].([]any)
+	semantics := operations[3].(map[string]any)["semantics"].(map[string]any)
+	pagination := semantics["pagination"].(map[string]any)
+	pagination["items"] = "/missing"
+	raw, err := json.Marshal(value)
+	if err != nil {
+		t.Fatal(err)
+	}
+	strict := emitFixture(t, raw, map[string]any{"package": "fixture"})
+	if strict.Error == "" || !bytes.Contains([]byte(strict.Error), []byte("operations.events.list")) || !bytes.Contains([]byte(strict.Error), []byte(`"/missing"`)) {
+		t.Fatalf("strict response = %#v", strict)
+	}
+	lossy := emitFixtureMode(t, raw, map[string]any{"package": "fixture"}, "lossy")
+	if lossy.Error != "" {
+		t.Fatalf("lossy emit failed: %s", lossy.Error)
+	}
+	if lossy.Coverage == nil || len(lossy.Coverage.Lossy) != 1 || lossy.Coverage.Lossy[0] != "operations.events.list" {
+		t.Fatalf("coverage = %#v", lossy.Coverage)
+	}
+	if emitted := invokeResponse(t, lossy, "operations.go"); bytes.Contains([]byte(emitted), []byte("EventsListAll(")) {
+		t.Fatalf("the unresolved pointer emitted an iterator:\n%s", emitted)
 	}
 }
 

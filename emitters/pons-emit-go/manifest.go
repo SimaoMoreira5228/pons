@@ -50,7 +50,7 @@ func buildManifest() manifest {
 		IRVersion: versionRange{Min: "0.2", Max: "0.2"},
 		Capabilities: capabilities{
 			Streaming:      []string{},
-			Pagination:     []string{},
+			Pagination:     []string{"pagination.cursor"},
 			EnumReprs:      []string{"string"},
 			DirectionSplit: true,
 			Provides:       false,

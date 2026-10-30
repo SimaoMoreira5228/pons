@@ -1,0 +1,56 @@
+{
+  "ir_version": "0.2",
+  "info": {
+    "title": "Offset Fixture",
+    "version": "1.0.0",
+    "servers": ["https://api.example.test"]
+  },
+  "types": {
+    "fixture::OffsetItem": {
+      "kind": "struct",
+      "openness": "reject",
+      "name": ["offset", "item"],
+      "direction": "output",
+      "fields": [
+        {"wire": "id", "ident": ["id"], "ty": {"kind": "int", "bits": 64, "signed": true, "wire": "number"}, "presence": "required"}
+      ]
+    },
+    "fixture::OffsetPage": {
+      "kind": "struct",
+      "openness": "reject",
+      "name": ["offset", "page"],
+      "direction": "output",
+      "fields": [
+        {"wire": "items", "ident": ["items"], "ty": {"kind": "array", "item": {"ref": "fixture::OffsetItem"}}, "presence": "required"}
+      ]
+    },
+    "fixture::OffsetQuery": {
+      "kind": "struct",
+      "openness": "reject",
+      "name": ["offset", "query"],
+      "direction": "input",
+      "fields": [
+        {"wire": "offset", "ident": ["offset"], "ty": {"kind": "int", "bits": 32, "signed": true, "wire": "number"}, "presence": "optional"},
+        {"wire": "limit", "ident": ["limit"], "ty": {"kind": "int", "bits": 32, "signed": true, "wire": "number"}, "presence": "optional"}
+      ]
+    }
+  },
+  "operations": [
+    {
+      "id": [["events"], ["list"]],
+      "method": "GET",
+      "path": [{"lit": "events"}],
+      "query": {"ref": "fixture::OffsetQuery"},
+      "responses": [{"status": 200, "content": "json", "body": {"ref": "fixture::OffsetPage"}}],
+      "auth": {"alternatives": [], "optional": false},
+      "semantics": {
+        "safe": true,
+        "idempotent": true,
+        "pagination": {
+          "request": {"kind": "offset", "field": "offset"},
+          "items": "/items"
+        }
+      }
+    }
+  ]
+}

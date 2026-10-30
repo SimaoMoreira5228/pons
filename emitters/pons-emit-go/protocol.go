@@ -58,13 +58,59 @@ func exactCoverage(document *document) coverage {
 	return coverage{Exact: subjects, Opaque: []string{}, Lossy: []string{}, Unsupported: []string{}}
 }
 
-func successResponse(files []generatedFile, document *document) emitResponse {
+func coverageFor(document *document, analysis *analysis) coverage {
 	report := exactCoverage(document)
-	return emitResponse{
-		Protocol: protocolVersion,
-		Files:    files,
-		Coverage: &report,
+	if len(analysis.lossy) == 0 {
+		return report
 	}
+	lost := map[string]bool{}
+	for _, entry := range analysis.lossy {
+		lost[entry.subject] = true
+	}
+	exact := make([]string, 0, len(report.Exact))
+	for _, subject := range report.Exact {
+		if !lost[subject] {
+			exact = append(exact, subject)
+		}
+	}
+	lossy := make([]string, 0, len(lost))
+	for subject := range lost {
+		lossy = append(lossy, subject)
+	}
+	sort.Strings(lossy)
+	report.Exact = exact
+	report.Lossy = lossy
+	return report
+}
+
+func successResponse(files []generatedFile, document *document, analysis *analysis) emitResponse {
+	report := coverageFor(document, analysis)
+	diagnostics := make([]pluginDiagnostic, 0, len(analysis.lossy))
+	for _, entry := range analysis.lossy {
+		diagnostics = append(diagnostics, pluginDiagnostic{
+			Severity: "warning",
+			Code:     "GO-W001",
+			Message:  entry.message,
+		})
+	}
+	return emitResponse{
+		Protocol:    protocolVersion,
+		Files:       files,
+		Diagnostics: diagnostics,
+		Coverage:    &report,
+	}
+}
+
+func (a *analysis) lossyProblems() []problem {
+	problems := make([]problem, 0, len(a.lossy))
+	for _, entry := range a.lossy {
+		problems = append(problems, problem{
+			code:    "GO-E003",
+			message: entry.message,
+			origin:  strings.TrimPrefix(entry.subject, "operations."),
+		})
+	}
+	return problems
 }
 
 func failureResponse(problems []problem) emitResponse {

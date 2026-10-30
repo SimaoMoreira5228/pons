@@ -87,6 +87,12 @@ impl Pagination {
         self.items
             .validate()
             .map_err(|message| format!("pagination item locator: {message}"))?;
+        if matches!(self.request, PaginationRequest::Offset { .. }) && self.next.is_some() {
+            return Err(
+                "an offset request cannot declare a next pointer, because the client advances the offset itself"
+                    .into(),
+            );
+        }
         if let Some(next) = &self.next {
             next.validate()
                 .map_err(|message| format!("pagination next locator: {message}"))?;

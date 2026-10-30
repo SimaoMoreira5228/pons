@@ -71,6 +71,36 @@
         {"wire": "status", "ident": ["status"], "ty": {"ref": "fixture::Status"}, "presence": "optional"},
         {"wire": "search", "ident": ["search"], "ty": {"kind": "string"}, "presence": "optional"}
       ]
+    },
+    "fixture::Event": {
+      "kind": "struct",
+      "openness": "reject",
+      "name": ["event"],
+      "direction": "output",
+      "fields": [
+        {"wire": "id", "ident": ["id"], "ty": {"kind": "int", "bits": 64, "signed": true, "wire": "number"}, "presence": "required"},
+        {"wire": "name", "ident": ["name"], "ty": {"kind": "string"}, "presence": "required"}
+      ]
+    },
+    "fixture::EventPage": {
+      "kind": "struct",
+      "openness": "reject",
+      "name": ["event", "page"],
+      "direction": "output",
+      "fields": [
+        {"wire": "items", "ident": ["items"], "ty": {"kind": "array", "item": {"ref": "fixture::Event"}}, "presence": "required"},
+        {"wire": "next_cursor", "ident": ["next", "cursor"], "ty": {"kind": "string"}, "presence": "optional"}
+      ]
+    },
+    "fixture::EventQuery": {
+      "kind": "struct",
+      "openness": "reject",
+      "name": ["event", "query"],
+      "direction": "input",
+      "fields": [
+        {"wire": "cursor", "ident": ["cursor"], "ty": {"kind": "string"}, "presence": "optional"},
+        {"wire": "limit", "ident": ["limit"], "ty": {"kind": "int", "bits": 32, "signed": true, "wire": "number"}, "presence": "optional"}
+      ]
     }
   },
   "auth_schemes": {
@@ -109,6 +139,24 @@
       "responses": [{"status": 200, "content": "json", "body": {"kind": "array", "item": {"ref": "fixture::User"}}}],
       "auth": {"alternatives": [["tenant"]], "optional": false},
       "semantics": {"safe": true, "idempotent": true}
+    },
+    {
+      "id": [["events"], ["list"]],
+      "method": "GET",
+      "path": [{"lit": "events"}],
+      "query": {"ref": "fixture::EventQuery"},
+      "responses": [{"status": 200, "content": "json", "body": {"ref": "fixture::EventPage"}}],
+      "auth": {"alternatives": [], "optional": false},
+      "semantics": {
+        "safe": true,
+        "idempotent": true,
+        "pagination": {
+          "request": {"kind": "cursor", "field": "cursor"},
+          "items": "/items",
+          "next": "/next_cursor",
+          "page_size": {"field": "limit", "default": 2, "maximum": 100}
+        }
+      }
     }
   ]
 }

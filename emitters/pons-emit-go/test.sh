@@ -14,7 +14,7 @@ trap 'rm -rf "$work"' EXIT
 
 "$work/pons-emit-go" describe > "$work/manifest.json"
 
-python3 - "$work" "$root/testdata/contract.json" <<'PY'
+python3 - "$work" "$root/testdata/contract.json" "$root/testdata/offset.json" <<'PY'
 import json
 import pathlib
 import subprocess
@@ -22,6 +22,7 @@ import sys
 
 work = pathlib.Path(sys.argv[1])
 contract_path = pathlib.Path(sys.argv[2])
+offset_path = pathlib.Path(sys.argv[3])
 contract = json.loads(contract_path.read_text())
 
 manifest = json.loads((work / "manifest.json").read_text())
@@ -31,7 +32,7 @@ assert manifest["protocol"] == {"min": "3.0", "max": "3.0"}, manifest
 assert manifest["ir_version"] == {"min": "0.2", "max": "0.2"}, manifest
 capabilities = manifest["capabilities"]
 assert capabilities["streaming"] == [], capabilities
-assert capabilities["pagination"] == [], capabilities
+assert capabilities["pagination"] == ["pagination.cursor"], capabilities
 assert capabilities["enum_reprs"] == ["string"], capabilities
 assert capabilities["object_openness"] == ["reject"], capabilities
 assert capabilities["wide_integers"] is True, capabilities
@@ -75,6 +76,43 @@ expected = sorted(
     + ["operations." + ".".join("_".join(part) for part in operation["id"]) for operation in contract["operations"]]
 )
 assert coverage == {"exact": expected, "opaque": [], "lossy": [], "unsupported": []}, coverage
+
+offset = json.loads(offset_path.read_text())
+offset_request = {
+    "protocol": 3,
+    "source_ir_version": "0.2",
+    "mode": "lossy",
+    "ir": offset,
+    "options": {"package": "fixture"},
+    "target": "go",
+}
+offset_result = subprocess.run(
+    [str(work / "pons-emit-go"), "emit"],
+    input=json.dumps(offset_request),
+    text=True,
+    capture_output=True,
+)
+assert offset_result.returncode == 0, offset_result.stderr
+offset_response = json.loads(offset_result.stdout)
+assert offset_response.get("error") is None, offset_response
+offset_coverage = offset_response["coverage"]
+assert offset_coverage["lossy"] == ["operations.events.list"], offset_coverage
+assert "operations.events.list" not in offset_coverage["exact"], offset_coverage
+assert offset_coverage["opaque"] == [] and offset_coverage["unsupported"] == [], offset_coverage
+offset_operations = next(file["content"] for file in offset_response["files"] if file["path"] == "operations.go")
+assert "EventsListAll(" not in offset_operations, offset_operations
+
+offset_request["mode"] = "strict"
+strict_result = subprocess.run(
+    [str(work / "pons-emit-go"), "emit"],
+    input=json.dumps(offset_request),
+    text=True,
+    capture_output=True,
+)
+assert strict_result.returncode == 0, strict_result.stderr
+strict_response = json.loads(strict_result.stdout)
+assert strict_response.get("error"), strict_response
+assert "offset pagination" in strict_response["error"], strict_response
 PY
 
 printf 'module example.com/fixture\n\ngo 1.22\n' > "$work/module/go.mod"
@@ -197,6 +235,103 @@ func TestUsersCreateAndList(t *testing.T) {
 	}
 	if len(users) != 1 || users[0].ID != 9 || users[0].Status != StatusSuspended {
 		t.Fatalf("users = %#v", users)
+	}
+}
+
+func TestEventsListAll(t *testing.T) {
+	calls := 0
+	cursors := []string{}
+	limits := []string{}
+	server := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+		calls++
+		values := request.URL.Query()
+		if _, ok := values["cursor"]; ok {
+			cursors = append(cursors, values.Get("cursor"))
+		} else {
+			cursors = append(cursors, "<absent>")
+		}
+		if _, ok := values["limit"]; ok {
+			limits = append(limits, values.Get("limit"))
+		} else {
+			limits = append(limits, "<absent>")
+		}
+		response.Header().Set("Content-Type", "application/json")
+		switch calls {
+		case 1:
+			response.Write([]byte(`{"items":[{"id":1,"name":"one"},{"id":2,"name":"two"}],"next_cursor":"c2"}`))
+		case 2:
+			response.Write([]byte(`{"items":[{"id":3,"name":"three"}],"next_cursor":""}`))
+		default:
+			t.Errorf("unexpected call %d", calls)
+		}
+	}))
+	defer server.Close()
+
+	client := &Client{BaseURL: server.URL}
+	ids := []int64{}
+	err := client.EventsListAll(context.Background(), EventQuery{}, func(event Event) error {
+		ids = append(ids, event.ID)
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("EventsListAll: %v", err)
+	}
+	if calls != 2 {
+		t.Fatalf("calls = %d", calls)
+	}
+	if len(ids) != 3 || ids[0] != 1 || ids[1] != 2 || ids[2] != 3 {
+		t.Fatalf("ids = %v", ids)
+	}
+	if len(cursors) != 2 || cursors[0] != "<absent>" || cursors[1] != "c2" {
+		t.Fatalf("cursors = %v", cursors)
+	}
+	if len(limits) != 2 || limits[0] != "2" || limits[1] != "<absent>" {
+		t.Fatalf("limits = %v", limits)
+	}
+}
+
+func TestEventsListAllStopsOnYieldError(t *testing.T) {
+	calls := 0
+	yields := 0
+	server := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+		calls++
+		response.Header().Set("Content-Type", "application/json")
+		response.Write([]byte(`{"items":[{"id":1,"name":"one"},{"id":2,"name":"two"}],"next_cursor":"c2"}`))
+	}))
+	defer server.Close()
+
+	sentinel := errors.New("stop iteration")
+	client := &Client{BaseURL: server.URL}
+	err := client.EventsListAll(context.Background(), EventQuery{}, func(event Event) error {
+		yields++
+		return sentinel
+	})
+	if err != sentinel {
+		t.Fatalf("error = %v", err)
+	}
+	if calls != 1 || yields != 1 {
+		t.Fatalf("calls = %d, yields = %d", calls, yields)
+	}
+}
+
+func TestEventsListAllReturnsPageError(t *testing.T) {
+	yields := 0
+	server := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+		http.Error(response, "unavailable", http.StatusInternalServerError)
+	}))
+	defer server.Close()
+
+	client := &Client{BaseURL: server.URL}
+	err := client.EventsListAll(context.Background(), EventQuery{}, func(event Event) error {
+		yields++
+		return nil
+	})
+	var apiError *APIError
+	if !errors.As(err, &apiError) || apiError.StatusCode != http.StatusInternalServerError {
+		t.Fatalf("error = %v", err)
+	}
+	if yields != 0 {
+		t.Fatalf("yields = %d", yields)
 	}
 }
 GO

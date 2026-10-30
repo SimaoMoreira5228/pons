@@ -24,7 +24,7 @@ func (a *analysis) buildOperationPlans() {
 			a.addProblem(origin, "the operation declares auth scopes, which this emitter does not support")
 		}
 		params := newNameRegistry()
-		for _, reserved := range []string{"ctx", "requestURL", "err", "request", "httpResponse", "responseBody", "payload", "out"} {
+		for _, reserved := range []string{"ctx", "requestURL", "err", "request", "httpResponse", "responseBody", "payload", "out", "yield"} {
 			params.reserve(reserved)
 		}
 		a.buildPath(plan, params, origin)
@@ -32,10 +32,15 @@ func (a *analysis) buildOperationPlans() {
 		a.buildHeaders(plan, params, origin)
 		a.buildBody(plan, params, origin)
 		a.buildSuccess(plan, origin)
+		plan.Pagination = a.buildPagination(plan, origin)
 		a.buildErrors(plan, origin)
 		plan.Auth = a.observeAuth(op, origin)
 		plan.Name = a.methodNames.claim(exportedName(joinWords(op.ID)))
+		a.methodOwners[plan.Name] = "operations." + origin
 		a.operations = append(a.operations, plan)
+	}
+	for _, plan := range a.operations {
+		a.nameIterator(plan)
 	}
 }
 func (a *analysis) buildPath(plan *operationPlan, params *nameRegistry, origin string) {

@@ -29,6 +29,9 @@ func TestManifestDescribesTheSupportedSlice(t *testing.T) {
 	if len(manifest.Capabilities.Streaming) != 0 {
 		t.Fatalf("streaming = %v", manifest.Capabilities.Streaming)
 	}
+	if got := manifest.Capabilities.Pagination; len(got) != 1 || got[0] != "pagination.cursor" {
+		t.Fatalf("pagination = %v", got)
+	}
 	spec, ok := manifest.OptionSchema.Options["package"]
 	if !ok || spec.Type != "string" || spec.Required {
 		t.Fatalf("package option = %#v", spec)
