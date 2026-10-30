@@ -1,11 +1,16 @@
 mod coverage;
 mod document;
 mod naming;
+mod pagination;
 
 use pons_ir::{Direction, InlineType, ObjectOpenness, TypeDef, TypeKind, TypeRef};
 
 fn fixture() -> pons_ir::Document {
     serde_json::from_str(include_str!("../../../spec/fixtures/login.json")).unwrap()
+}
+
+fn paginated_fixture() -> pons_ir::Document {
+    serde_json::from_str(include_str!("../../../spec/fixtures/paginated.json")).unwrap()
 }
 
 fn string() -> TypeRef {
