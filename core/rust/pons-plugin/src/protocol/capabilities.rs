@@ -111,15 +111,15 @@ impl EmitterManifest {
                 }
             }
             if let Some(pagination) = &operation.semantics.pagination {
-                let kind = pagination_kind(&pagination.request);
+                let capability = pagination_capability(&pagination.request);
                 if !self
                     .capabilities
                     .pagination
                     .iter()
-                    .any(|value| value == kind)
+                    .any(|value| value == capability)
                 {
                     warnings.push(CapabilityWarning(format!(
-                        "{} does not declare support for {kind} pagination in {}",
+                        "{} does not declare support for {capability} in {}",
                         self.name,
                         operation_subject(operation)
                     )));
@@ -251,10 +251,10 @@ fn stream_kinds(operation: &pons_ir::Operation) -> Vec<&'static str> {
     kinds
 }
 
-fn pagination_kind(request: &PaginationRequest) -> &'static str {
+fn pagination_capability(request: &PaginationRequest) -> &'static str {
     match request {
-        PaginationRequest::Cursor { .. } => "cursor",
-        PaginationRequest::Offset { .. } => "offset",
+        PaginationRequest::Cursor { .. } => "pagination.cursor",
+        PaginationRequest::Offset { .. } => "pagination.offset",
     }
 }
 
@@ -345,15 +345,15 @@ mod tests {
         assert_eq!(
             manifest(&[]).unsupported_features(&cursor),
             vec![CapabilityWarning(
-                "go does not declare support for cursor pagination in events.list".into()
+                "go does not declare support for pagination.cursor in events.list".into()
             )]
         );
 
         let offset = paginated("offset");
         assert_eq!(
-            manifest(&["cursor"]).unsupported_features(&offset),
+            manifest(&["pagination.cursor"]).unsupported_features(&offset),
             vec![CapabilityWarning(
-                "go does not declare support for offset pagination in events.list".into()
+                "go does not declare support for pagination.offset in events.list".into()
             )]
         );
     }
@@ -361,12 +361,12 @@ mod tests {
     #[test]
     fn stays_quiet_for_declared_and_absent_pagination() {
         assert!(
-            manifest(&["cursor"])
+            manifest(&["pagination.cursor"])
                 .unsupported_features(&paginated("cursor"))
                 .is_empty()
         );
         assert!(
-            manifest(&["offset"])
+            manifest(&["pagination.offset"])
                 .unsupported_features(&paginated("offset"))
                 .is_empty()
         );

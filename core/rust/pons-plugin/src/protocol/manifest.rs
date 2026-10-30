@@ -92,7 +92,7 @@ pub struct ValidationCapabilities {
 }
 
 const STREAMING: &[&str] = &["sse", "ndjson", "bytes", "websocket"];
-const PAGINATION: &[&str] = &["cursor", "offset"];
+const PAGINATION: &[&str] = &["pagination.cursor", "pagination.offset"];
 const ENUM_REPRS: &[&str] = &["string", "external", "internal", "adjacent", "untagged"];
 const OBJECT_OPENNESS: &[&str] = &["reject", "preserve_typed", "preserve_opaque"];
 const VALIDATION_LEVELS: &[&str] = &["exact", "lossy", "unsupported"];
