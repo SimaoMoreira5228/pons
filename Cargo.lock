@@ -1344,6 +1344,7 @@ dependencies = [
  "pons-emit-openapi",
  "pons-emit-ts",
  "pons-ir",
+ "pons-openapi",
  "pons-plugin",
  "serde_json",
  "tempfile",
@@ -1418,6 +1419,16 @@ version = "0.1.0"
 dependencies = [
  "pons-core",
  "pons-ir",
+ "serde_json",
+]
+
+[[package]]
+name = "pons-openapi"
+version = "0.1.0"
+dependencies = [
+ "pons-core",
+ "pons-ir",
+ "pons-json-schema",
  "serde_json",
 ]
 

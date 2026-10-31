@@ -20,6 +20,7 @@ path = "src/cargo_pons.rs"
 [dependencies]
 pons-ir = { path = "../../core/rust/pons-ir" }
 pons-plugin = { path = "../../core/rust/pons-plugin" }
+pons-openapi = { path = "../../frontends/pons-openapi" }
 pons-emit-ts = { path = "../../emitters/pons-emit-ts" }
 pons-emit-openapi = { path = "../../emitters/pons-emit-openapi" }
 serde_json.workspace = true
