@@ -1,4 +1,3 @@
-use std::any::type_name;
 use std::collections::{BTreeMap, BTreeSet};
 
 use pons_core::TypeCx;
@@ -6,44 +5,38 @@ use pons_ir::{
     Access, Direction, Doc, EnumRepr, Field, FieldDefault, InlineType, Name, ObjectOpenness,
     OpaqueWire, Presence, TypeKind, TypeRef, Variant, VariantPayload,
 };
-use schemars::generate::{SchemaGenerator, SchemaSettings};
-use schemars::{JsonSchema, Schema};
 use serde_json::{Map, Value};
 
 use crate::scalars::{DROPPED_KEYWORD, lower_integer, lower_number, lower_string, string_type};
 
 const UNEXPRESSIBLE: &str = "PONS-W202";
 
-pub(crate) fn lower<T>(cx: &mut TypeCx, direction: Direction) -> TypeRef
-where
-    T: JsonSchema + ?Sized,
-{
-    let settings = match direction {
-        Direction::Input => SchemaSettings::draft2020_12().for_deserialize(),
-        Direction::Output => SchemaSettings::draft2020_12().for_serialize(),
-        Direction::Both => SchemaSettings::draft2020_12(),
-    };
-    let mut generator = SchemaGenerator::new(settings);
-    let schema: Schema = generator.root_schema_for::<T>();
-    let mut value = schema.to_value();
-    let defs = take_definitions(&mut value);
-    let base = type_name::<T>().to_owned();
-    let root_id = scoped_id(&base, direction);
+pub struct RootType<'a> {
+    pub id: &'a str,
+    pub name: &'a str,
+    pub origin: Option<&'a str>,
+    pub direction: Direction,
+}
+
+pub fn lower(cx: &mut TypeCx, mut schema: Value, root: RootType<'_>) -> TypeRef {
+    let defs = take_definitions(&mut schema);
+    let base = root.id;
+    let root_id = scoped_id(base, root.direction);
     let context = Context {
-        base: &base,
+        base,
         root_id: &root_id,
-        direction,
+        direction: root.direction,
         defs: &defs,
     };
-    let name = words(&T::schema_name());
-    let doc = doc_of(&value);
+    let name = words(root.name);
+    let doc = doc_of(&schema);
     cx.named_as(
         root_id.clone(),
-        Some(base.clone()),
+        root.origin.map(str::to_owned),
         name,
-        direction,
+        root.direction,
         doc,
-        move |cx| lower_named(cx, &context, &value),
+        move |cx| lower_named(cx, &context, &schema),
     )
 }
 

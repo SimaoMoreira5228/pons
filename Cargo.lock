@@ -1413,6 +1413,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "pons-json-schema"
+version = "0.1.0"
+dependencies = [
+ "pons-core",
+ "pons-ir",
+ "serde_json",
+]
+
+[[package]]
 name = "pons-plugin"
 version = "0.1.0"
 dependencies = [
@@ -1430,6 +1439,7 @@ version = "0.1.0"
 dependencies = [
  "pons-core",
  "pons-ir",
+ "pons-json-schema",
  "schemars",
  "serde",
  "serde_json",

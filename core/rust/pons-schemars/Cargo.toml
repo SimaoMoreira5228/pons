@@ -11,6 +11,9 @@ categories = ["development-tools", "web-programming"]
 [dependencies]
 pons-core = { path = "../pons-core" }
 pons-ir = { path = "../pons-ir" }
+pons-json-schema = { path = "../pons-json-schema" }
 schemars.workspace = true
 serde.workspace = true
+
+[dev-dependencies]
 serde_json.workspace = true

@@ -1,9 +1,10 @@
-mod convert;
-mod scalars;
+use std::any::type_name;
 
 use pons_core::{Schema, TypeCx};
 use pons_ir::{Direction, TypeRef};
+use pons_json_schema::RootType;
 use schemars::JsonSchema;
+use schemars::generate::{SchemaGenerator, SchemaSettings};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 #[repr(transparent)]
@@ -49,6 +50,24 @@ where
     T: JsonSchema,
 {
     fn schema(cx: &mut TypeCx, direction: Direction) -> TypeRef {
-        convert::lower::<T>(cx, direction)
+        let settings = match direction {
+            Direction::Input => SchemaSettings::draft2020_12().for_deserialize(),
+            Direction::Output => SchemaSettings::draft2020_12().for_serialize(),
+            Direction::Both => SchemaSettings::draft2020_12(),
+        };
+        let mut generator = SchemaGenerator::new(settings);
+        let schema: schemars::Schema = generator.root_schema_for::<T>();
+        let base = type_name::<T>().to_owned();
+        let name = T::schema_name();
+        pons_json_schema::lower(
+            cx,
+            schema.to_value(),
+            RootType {
+                id: &base,
+                name: &name,
+                origin: Some(&base),
+                direction,
+            },
+        )
     }
 }
