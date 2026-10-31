@@ -87,6 +87,19 @@ impl TypeCx {
         self.define((base, direction.into()), id, origin, name, doc, build)
     }
 
+    pub fn named_as(
+        &mut self,
+        id: impl Into<String>,
+        origin: Option<String>,
+        name: Name,
+        direction: Direction,
+        doc: Option<Doc>,
+        build: impl FnOnce(&mut Self) -> TypeKind,
+    ) -> TypeRef {
+        let id = id.into();
+        self.define((id.clone(), direction.into()), id, origin, name, doc, build)
+    }
+
     pub fn register_as(
         &mut self,
         id: impl Into<String>,
