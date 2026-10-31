@@ -377,7 +377,7 @@ fn every_candidate_invokes_the_typescript_compiler_and_nothing_else() {
 #[test]
 fn a_program_that_only_prints_a_banner_is_not_a_compiler() {
     assert!(is_compiler_version("Version 5.9.2\n"));
-    assert!(is_compiler_version("  Version 7.0.2\r\n"));
+    assert!(is_compiler_version("  Version 6.0.3\r\n"));
     assert!(!is_compiler_version(""));
     assert!(!is_compiler_version(
         "This is not the tsc command you are looking for\n\nTo get access to the \
