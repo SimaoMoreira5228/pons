@@ -15,7 +15,7 @@ impl std::fmt::Display for ImportError {
         match self {
             Self::Read(message) => write!(
                 formatter,
-                "the input is not OpenAPI 3.1 JSON (YAML is not read): {message}"
+                "the input is not OpenAPI 3.0 or 3.1 JSON (YAML is not read): {message}"
             ),
             Self::NotDocument { found } => {
                 write!(
@@ -24,11 +24,11 @@ impl std::fmt::Display for ImportError {
                 )
             }
             Self::MissingVersion => formatter.write_str(
-                "the OpenAPI document has no string \"openapi\" version, so it is not OpenAPI 3.1",
+                "the OpenAPI document has no string \"openapi\" version, so it is not OpenAPI 3.0 or 3.1",
             ),
             Self::UnsupportedVersion { found } => write!(
                 formatter,
-                "the document declares OpenAPI {found}; this importer reads 3.1.x only"
+                "the document declares OpenAPI {found}; this importer reads 3.0.x and 3.1.x"
             ),
             Self::Document(message) => formatter.write_str(message),
             Self::Invalid(errors) => {

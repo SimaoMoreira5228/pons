@@ -2,31 +2,46 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use pons_core::TypeCx;
 use pons_ir::{
-    ByteEncoding, Direction, InlineType, ObjectOpenness, TypeDef, TypeKind, TypeRef, VariantPayload,
+    ByteEncoding, Diagnostic, Direction, InlineType, ObjectOpenness, TypeDef, TypeKind, TypeRef,
+    VariantPayload,
 };
 use pons_json_schema::{RootType, lower};
 use serde_json::{Map, Value};
 
+use crate::dialect::Dialect;
+
 const SCHEMA_PREFIX: &str = "#/components/schemas/";
 const DEFS_PREFIX: &str = "#/$defs/";
 
-pub(crate) struct TypeLowering<'a> {
-    components: &'a Map<String, Value>,
+pub(crate) struct TypeLowering {
+    components: Map<String, Value>,
+    dialect: Dialect,
     types: BTreeMap<String, TypeDef>,
     active: BTreeSet<String>,
+    diagnostics: Vec<Diagnostic>,
 }
 
-impl<'a> TypeLowering<'a> {
-    pub(crate) fn new(components: &'a Map<String, Value>) -> Self {
+impl TypeLowering {
+    pub(crate) fn new(mut components: Map<String, Value>, dialect: Dialect) -> Self {
+        let mut diagnostics = Vec::new();
+        for (name, schema) in components.iter_mut() {
+            dialect.translate(
+                schema,
+                &format!("components.schemas.{name}"),
+                &mut diagnostics,
+            );
+        }
         Self {
             components,
+            dialect,
             types: BTreeMap::new(),
             active: BTreeSet::new(),
+            diagnostics,
         }
     }
 
-    pub(crate) fn into_types(self) -> BTreeMap<String, TypeDef> {
-        self.types
+    pub(crate) fn into_parts(self) -> (BTreeMap<String, TypeDef>, Vec<Diagnostic>) {
+        (self.types, self.diagnostics)
     }
 
     pub(crate) fn schema_type(
@@ -54,7 +69,7 @@ impl<'a> TypeLowering<'a> {
             .get(name)
             .cloned()
             .unwrap_or(Value::Bool(true));
-        let root = self.lower_root(&component_id(name), name, &schema, direction);
+        let root = self.lower_prepared(&component_id(name), name, &schema, direction);
         self.active.remove(&id);
         root
     }
@@ -102,7 +117,20 @@ impl<'a> TypeLowering<'a> {
         schema: &Value,
         direction: Direction,
     ) -> TypeRef {
-        let prepared = prepare(schema, self.components);
+        let mut schema = schema.clone();
+        self.dialect
+            .translate(&mut schema, id, &mut self.diagnostics);
+        self.lower_prepared(id, name, &schema, direction)
+    }
+
+    fn lower_prepared(
+        &mut self,
+        id: &str,
+        name: &str,
+        schema: &Value,
+        direction: Direction,
+    ) -> TypeRef {
+        let prepared = prepare(schema, &self.components);
         let mut cx = TypeCx::new();
         let root = lower(
             &mut cx,
@@ -115,7 +143,7 @@ impl<'a> TypeLowering<'a> {
             },
         );
         let (definitions, referenced) =
-            rewrite_definitions(cx.into_definitions(), id, direction, self.components);
+            rewrite_definitions(cx.into_definitions(), id, direction, &self.components);
         for (key, definition) in definitions {
             self.types.entry(key).or_insert(definition);
         }

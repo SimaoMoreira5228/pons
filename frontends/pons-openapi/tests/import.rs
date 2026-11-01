@@ -5,9 +5,14 @@ use pons_ir::{
 };
 
 const FIXTURE: &str = include_str!("../testdata/orders.json");
+const FIXTURE_30: &str = include_str!("../testdata/orders-30.json");
 
 fn document() -> pons_ir::Document {
     pons_openapi::import(FIXTURE.as_bytes()).expect("the fixture imports")
+}
+
+fn document_30() -> pons_ir::Document {
+    pons_openapi::import(FIXTURE_30.as_bytes()).expect("the 3.0 fixture imports")
 }
 
 fn operation<'a>(document: &'a pons_ir::Document, label: &str) -> &'a pons_ir::Operation {
@@ -356,6 +361,76 @@ fn the_imported_document_is_valid() {
 }
 
 #[test]
+fn translates_a_30_document() {
+    let document = document_30();
+    document
+        .validate()
+        .expect("the imported 3.0 document is valid");
+
+    let order = &document.types["openapi::Order#output"];
+    let (fields, _) = structure(&order.definition);
+
+    let note = fields.iter().find(|field| field.wire == "note").unwrap();
+    let TypeRef::Inline(InlineType::Nullable { inner }) = &note.ty else {
+        panic!("expected a nullable note, found {:?}", note.ty);
+    };
+    assert!(matches!(
+        inner.as_ref(),
+        TypeRef::Inline(InlineType::String { .. })
+    ));
+
+    let customer = fields
+        .iter()
+        .find(|field| field.wire == "customer")
+        .unwrap();
+    let TypeRef::Inline(InlineType::Nullable { inner }) = &customer.ty else {
+        panic!("expected a nullable customer, found {:?}", customer.ty);
+    };
+    assert_eq!(
+        inner.as_ref(),
+        &TypeRef::Named(NamedRef {
+            id: "openapi::Customer#output".into(),
+            variant: None,
+        })
+    );
+
+    let quantity = fields
+        .iter()
+        .find(|field| field.wire == "quantity")
+        .unwrap();
+    let TypeRef::Inline(InlineType::Int {
+        bits,
+        signed,
+        minimum,
+        ..
+    }) = &quantity.ty
+    else {
+        panic!("expected an integer quantity, found {:?}", quantity.ty);
+    };
+    assert_eq!(*bits, 32);
+    assert!(signed);
+    assert_eq!(minimum.as_ref(), Some(&serde_json::json!(2)));
+
+    let attachment = fields
+        .iter()
+        .find(|field| field.wire == "attachment")
+        .unwrap();
+    let TypeRef::Inline(InlineType::Opaque { codec, .. }) = &attachment.ty else {
+        panic!("expected an opaque attachment, found {:?}", attachment.ty);
+    };
+    assert_eq!(codec, "json-schema:type:file");
+
+    let diagnostics = &document.diagnostics;
+    let warned = |needle: &str| {
+        diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code == "PONS-W205" && diagnostic.message.contains(needle))
+    };
+    assert!(warned("properties.total"), "{diagnostics:#?}");
+    assert!(warned("properties.attachment"), "{diagnostics:#?}");
+}
+
+#[test]
 fn refuses_what_it_cannot_read() {
     let error = pons_openapi::import(b"openapi: 3.1.0\ninfo:\n  title: x\n").unwrap_err();
     assert!(error.to_string().contains("YAML is not read"), "{error}");
@@ -363,8 +438,9 @@ fn refuses_what_it_cannot_read() {
     let error = pons_openapi::import(b"[]").unwrap_err();
     assert!(error.to_string().contains("a JSON array"), "{error}");
 
-    let error = pons_openapi::import(br#"{"openapi":"3.0.3"}"#).unwrap_err();
-    assert!(error.to_string().contains("3.0.3"), "{error}");
+    let error = pons_openapi::import(br#"{"openapi":"2.0"}"#).unwrap_err();
+    assert!(error.to_string().contains("2.0"), "{error}");
+    assert!(error.to_string().contains("3.0.x and 3.1.x"), "{error}");
 
     let error = pons_openapi::import(br#"{"info":{"title":"x","version":"1"}}"#).unwrap_err();
     assert!(error.to_string().contains("openapi"), "{error}");

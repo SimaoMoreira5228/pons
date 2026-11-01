@@ -15,7 +15,7 @@ use crate::responses;
 use crate::security;
 
 pub(crate) fn build(
-    importer: &mut Importer<'_>,
+    importer: &mut Importer,
     root: &Map<String, Value>,
 ) -> Result<Vec<Operation>, ImportError> {
     let Some(paths) = root.get("paths") else {
@@ -87,7 +87,7 @@ pub(crate) fn build(
 
 #[allow(clippy::too_many_arguments)]
 fn build_operation(
-    importer: &mut Importer<'_>,
+    importer: &mut Importer,
     path: &str,
     method: Method,
     value: &Value,

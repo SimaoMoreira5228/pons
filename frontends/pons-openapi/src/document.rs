@@ -3,19 +3,20 @@ use std::collections::BTreeMap;
 use pons_ir::{AuthScheme, Diagnostic, DiagnosticSeverity, Document, Fidelity, IR_VERSION, Info};
 use serde_json::{Map, Value};
 
+use crate::dialect::Dialect;
 use crate::error::ImportError;
 use crate::naming::extensions;
 use crate::operations;
 use crate::schemas::TypeLowering;
 use crate::security;
 
-pub(crate) struct Importer<'a> {
-    pub(crate) types: TypeLowering<'a>,
+pub(crate) struct Importer {
+    pub(crate) types: TypeLowering,
     pub(crate) diagnostics: Vec<Diagnostic>,
     pub(crate) auth_schemes: BTreeMap<String, AuthScheme>,
 }
 
-impl Importer<'_> {
+impl Importer {
     pub(crate) fn note_dropped(&mut self, operation: Option<&str>, construct: impl Into<String>) {
         push_dropped(&mut self.diagnostics, operation, construct);
     }
@@ -60,11 +61,10 @@ pub(crate) fn import(bytes: &[u8]) -> Result<Document, ImportError> {
         .get("openapi")
         .and_then(Value::as_str)
         .ok_or(ImportError::MissingVersion)?;
-    if !is_31(version) {
-        return Err(ImportError::UnsupportedVersion {
+    let dialect =
+        Dialect::from_version(version).ok_or_else(|| ImportError::UnsupportedVersion {
             found: version.to_owned(),
-        });
-    }
+        })?;
 
     let info = root.get("info").and_then(Value::as_object).ok_or_else(|| {
         ImportError::Document(
@@ -93,12 +93,14 @@ pub(crate) fn import(bytes: &[u8]) -> Result<Document, ImportError> {
     let mut diagnostics = Vec::new();
     let auth_schemes = security::schemes(security_schemes, &mut diagnostics)?;
     let mut importer = Importer {
-        types: TypeLowering::new(schemas),
+        types: TypeLowering::new(schemas.clone(), dialect),
         diagnostics,
         auth_schemes,
     };
     let operations = operations::build(&mut importer, &root)?;
+    let (types, schema_diagnostics) = importer.types.into_parts();
     let mut diagnostics = importer.diagnostics;
+    diagnostics.extend(schema_diagnostics);
 
     if let Some(webhooks) = root.get("webhooks")
         && webhooks
@@ -124,7 +126,7 @@ pub(crate) fn import(bytes: &[u8]) -> Result<Document, ImportError> {
             servers: servers(root.get("servers"), &mut diagnostics),
             ext: extensions(info),
         },
-        types: importer.types.into_types(),
+        types,
         auth_schemes: importer.auth_schemes,
         common_errors: Vec::new(),
         operations,
@@ -160,10 +162,6 @@ fn servers(value: Option<&Value>, diagnostics: &mut Vec<Diagnostic>) -> Vec<Stri
         }
     }
     urls
-}
-
-fn is_31(version: &str) -> bool {
-    version == "3.1" || version.starts_with("3.1.")
 }
 
 fn json_kind(value: &Value) -> String {

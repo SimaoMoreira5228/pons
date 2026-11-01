@@ -18,7 +18,7 @@ enum StatusKey {
 }
 
 pub(crate) fn build(
-    importer: &mut Importer<'_>,
+    importer: &mut Importer,
     base: &str,
     label: &str,
     method: Method,
@@ -250,7 +250,7 @@ fn status_key(key: &str) -> Option<StatusKey> {
 }
 
 fn headers(
-    importer: &mut Importer<'_>,
+    importer: &mut Importer,
     prefix: &str,
     label: &str,
     status: &str,

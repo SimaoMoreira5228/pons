@@ -1,4 +1,5 @@
 mod components;
+mod dialect;
 mod document;
 mod error;
 mod media;

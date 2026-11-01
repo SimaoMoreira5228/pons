@@ -8,7 +8,7 @@ use crate::media;
 use crate::naming::extensions;
 
 pub(crate) fn build(
-    importer: &mut Importer<'_>,
+    importer: &mut Importer,
     base: &str,
     label: &str,
     value: Option<&Value>,

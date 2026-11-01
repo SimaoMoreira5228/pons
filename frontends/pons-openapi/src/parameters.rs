@@ -147,7 +147,7 @@ pub(crate) fn merge(
 }
 
 pub(crate) fn query_type(
-    importer: &mut Importer<'_>,
+    importer: &mut Importer,
     base: &str,
     label: &str,
     parameters: &[DeclaredParameter],
