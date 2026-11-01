@@ -7,8 +7,10 @@ use serde_json::Value;
 
 use support::pons;
 
-fn fixture() -> std::path::PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR")).join("../../frontends/pons-openapi/testdata/orders.json")
+fn fixture(name: &str) -> std::path::PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../frontends/pons-openapi/testdata")
+        .join(name)
 }
 
 #[test]
@@ -16,7 +18,7 @@ fn imports_an_openapi_document_to_canonical_json() {
     let output = pons()
         .arg("import")
         .arg("openapi")
-        .arg(fixture())
+        .arg(fixture("orders.json"))
         .output()
         .unwrap();
     assert!(
@@ -41,7 +43,7 @@ fn imports_an_openapi_document_to_canonical_json() {
     let output = pons()
         .arg("import")
         .arg("openapi")
-        .arg(fixture())
+        .arg(fixture("orders.json"))
         .arg(&path)
         .output()
         .unwrap();
@@ -66,6 +68,25 @@ fn imports_an_openapi_document_to_canonical_json() {
         "{}",
         String::from_utf8_lossy(&output.stderr)
     );
+}
+
+#[test]
+fn imports_a_yaml_document_to_canonical_json() {
+    let output = pons()
+        .arg("import")
+        .arg("openapi")
+        .arg(fixture("orders.yaml"))
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let canonical = String::from_utf8(output.stdout).unwrap();
+    let document: Value = serde_json::from_str(&canonical).unwrap();
+    assert_eq!(document["ir_version"], "0.2");
+    assert_eq!(document["info"]["title"], "Orders");
 }
 
 #[test]

@@ -1,0 +1,198 @@
+openapi: 3.1.0
+info:
+  title: Orders
+  version: 1.0.0
+  description: Order management API.
+  x-internal:
+    team: sales
+servers:
+  - url: https://api.example.test
+  - url: https://sandbox.example.test
+security:
+  - bearerAuth: []
+x-audience: public
+paths:
+  "/orders/{orderId}":
+    parameters:
+      - name: orderId
+        in: path
+        required: true
+        schema:
+          type: string
+          format: uuid
+    get:
+      operationId: orders.get
+      tags:
+        - orders
+      summary: Fetch an order
+      description: Fetch one order by id.
+      deprecated: false
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: expand
+          in: query
+          required: false
+          schema:
+            type: string
+        - name: includeItems
+          in: query
+          required: true
+          schema:
+            type: boolean
+        - name: X-Request-ID
+          in: header
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        "200":
+          description: The order.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Order"
+        "404":
+          description: No order has that id.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          headers:
+            Retry-After:
+              schema:
+                type: integer
+                format: int32
+    delete:
+      operationId: orders.cancel
+      tags:
+        - orders
+      summary: Cancel an order
+      security:
+        - oauth:
+            - orders:read
+        - bearerAuth: []
+      parameters:
+        - name: filter
+          in: query
+          required: false
+          style: deepObject
+          schema:
+            type: object
+            properties:
+              reason:
+                type: string
+      responses:
+        "204":
+          description: Cancelled.
+      callbacks:
+        orderEvent:
+          "{$request.body#/callbackUrl}":
+            post:
+              responses:
+                "200":
+                  description: Acknowledged.
+  /orders:
+    post:
+      operationId: orders.create
+      tags:
+        - orders
+      summary: Create an order
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateOrder"
+      responses:
+        "201":
+          description: The created order.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Order"
+    head:
+      operationId: orders.check
+      security: []
+      responses:
+        "200":
+          description: The collection exists.
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+    oauth:
+      type: oauth2
+      flows:
+        clientCredentials:
+          tokenUrl: https://auth.example.test/token
+          scopes:
+            orders:read: Read orders
+  schemas:
+    Order:
+      type: object
+      required:
+        - id
+        - status
+        - customer
+      additionalProperties: false
+      properties:
+        id:
+          type: string
+          format: uuid
+        status:
+          $ref: "#/components/schemas/Status"
+        customer:
+          $ref: "#/components/schemas/Customer"
+        reference:
+          type: string
+        note:
+          type:
+            - string
+            - "null"
+        total:
+          type: number
+        payment:
+          oneOf:
+            - type: string
+            - type: integer
+    Customer:
+      type: object
+      required:
+        - name
+      additionalProperties: false
+      properties:
+        name:
+          type: string
+        email:
+          type: string
+          format: email
+    CreateOrder:
+      type: object
+      required:
+        - customer
+      additionalProperties: false
+      properties:
+        customer:
+          $ref: "#/components/schemas/Customer"
+        note:
+          type: string
+    Error:
+      type: object
+      required:
+        - message
+      additionalProperties: false
+      properties:
+        message:
+          type: string
+    Status:
+      type: string
+      enum:
+        - pending
+        - shipped
+        - cancelled

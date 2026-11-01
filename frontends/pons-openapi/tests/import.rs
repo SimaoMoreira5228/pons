@@ -6,9 +6,14 @@ use pons_ir::{
 
 const FIXTURE: &str = include_str!("../testdata/orders.json");
 const FIXTURE_30: &str = include_str!("../testdata/orders-30.json");
+const YAML_FIXTURE: &str = include_str!("../testdata/orders.yaml");
 
 fn document() -> pons_ir::Document {
     pons_openapi::import(FIXTURE.as_bytes()).expect("the fixture imports")
+}
+
+fn yaml_document() -> pons_ir::Document {
+    pons_openapi::import(YAML_FIXTURE.as_bytes()).expect("the YAML fixture imports")
 }
 
 fn document_30() -> pons_ir::Document {
@@ -361,6 +366,31 @@ fn the_imported_document_is_valid() {
 }
 
 #[test]
+fn json_and_yaml_fixtures_import_the_same_document() {
+    let json = document();
+    let yaml = yaml_document();
+
+    let operation_ids = |document: &pons_ir::Document| {
+        document
+            .operations
+            .iter()
+            .map(|operation| operation.id.clone())
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(operation_ids(&json), operation_ids(&yaml));
+
+    let type_ids =
+        |document: &pons_ir::Document| document.types.keys().cloned().collect::<Vec<String>>();
+    assert_eq!(type_ids(&json), type_ids(&yaml));
+
+    assert_eq!(json.diagnostics, yaml.diagnostics);
+    assert_eq!(
+        json, yaml,
+        "orders.json and orders.yaml must describe the same document"
+    );
+}
+
+#[test]
 fn translates_a_30_document() {
     let document = document_30();
     document
@@ -432,9 +462,6 @@ fn translates_a_30_document() {
 
 #[test]
 fn refuses_what_it_cannot_read() {
-    let error = pons_openapi::import(b"openapi: 3.1.0\ninfo:\n  title: x\n").unwrap_err();
-    assert!(error.to_string().contains("YAML is not read"), "{error}");
-
     let error = pons_openapi::import(b"[]").unwrap_err();
     assert!(error.to_string().contains("a JSON array"), "{error}");
 
@@ -444,6 +471,22 @@ fn refuses_what_it_cannot_read() {
 
     let error = pons_openapi::import(br#"{"info":{"title":"x","version":"1"}}"#).unwrap_err();
     assert!(error.to_string().contains("openapi"), "{error}");
+}
+
+#[test]
+fn refuses_malformed_json_and_yaml_and_names_both_formats() {
+    let error = pons_openapi::import(b"openapi: 3.1.0\ninfo: {title: x\n").unwrap_err();
+    assert!(
+        matches!(error, pons_openapi::ImportError::Read(_)),
+        "{error:?}"
+    );
+    let message = error.to_string();
+    assert!(
+        message.contains("the input is not OpenAPI 3.0 or 3.1 JSON or YAML"),
+        "{message}"
+    );
+    assert!(message.contains("JSON:"), "{message}");
+    assert!(message.contains("YAML:"), "{message}");
 }
 
 #[test]

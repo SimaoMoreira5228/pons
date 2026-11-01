@@ -15,7 +15,7 @@ impl std::fmt::Display for ImportError {
         match self {
             Self::Read(message) => write!(
                 formatter,
-                "the input is not OpenAPI 3.0 or 3.1 JSON (YAML is not read): {message}"
+                "the input is not OpenAPI 3.0 or 3.1 JSON or YAML: {message}"
             ),
             Self::NotDocument { found } => {
                 write!(

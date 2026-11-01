@@ -50,8 +50,7 @@ pub(crate) fn push_dropped(
 }
 
 pub(crate) fn import(bytes: &[u8]) -> Result<Document, ImportError> {
-    let value: Value =
-        serde_json::from_slice(bytes).map_err(|error| ImportError::Read(error.to_string()))?;
+    let value = read_document(bytes)?;
     let Value::Object(root) = value else {
         return Err(ImportError::NotDocument {
             found: json_kind(&value),
@@ -162,6 +161,14 @@ fn servers(value: Option<&Value>, diagnostics: &mut Vec<Diagnostic>) -> Vec<Stri
         }
     }
     urls
+}
+
+fn read_document(bytes: &[u8]) -> Result<Value, ImportError> {
+    match serde_json::from_slice(bytes) {
+        Ok(value) => Ok(value),
+        Err(json) => serde_yaml_ng::from_slice(bytes)
+            .map_err(|yaml| ImportError::Read(format!("JSON: {json}; YAML: {yaml}"))),
+    }
 }
 
 fn json_kind(value: &Value) -> String {
