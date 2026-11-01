@@ -67,3 +67,21 @@ fn imports_an_openapi_document_to_canonical_json() {
         String::from_utf8_lossy(&output.stderr)
     );
 }
+
+#[test]
+fn import_prints_usage_for_help() {
+    let output = pons()
+        .args(["import", "openapi", "--help"])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        String::from_utf8_lossy(&output.stdout).contains("usage: pons import openapi"),
+        "{}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+}

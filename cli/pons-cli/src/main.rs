@@ -115,6 +115,15 @@ fn run(args: Vec<OsString>) -> Result<(), CliError> {
         return contract::run(&args[1..]);
     }
     if command == "import" {
+        if args
+            .iter()
+            .skip(1)
+            .take(2)
+            .any(|arg| arg == "--help" || arg == "-h")
+        {
+            println!("usage: pons import openapi <spec.json> [output]");
+            return Ok(());
+        }
         if args.len() < 3 {
             return Err(CliError::Usage(
                 "import expects openapi <spec.json> [output]".into(),
