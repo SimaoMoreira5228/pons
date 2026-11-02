@@ -1,5 +1,7 @@
 use std::marker::PhantomData;
 
+use axum::http::StatusCode;
+use axum::http::header::CONTENT_TYPE;
 use axum::response::{IntoResponse, Response};
 use pons_core::Schema;
 use pons_ir::{ContentKind, MediaDescriptor, ResponseStatus};
@@ -15,6 +17,10 @@ pub trait ResponseSpec {
     fn media_type() -> Option<&'static str> {
         None
     }
+}
+
+pub trait MediaType {
+    const VALUE: &'static str;
 }
 
 pub struct JsonResponse<const STATUS: u16>;
@@ -77,6 +83,14 @@ impl<T, S> WithResponse<T, S> {
             body: PhantomData,
         }
     }
+
+    pub fn media<M: MediaType>(self) -> WithMedia<T, S, M> {
+        WithMedia {
+            response: self.response,
+            body: PhantomData,
+            media: PhantomData,
+        }
+    }
 }
 
 impl<T, S> IntoResponse for WithResponse<T, S>
@@ -84,21 +98,11 @@ where
     S: ResponseSpec,
 {
     fn into_response(self) -> Response {
-        let mut response = self.response;
-        if is_invalid_response_header(&response) {
-            return response;
-        }
-        *response.status_mut() = axum::http::StatusCode::from_u16(spec_status::<S>())
-            .expect("WithResponse requires a valid HTTP status");
-        if let Some(content_type) = media_type(S::content(), S::media_type()) {
-            let Ok(value) = axum::http::HeaderValue::from_bytes(content_type.as_bytes()) else {
-                return invalid_response_header();
-            };
-            response
-                .headers_mut()
-                .insert(axum::http::header::CONTENT_TYPE, value);
-        }
-        response
+        respond(
+            self.response,
+            spec_status::<S>(),
+            media_type(S::content(), S::media_type()),
+        )
     }
 }
 
@@ -108,11 +112,8 @@ where
     S: ResponseSpec,
 {
     fn describe(cx: &mut OperationCx) {
-        cx.response_with_media::<T>(
-            spec_status::<S>(),
-            S::content(),
-            S::media_type().map(MediaDescriptor::from_declared),
-        );
+        let media = S::media_type().and_then(|declared| checked_media(S::content(), declared, cx));
+        cx.response_with_media::<T>(spec_status::<S>(), S::content(), media);
     }
 }
 
@@ -120,6 +121,42 @@ impl<T, S> StatusResponse for WithResponse<T, S>
 where
     T: Schema,
     S: ResponseSpec,
+{
+}
+
+pub struct WithMedia<T, S, M> {
+    response: Response,
+    body: PhantomData<fn() -> (T, S)>,
+    media: PhantomData<fn() -> M>,
+}
+
+impl<T, S, M> IntoResponse for WithMedia<T, S, M>
+where
+    S: ResponseSpec,
+    M: MediaType,
+{
+    fn into_response(self) -> Response {
+        respond(self.response, spec_status::<S>(), Some(M::VALUE))
+    }
+}
+
+impl<T, S, M> DescribeResponse for WithMedia<T, S, M>
+where
+    T: Schema,
+    S: ResponseSpec,
+    M: MediaType,
+{
+    fn describe(cx: &mut OperationCx) {
+        let media = checked_media(S::content(), M::VALUE, cx);
+        cx.response_with_media::<T>(spec_status::<S>(), S::content(), media);
+    }
+}
+
+impl<T, S, M> StatusResponse for WithMedia<T, S, M>
+where
+    T: Schema,
+    S: ResponseSpec,
+    M: MediaType,
 {
 }
 
@@ -158,6 +195,60 @@ where
 }
 
 impl<T> StatusResponse for WithUnknownStatus<T> where T: StatusResponse {}
+
+fn respond(mut response: Response, status: u16, content_type: Option<&'static str>) -> Response {
+    if is_invalid_response_header(&response) {
+        return response;
+    }
+    *response.status_mut() =
+        StatusCode::from_u16(status).expect("the response wrapper requires a valid HTTP status");
+    if let Some(content_type) = content_type {
+        let Ok(value) = axum::http::HeaderValue::from_bytes(content_type.as_bytes()) else {
+            return invalid_response_header();
+        };
+        response.headers_mut().insert(CONTENT_TYPE, value);
+    }
+    response
+}
+
+fn checked_media(
+    content: ContentKind,
+    declared: &'static str,
+    cx: &mut OperationCx,
+) -> Option<MediaDescriptor> {
+    let header_value = axum::http::HeaderValue::from_bytes(declared.as_bytes()).is_ok();
+    let Some(descriptor) = MediaDescriptor::parse(declared).filter(|_| header_value) else {
+        cx.diagnostic(
+            "PONS-E102",
+            format!(
+                "the response media type {declared:?} is not a valid media type; declare a type and subtype such as application/vnd.acme.report.v1+json"
+            ),
+        );
+        return None;
+    };
+    let problem = descriptor.base() == "application/problem+json";
+    match (content, problem) {
+        (ContentKind::ProblemJson, false) => {
+            cx.diagnostic(
+                "PONS-E102",
+                format!(
+                    "a problem JSON response declares {declared:?}, but it must declare application/problem+json"
+                ),
+            );
+            None
+        }
+        (content, true) if content != ContentKind::ProblemJson => {
+            cx.diagnostic(
+                "PONS-E102",
+                format!(
+                    "the response declares {declared:?}, which is problem JSON, but its content is {content:?}; serve it with ProblemJsonResponse"
+                ),
+            );
+            None
+        }
+        _ => Some(descriptor),
+    }
+}
 
 fn media_type(content: ContentKind, override_type: Option<&'static str>) -> Option<&'static str> {
     override_type.or(match content {

@@ -4,8 +4,8 @@ use actix_web::http::StatusCode;
 use actix_web::test;
 use actix_web::web::Json;
 use pons_actix::{
-    Info, JsonResponse, ProblemJsonResponse, ResponseSpec, Router, WithResponse, WithUnknownStatus,
-    routing::post,
+    Info, JsonResponse, MediaType, ProblemJsonResponse, ResponseSpec, Router, WithMedia,
+    WithResponse, WithUnknownStatus, routing::post,
 };
 use pons_core::Schema;
 use pons_ir::{ContentKind, ResponseStatus};
@@ -32,12 +32,32 @@ impl ResponseSpec for VendorJson {
     }
 }
 
+struct VendorReport;
+
+impl MediaType for VendorReport {
+    const VALUE: &'static str = "application/vnd.acme.report.v1+json; version=1";
+}
+
+struct BrokenMediaType;
+
+impl MediaType for BrokenMediaType {
+    const VALUE: &'static str = "application/json\n";
+}
+
 async fn created_response() -> WithResponse<User, JsonResponse<201>> {
     WithResponse::new(actix_web::HttpResponse::Ok().json(User { id: 1 }))
 }
 
 async fn vendor_response() -> WithResponse<User, VendorJson> {
     WithResponse::new(actix_web::HttpResponse::Ok().json(User { id: 1 }))
+}
+
+async fn report_response() -> WithMedia<User, JsonResponse<200>, VendorReport> {
+    WithResponse::new(actix_web::HttpResponse::Ok().json(User { id: 9 })).media::<VendorReport>()
+}
+
+async fn broken_media_response() -> WithMedia<User, JsonResponse<200>, BrokenMediaType> {
+    WithResponse::new(actix_web::HttpResponse::Ok().json(User { id: 9 })).media::<BrokenMediaType>()
 }
 
 async fn problem_response() -> WithResponse<User, ProblemJsonResponse<422>> {
@@ -98,6 +118,54 @@ async fn a_declared_media_type_replaces_the_inner_content_type() {
         response.headers().get("content-type").unwrap(),
         "application/vnd.acme+json"
     );
+}
+
+#[actix_web::test]
+async fn a_builder_declares_the_served_and_published_media_type() {
+    let router = Router::<()>::new(info()).route("/report", post(report_response));
+    let document = router.into_document().unwrap();
+    let response = &document.operations[0].responses[0];
+    assert_eq!(response.content, ContentKind::Json);
+    let media = response
+        .media
+        .as_ref()
+        .expect("the media type is published");
+    assert_eq!(media.media_type, "application");
+    assert_eq!(media.subtype, "vnd.acme.report.v1+json");
+    assert_eq!(
+        media.parameters.get("version").map(String::as_str),
+        Some("1")
+    );
+
+    let app = test::init_service(
+        Router::<()>::new(info())
+            .route("/report", post(report_response))
+            .into_actix()
+            .unwrap(),
+    )
+    .await;
+    let response =
+        test::call_service(&app, test::TestRequest::post().uri("/report").to_request()).await;
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(
+        response.headers().get("content-type").unwrap(),
+        "application/vnd.acme.report.v1+json; version=1"
+    );
+}
+
+#[actix_web::test]
+async fn an_invalid_declared_media_type_fails_the_description() {
+    let errors = Router::<()>::new(info())
+        .route("/broken", post(broken_media_response))
+        .into_document()
+        .unwrap_err();
+    let message = errors
+        .iter()
+        .map(ToString::to_string)
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(message.contains("PONS-E102"), "{message}");
+    assert!(message.contains("not a valid media type"), "{message}");
 }
 
 #[actix_web::test]

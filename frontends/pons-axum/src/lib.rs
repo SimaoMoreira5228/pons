@@ -45,8 +45,8 @@ use pons_ir::{
 pub use raw_bytes::RawBytes;
 pub use request::{Form, Json, Path, Query};
 pub use response::{
-    BytesResponse, JsonResponse, ProblemJsonResponse, ResponseSpec, TextResponse, WithResponse,
-    WithUnknownStatus,
+    BytesResponse, JsonResponse, MediaType, ProblemJsonResponse, ResponseSpec, TextResponse,
+    WithMedia, WithResponse, WithUnknownStatus,
 };
 pub use routing::MethodRoute;
 pub use sse::{Sse, SseEvent};

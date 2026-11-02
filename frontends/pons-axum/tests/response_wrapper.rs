@@ -1,14 +1,17 @@
+mod support;
+
 use axum::response::IntoResponse;
 use pons_axum::http::StatusCode;
 use pons_axum::routing::post;
 use pons_axum::{
-    HeaderSpec, Info, JsonResponse, ProblemJsonResponse, ResponseSpec, Router, WithHeader,
-    WithResponse, WithUnknownStatus,
+    HeaderSpec, Info, JsonResponse, MediaType, ProblemJsonResponse, ResponseSpec, Router,
+    WithHeader, WithMedia, WithResponse, WithUnknownStatus,
 };
 use pons_core::Schema;
 use pons_ir::{ContentKind, ResponseStatus, TypeRef};
 use serde::Serialize;
 use std::collections::BTreeMap;
+use tower_service::Service;
 
 #[derive(Serialize, Schema)]
 struct User {
@@ -54,12 +57,42 @@ impl ResponseSpec for UndeclaredMediaType {
     }
 }
 
+struct VendorReport;
+
+impl MediaType for VendorReport {
+    const VALUE: &'static str = "application/vnd.acme.report.v1+json; version=1";
+}
+
+struct GenericProblemJson;
+
+impl MediaType for GenericProblemJson {
+    const VALUE: &'static str = "application/problem+json";
+}
+
+struct BrokenMediaType;
+
+impl MediaType for BrokenMediaType {
+    const VALUE: &'static str = "application/json\n";
+}
+
 async fn created_response() -> WithResponse<User, JsonResponse<201>> {
     WithResponse::new(StatusCode::OK.into_response())
 }
 
 async fn vendor_response() -> WithResponse<User, VendorJson> {
     WithResponse::new(StatusCode::OK.into_response())
+}
+
+async fn report_response() -> WithMedia<User, JsonResponse<200>, VendorReport> {
+    WithResponse::new(axum::Json(User { id: 9 }).into_response()).media::<VendorReport>()
+}
+
+async fn generic_problem_response() -> WithMedia<User, JsonResponse<200>, GenericProblemJson> {
+    WithResponse::new(StatusCode::OK.into_response()).media::<GenericProblemJson>()
+}
+
+async fn broken_media_response() -> WithMedia<User, JsonResponse<200>, BrokenMediaType> {
+    WithResponse::new(StatusCode::OK.into_response()).media::<BrokenMediaType>()
 }
 
 async fn unknown_response() -> WithUnknownStatus<axum::Json<User>> {
@@ -163,4 +196,68 @@ fn an_invalid_declared_media_type_degrades_instead_of_panicking() {
     let response = WithResponse::<User, UndeclaredMediaType>::new(StatusCode::OK.into_response())
         .into_response();
     assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+}
+
+#[test]
+fn a_declared_media_type_is_served_and_published() {
+    let document = Router::<()>::new(info())
+        .route("/report", post(report_response))
+        .into_document()
+        .unwrap();
+    let response = &document.operations[0].responses[0];
+    assert_eq!(response.content, ContentKind::Json);
+    assert!(matches!(response.body, Some(TypeRef::Named(_))));
+    let media = response
+        .media
+        .as_ref()
+        .expect("the media type is published");
+    assert_eq!(media.media_type, "application");
+    assert_eq!(media.subtype, "vnd.acme.report.v1+json");
+    assert_eq!(
+        media.parameters.get("version").map(String::as_str),
+        Some("1")
+    );
+
+    let mut app = support::built(Router::<()>::new(info()).route("/report", post(report_response)));
+    let request = pons_axum::http::Request::builder()
+        .method("POST")
+        .uri("/report")
+        .body(axum::body::Body::empty())
+        .unwrap();
+    let response = support::block_on(app.call(request)).unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(
+        response.headers()["content-type"],
+        "application/vnd.acme.report.v1+json; version=1"
+    );
+}
+
+#[test]
+fn an_invalid_declared_media_type_fails_the_description() {
+    let errors = Router::<()>::new(info())
+        .route("/broken", post(broken_media_response))
+        .into_document()
+        .unwrap_err();
+    let message = errors
+        .iter()
+        .map(ToString::to_string)
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(message.contains("PONS-E102"), "{message}");
+    assert!(message.contains("not a valid media type"), "{message}");
+}
+
+#[test]
+fn problem_json_media_on_a_json_response_is_refused() {
+    let errors = Router::<()>::new(info())
+        .route("/problem", post(generic_problem_response))
+        .into_document()
+        .unwrap_err();
+    let message = errors
+        .iter()
+        .map(ToString::to_string)
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(message.contains("PONS-E102"), "{message}");
+    assert!(message.contains("ProblemJsonResponse"), "{message}");
 }
