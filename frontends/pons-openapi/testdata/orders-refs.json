@@ -1,0 +1,264 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "Widgets",
+    "version": "1.0.0"
+  },
+  "paths": {
+    "/widgets": {
+      "get": {
+        "operationId": "widgets.list",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/Page"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The widgets.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/Widget"
+                  }
+                }
+              }
+            }
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          }
+        }
+      },
+      "post": {
+        "operationId": "widgets.create",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/Page"
+          }
+        ],
+        "requestBody": {
+          "$ref": "#/components/requestBodies/WidgetBody"
+        },
+        "responses": {
+          "201": {
+            "$ref": "#/components/responses/WidgetCreated"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          }
+        }
+      }
+    },
+    "/widgets/{widgetId}": {
+      "parameters": [
+        {
+          "$ref": "#/components/parameters/WidgetId"
+        }
+      ],
+      "get": {
+        "operationId": "widgets.get",
+        "responses": {
+          "200": {
+            "description": "The widget.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Widget"
+                }
+              }
+            }
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          }
+        }
+      },
+      "delete": {
+        "operationId": "widgets.delete",
+        "responses": {
+          "204": {
+            "description": "Deleted."
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          }
+        }
+      }
+    },
+    "/widgets/status": {
+      "$ref": "#/components/pathItems/StatusPath"
+    },
+    "/status": {
+      "$ref": "#/paths/~1widgets~1status"
+    },
+    "/loops": {
+      "get": {
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/LoopA"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Still imports."
+          }
+        }
+      }
+    }
+  },
+  "components": {
+    "parameters": {
+      "Page": {
+        "name": "page",
+        "in": "query",
+        "required": false,
+        "schema": {
+          "type": "integer",
+          "format": "int32"
+        }
+      },
+      "WidgetId": {
+        "name": "widgetId",
+        "in": "path",
+        "required": true,
+        "schema": {
+          "type": "string",
+          "format": "uuid"
+        }
+      },
+      "LoopA": {
+        "$ref": "#/components/parameters/LoopB"
+      },
+      "LoopB": {
+        "$ref": "#/components/parameters/LoopA"
+      }
+    },
+    "responses": {
+      "NotFound": {
+        "description": "No widget.",
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/Error"
+            }
+          }
+        },
+        "headers": {
+          "Retry-After": {
+            "schema": {
+              "type": "integer",
+              "format": "int32"
+            }
+          }
+        }
+      },
+      "WidgetCreated": {
+        "description": "The created widget.",
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/Widget"
+            }
+          }
+        },
+        "headers": {
+          "Location": {
+            "$ref": "#/components/headers/Location"
+          }
+        }
+      }
+    },
+    "requestBodies": {
+      "WidgetBody": {
+        "required": true,
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/NewWidget"
+            }
+          }
+        }
+      }
+    },
+    "headers": {
+      "Location": {
+        "description": "The new widget.",
+        "schema": {
+          "type": "string",
+          "format": "uri"
+        }
+      }
+    },
+    "pathItems": {
+      "StatusPath": {
+        "get": {
+          "responses": {
+            "200": {
+              "description": "The service status.",
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "$ref": "#/components/schemas/Status"
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "schemas": {
+      "Widget": {
+        "type": "object",
+        "required": [
+          "id",
+          "name"
+        ],
+        "additionalProperties": false,
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "name": {
+            "type": "string"
+          }
+        }
+      },
+      "NewWidget": {
+        "type": "object",
+        "required": [
+          "name"
+        ],
+        "additionalProperties": false,
+        "properties": {
+          "name": {
+            "type": "string"
+          }
+        }
+      },
+      "Error": {
+        "type": "object",
+        "required": [
+          "message"
+        ],
+        "additionalProperties": false,
+        "properties": {
+          "message": {
+            "type": "string"
+          }
+        }
+      },
+      "Status": {
+        "type": "string",
+        "enum": [
+          "ok",
+          "down"
+        ]
+      }
+    }
+  }
+}

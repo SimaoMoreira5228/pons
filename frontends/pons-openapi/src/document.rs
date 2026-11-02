@@ -7,6 +7,7 @@ use crate::dialect::Dialect;
 use crate::error::ImportError;
 use crate::naming::extensions;
 use crate::operations;
+use crate::refs::Resolver;
 use crate::schemas::TypeLowering;
 use crate::security;
 
@@ -22,16 +23,7 @@ impl Importer {
     }
 }
 
-pub(crate) fn push_dropped(
-    diagnostics: &mut Vec<Diagnostic>,
-    operation: Option<&str>,
-    construct: impl Into<String>,
-) {
-    let construct = construct.into();
-    let message = match operation {
-        Some(operation) => format!("operation {operation}: {construct}"),
-        None => format!("document: {construct}"),
-    };
+pub(crate) fn push_warning(diagnostics: &mut Vec<Diagnostic>, message: String) {
     if diagnostics
         .iter()
         .any(|diagnostic| diagnostic.code == "PONS-W204" && diagnostic.message == message)
@@ -47,6 +39,19 @@ pub(crate) fn push_dropped(
         capability: None,
         ext: BTreeMap::new(),
     });
+}
+
+pub(crate) fn push_dropped(
+    diagnostics: &mut Vec<Diagnostic>,
+    operation: Option<&str>,
+    construct: impl Into<String>,
+) {
+    let construct = construct.into();
+    let message = match operation {
+        Some(operation) => format!("operation {operation}: {construct}"),
+        None => format!("document: {construct}"),
+    };
+    push_warning(diagnostics, message);
 }
 
 pub(crate) fn import(bytes: &[u8]) -> Result<Document, ImportError> {
@@ -89,14 +94,15 @@ pub(crate) fn import(bytes: &[u8]) -> Result<Document, ImportError> {
         .and_then(|components| components.get("securitySchemes"))
         .and_then(Value::as_object);
 
+    let resolver = Resolver::new(&root);
     let mut diagnostics = Vec::new();
-    let auth_schemes = security::schemes(security_schemes, &mut diagnostics)?;
+    let auth_schemes = security::schemes(security_schemes, &resolver, &mut diagnostics)?;
     let mut importer = Importer {
         types: TypeLowering::new(schemas.clone(), dialect),
         diagnostics,
         auth_schemes,
     };
-    let operations = operations::build(&mut importer, &root)?;
+    let operations = operations::build(&mut importer, &root, &resolver)?;
     let (types, schema_diagnostics) = importer.types.into_parts();
     let mut diagnostics = importer.diagnostics;
     diagnostics.extend(schema_diagnostics);

@@ -1,4 +1,3 @@
-mod components;
 mod dialect;
 mod document;
 mod error;
@@ -6,6 +5,7 @@ mod media;
 mod naming;
 mod operations;
 mod parameters;
+mod refs;
 mod request_body;
 mod responses;
 mod schemas;

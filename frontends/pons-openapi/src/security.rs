@@ -5,9 +5,11 @@ use serde_json::{Map, Value};
 
 use crate::document::push_dropped;
 use crate::error::ImportError;
+use crate::refs::{Resolver, Site};
 
-pub(crate) fn schemes(
-    declared: Option<&Map<String, Value>>,
+pub(crate) fn schemes<'v>(
+    declared: Option<&'v Map<String, Value>>,
+    resolver: &'v Resolver<'_>,
     diagnostics: &mut Vec<Diagnostic>,
 ) -> Result<BTreeMap<String, AuthScheme>, ImportError> {
     let mut schemes = BTreeMap::new();
@@ -15,6 +17,9 @@ pub(crate) fn schemes(
         return Ok(schemes);
     };
     for (name, value) in declared {
+        let Some(value) = resolver.resolve(value, Site::Document, diagnostics) else {
+            continue;
+        };
         let Some(object) = value.as_object() else {
             push_dropped(
                 diagnostics,

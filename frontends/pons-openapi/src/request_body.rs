@@ -1,29 +1,30 @@
 use pons_ir::{Body, ContentKind, Direction};
 use serde_json::Value;
 
-use crate::components::{Components, Section};
-use crate::document::Importer;
+use crate::document::{Importer, push_warning};
 use crate::error::ImportError;
 use crate::media;
 use crate::naming::extensions;
+use crate::refs::{Resolver, Site};
 
-pub(crate) fn build(
+pub(crate) fn build<'v>(
     importer: &mut Importer,
     base: &str,
     label: &str,
-    value: Option<&Value>,
-    components: &Components,
+    value: Option<&'v Value>,
+    resolver: &'v Resolver<'_>,
 ) -> Result<Option<Body>, ImportError> {
     let Some(value) = value else {
         return Ok(None);
     };
-    let Some(object) = components
-        .resolve(value, Section::RequestBodies)
-        .and_then(Value::as_object)
-    else {
-        importer.note_dropped(
-            Some(label),
-            "the request body reference cannot be resolved, so the body is dropped",
+    let site = Site::Operation(label);
+    let Some(value) = resolver.resolve(value, site, &mut importer.diagnostics) else {
+        return Ok(None);
+    };
+    let Some(object) = value.as_object() else {
+        push_warning(
+            &mut importer.diagnostics,
+            format!("{site}: the request body is not an object, so the body is dropped"),
         );
         return Ok(None);
     };

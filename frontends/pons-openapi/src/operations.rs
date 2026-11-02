@@ -5,11 +5,11 @@ use pons_ir::{
 };
 use serde_json::{Map, Value};
 
-use crate::components::Components;
 use crate::document::Importer;
 use crate::error::ImportError;
 use crate::naming::{extensions, label as operation_label, slug, words};
 use crate::parameters::{self, DeclaredParameter, Location};
+use crate::refs::{Resolver, Site};
 use crate::request_body;
 use crate::responses;
 use crate::security;
@@ -17,6 +17,7 @@ use crate::security;
 pub(crate) fn build(
     importer: &mut Importer,
     root: &Map<String, Value>,
+    resolver: &Resolver<'_>,
 ) -> Result<Vec<Operation>, ImportError> {
     let Some(paths) = root.get("paths") else {
         return Ok(Vec::new());
@@ -26,10 +27,12 @@ pub(crate) fn build(
             "the OpenAPI paths value is not an object".into(),
         ));
     };
-    let components = Components::new(root);
     let root_security = root.get("security");
     let mut operations = Vec::new();
     for (path, item) in paths {
+        let Some(item) = resolver.resolve(item, Site::Path(path), &mut importer.diagnostics) else {
+            continue;
+        };
         let Some(item) = item.as_object() else {
             importer.note_dropped(
                 None,
@@ -37,19 +40,10 @@ pub(crate) fn build(
             );
             continue;
         };
-        if item.contains_key("$ref") {
-            importer.note_dropped(
-                None,
-                format!(
-                    "the path item {path:?} is a reference, which this importer does not follow"
-                ),
-            );
-            continue;
-        }
         let shared = parameters::read(
             item.get("parameters"),
-            path,
-            &components,
+            Site::Path(path),
+            resolver,
             &mut importer.diagnostics,
         )?;
         for (method, name) in [
@@ -71,7 +65,7 @@ pub(crate) fn build(
                 value,
                 &shared,
                 root_security,
-                &components,
+                resolver,
             )?);
         }
         if item.contains_key("trace") {
@@ -93,7 +87,7 @@ fn build_operation(
     value: &Value,
     shared: &[DeclaredParameter],
     root_security: Option<&Value>,
-    components: &Components,
+    resolver: &Resolver<'_>,
 ) -> Result<Operation, ImportError> {
     let Some(object) = value.as_object() else {
         return Err(ImportError::Document(format!(
@@ -107,8 +101,8 @@ fn build_operation(
 
     let own = parameters::read(
         object.get("parameters"),
-        &label,
-        components,
+        Site::Operation(&label),
+        resolver,
         &mut importer.diagnostics,
     )?;
     let parameters = parameters::merge(shared, own);
@@ -167,13 +161,7 @@ fn build_operation(
         }
     }
 
-    let body = request_body::build(
-        importer,
-        &base,
-        &label,
-        object.get("requestBody"),
-        components,
-    )?;
+    let body = request_body::build(importer, &base, &label, object.get("requestBody"), resolver)?;
     let has_body = body.is_some();
 
     let mut headers = Vec::new();
@@ -213,7 +201,7 @@ fn build_operation(
         &label,
         method,
         object.get("responses"),
-        components,
+        resolver,
     )?;
     let security_value = object.get("security").or(root_security);
     let auth = security::requirement(

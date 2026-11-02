@@ -4,11 +4,11 @@ use pons_ir::{
 };
 use serde_json::Value;
 
-use crate::components::{Components, Section};
 use crate::document::{Importer, push_dropped};
 use crate::error::ImportError;
 use crate::media;
 use crate::naming::{extensions, slug, words};
+use crate::refs::{Resolver, Site};
 
 #[derive(Clone, Copy)]
 enum StatusKey {
@@ -17,13 +17,13 @@ enum StatusKey {
     Default,
 }
 
-pub(crate) fn build(
+pub(crate) fn build<'v>(
     importer: &mut Importer,
     base: &str,
     label: &str,
     method: Method,
-    value: Option<&Value>,
-    components: &Components,
+    value: Option<&'v Value>,
+    resolver: &'v Resolver<'_>,
 ) -> Result<(Vec<Response>, Vec<ErrorResponse>), ImportError> {
     let Some(value) = value else {
         return Ok((Vec::new(), Vec::new()));
@@ -60,14 +60,16 @@ pub(crate) fn build(
             );
             continue;
         };
-        let Some(response) = components
-            .resolve(value, Section::Responses)
-            .and_then(Value::as_object)
+        let Some(response) =
+            resolver.resolve(value, Site::Operation(label), &mut importer.diagnostics)
         else {
+            continue;
+        };
+        let Some(response) = response.as_object() else {
             push_dropped(
                 &mut importer.diagnostics,
                 Some(label),
-                format!("the {key} response reference cannot be resolved and is dropped"),
+                format!("the {key} response is not an object and is dropped"),
             );
             continue;
         };
@@ -127,6 +129,7 @@ pub(crate) fn build(
             label,
             key,
             response.get("headers"),
+            resolver,
         )?;
         let selected = if forbidden {
             if response.get("content").is_some() {
@@ -249,12 +252,13 @@ fn status_key(key: &str) -> Option<StatusKey> {
         .then_some(StatusKey::Exact(status))
 }
 
-fn headers(
+fn headers<'v>(
     importer: &mut Importer,
     prefix: &str,
     label: &str,
     status: &str,
-    value: Option<&Value>,
+    value: Option<&'v Value>,
+    resolver: &'v Resolver<'_>,
 ) -> Result<Vec<ResponseHeader>, ImportError> {
     let Some(headers) = value else {
         return Ok(Vec::new());
@@ -266,6 +270,11 @@ fn headers(
     };
     let mut result = Vec::new();
     for (name, header) in headers {
+        let Some(header) =
+            resolver.resolve(header, Site::Operation(label), &mut importer.diagnostics)
+        else {
+            continue;
+        };
         let Some(header) = header.as_object() else {
             push_dropped(
                 &mut importer.diagnostics,

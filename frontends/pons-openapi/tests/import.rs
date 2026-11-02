@@ -5,11 +5,16 @@ use pons_ir::{
 };
 
 const FIXTURE: &str = include_str!("../testdata/orders.json");
+const REFS_FIXTURE: &str = include_str!("../testdata/orders-refs.json");
 const FIXTURE_30: &str = include_str!("../testdata/orders-30.json");
 const YAML_FIXTURE: &str = include_str!("../testdata/orders.yaml");
 
 fn document() -> pons_ir::Document {
     pons_openapi::import(FIXTURE.as_bytes()).expect("the fixture imports")
+}
+
+fn refs_document() -> pons_ir::Document {
+    pons_openapi::import(REFS_FIXTURE.as_bytes()).expect("the reference fixture imports")
 }
 
 fn yaml_document() -> pons_ir::Document {
@@ -325,6 +330,9 @@ fn keeps_an_api_key_scheme_its_location() {
         "in": "header",
         "name": "X-API-Key"
     });
+    raw["components"]["securitySchemes"]["alias"] = serde_json::json!({
+        "$ref": "#/components/securitySchemes/key"
+    });
     let document = pons_openapi::import(&serde_json::to_vec(&raw).unwrap()).unwrap();
     assert_eq!(
         document.auth_schemes["key"],
@@ -333,6 +341,7 @@ fn keeps_an_api_key_scheme_its_location() {
             name: "X-API-Key".into(),
         }
     );
+    assert_eq!(document.auth_schemes["alias"], document.auth_schemes["key"]);
 }
 
 #[test]
@@ -458,6 +467,144 @@ fn translates_a_30_document() {
     };
     assert!(warned("properties.total"), "{diagnostics:#?}");
     assert!(warned("properties.attachment"), "{diagnostics:#?}");
+}
+
+#[test]
+fn follows_component_references_across_operations() {
+    let document = refs_document();
+    document
+        .validate()
+        .expect("the imported reference document is valid");
+
+    let list = operation(&document, "widgets.list");
+    let create = operation(&document, "widgets.create");
+
+    let query = |operation: &pons_ir::Operation| {
+        let reference = named(operation.query.as_ref().expect("the query is present"));
+        let (fields, _) = structure(&document.types[&reference.id].definition);
+        fields
+            .iter()
+            .find(|field| field.wire == "page")
+            .expect("the shared page parameter resolves")
+            .clone()
+    };
+    let listed_page = query(list);
+    let created_page = query(create);
+    assert_eq!(listed_page.presence, Presence::Optional);
+    assert_eq!(created_page.presence, Presence::Optional);
+    assert!(matches!(
+        listed_page.ty,
+        TypeRef::Inline(InlineType::Int { .. })
+    ));
+
+    let not_found = |operation: &pons_ir::Operation| {
+        operation
+            .errors
+            .iter()
+            .find(|error| error.status == ErrorStatus::Exact(404))
+            .expect("the shared NotFound response resolves")
+            .clone()
+    };
+    for error in [not_found(list), not_found(create)] {
+        assert_eq!(error.content, ErrorContent::Json);
+        assert_eq!(
+            error.body,
+            Some(TypeRef::Named(NamedRef {
+                id: "openapi::Error#output".into(),
+                variant: None,
+            }))
+        );
+        assert_eq!(error.headers.len(), 1);
+        assert_eq!(error.headers[0].wire, "Retry-After");
+        assert_eq!(error.headers[0].presence, Presence::Optional);
+    }
+
+    let body = create
+        .body
+        .as_ref()
+        .expect("the shared request body resolves");
+    assert!(body.required);
+    assert_eq!(
+        body.ty,
+        TypeRef::Named(NamedRef {
+            id: "openapi::NewWidget#input".into(),
+            variant: None,
+        })
+    );
+
+    let created = create
+        .responses
+        .first()
+        .expect("the created response is present");
+    assert_eq!(created.status, ResponseStatus::Exact(201));
+    assert_eq!(
+        created.body,
+        Some(TypeRef::Named(NamedRef {
+            id: "openapi::Widget#output".into(),
+            variant: None,
+        }))
+    );
+    assert_eq!(created.headers.len(), 1);
+    assert_eq!(created.headers[0].wire, "Location");
+
+    for label in ["widgets_status.get", "status.get"] {
+        let status = operation(&document, label);
+        assert_eq!(status.responses.len(), 1);
+        assert_eq!(
+            status.responses[0].body,
+            Some(TypeRef::Named(NamedRef {
+                id: "openapi::Status#output".into(),
+                variant: None,
+            })),
+            "{label} comes from the referenced path item"
+        );
+    }
+
+    let loops = operation(&document, "loops.get");
+    assert!(loops.query.is_none(), "the cyclic parameter is dropped");
+    assert!(document.diagnostics.iter().any(|diagnostic| {
+        diagnostic.code == "PONS-W204"
+            && diagnostic.message.contains("loops.get")
+            && diagnostic.message.contains("#/components/parameters/LoopA")
+            && diagnostic.message.contains("cycle")
+    }));
+}
+
+#[test]
+fn reports_missing_and_non_local_references() {
+    let raw = serde_json::json!({
+        "openapi": "3.1.0",
+        "info": {"title": "x", "version": "1"},
+        "paths": {
+            "/things": {
+                "get": {
+                    "parameters": [
+                        {"$ref": "#/components/parameters/Missing"},
+                        {"$ref": "other.yaml#/components/parameters/Remote"}
+                    ],
+                    "responses": {"200": {"description": "ok"}}
+                }
+            }
+        }
+    });
+    let document = pons_openapi::import(&serde_json::to_vec(&raw).unwrap())
+        .expect("the broken references do not abort the import");
+    document
+        .validate()
+        .expect("the rest of the document is valid");
+
+    let get = operation(&document, "things.get");
+    assert!(get.query.is_none());
+
+    let reported = |needle: &str| {
+        document.diagnostics.iter().any(|diagnostic| {
+            diagnostic.code == "PONS-W204"
+                && diagnostic.message.contains("things.get")
+                && diagnostic.message.contains(needle)
+        })
+    };
+    assert!(reported("#/components/parameters/Missing"));
+    assert!(reported("other.yaml#/components/parameters/Remote"));
 }
 
 #[test]
