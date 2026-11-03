@@ -212,10 +212,17 @@ fn prepare(schema: &Value, components: &Map<String, Value>) -> Value {
 fn rewrite_references(value: &mut Value) {
     match value {
         Value::Object(object) => {
-            if let Some(Value::String(reference)) = object.get_mut("$ref")
-                && let Some(name) = reference.strip_prefix(SCHEMA_PREFIX)
+            if let Some(Value::String(reference)) = object.get_mut("$ref") {
+                rewrite_component_reference(reference);
+            }
+            if let Some(Value::Object(discriminator)) = object.get_mut("discriminator")
+                && let Some(Value::Object(mapping)) = discriminator.get_mut("mapping")
             {
-                *reference = format!("{DEFS_PREFIX}{name}");
+                for target in mapping.values_mut() {
+                    if let Value::String(reference) = target {
+                        rewrite_component_reference(reference);
+                    }
+                }
             }
             for value in object.values_mut() {
                 rewrite_references(value);
@@ -223,6 +230,12 @@ fn rewrite_references(value: &mut Value) {
         }
         Value::Array(items) => items.iter_mut().for_each(rewrite_references),
         _ => {}
+    }
+}
+
+fn rewrite_component_reference(reference: &mut String) {
+    if let Some(name) = reference.strip_prefix(SCHEMA_PREFIX) {
+        *reference = format!("{DEFS_PREFIX}{name}");
     }
 }
 
