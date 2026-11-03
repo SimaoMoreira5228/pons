@@ -7,9 +7,10 @@ use pons_ir::{
 };
 use serde_json::{Map, Value};
 
+use crate::composition;
 use crate::scalars::{DROPPED_KEYWORD, lower_integer, lower_number, lower_string, string_type};
 
-const UNEXPRESSIBLE: &str = "PONS-W202";
+pub(crate) const UNEXPRESSIBLE: &str = "PONS-W202";
 
 pub struct RootType<'a> {
     pub id: &'a str,
@@ -41,11 +42,11 @@ pub fn lower(cx: &mut TypeCx, mut schema: Value, root: RootType<'_>) -> TypeRef 
 }
 
 #[derive(Clone, Copy)]
-struct Context<'a> {
-    base: &'a str,
-    root_id: &'a str,
-    direction: Direction,
-    defs: &'a Map<String, Value>,
+pub(crate) struct Context<'a> {
+    pub(crate) base: &'a str,
+    pub(crate) root_id: &'a str,
+    pub(crate) direction: Direction,
+    pub(crate) defs: &'a Map<String, Value>,
 }
 
 fn take_definitions(value: &mut Value) -> Map<String, Value> {
@@ -70,6 +71,9 @@ fn lower_named(cx: &mut TypeCx, context: &Context<'_>, schema: &Value) -> TypeKi
             inner: lower_ref(cx, context, schema),
         };
     };
+    if let Some(kind) = composition::named(cx, context, object) {
+        return kind;
+    }
     if let Some(inner) = composite(cx, context, object) {
         return TypeKind::Newtype { inner };
     }
@@ -92,13 +96,6 @@ fn composite(
     context: &Context<'_>,
     object: &Map<String, Value>,
 ) -> Option<TypeRef> {
-    if object.contains_key("discriminator") {
-        return Some(opaque(
-            cx,
-            "json-schema:discriminator",
-            "a discriminator selects a variant at runtime and has no Pons enum representation",
-        ));
-    }
     for keyword in ["oneOf", "anyOf"] {
         if let Some(branches) = object.get(keyword) {
             return Some(lower_branches(cx, context, keyword, branches));
@@ -217,7 +214,7 @@ fn lower_struct(cx: &mut TypeCx, context: &Context<'_>, object: &Map<String, Val
     }
 }
 
-fn lower_field(
+pub(crate) fn lower_field(
     cx: &mut TypeCx,
     context: &Context<'_>,
     wire: &str,
@@ -266,7 +263,7 @@ fn access_of(schema: &Value) -> Option<Access> {
     None
 }
 
-fn lower_ref(cx: &mut TypeCx, context: &Context<'_>, schema: &Value) -> TypeRef {
+pub(crate) fn lower_ref(cx: &mut TypeCx, context: &Context<'_>, schema: &Value) -> TypeRef {
     match schema {
         Value::Bool(true) => TypeRef::Inline(InlineType::Any),
         Value::Bool(false) => opaque(
@@ -290,6 +287,9 @@ fn lower_object_ref(
 ) -> TypeRef {
     if let Some(reference) = object.get("$ref").and_then(Value::as_str) {
         return resolve_ref(cx, context, reference);
+    }
+    if object.contains_key("discriminator") {
+        return discriminator_inline(cx, context, object);
     }
     if let Some(ty) = composite(cx, context, object) {
         return ty;
@@ -509,6 +509,40 @@ fn inline_enum(cx: &mut TypeCx, context: &Context<'_>, object: &Map<String, Valu
             "a string enum appears inline without a title, so it has no stable definition name",
         );
     };
+    inline_named(cx, context, title, object)
+}
+
+fn discriminator_inline(
+    cx: &mut TypeCx,
+    context: &Context<'_>,
+    object: &Map<String, Value>,
+) -> TypeRef {
+    let has_union = ["oneOf", "anyOf"]
+        .iter()
+        .any(|keyword| object.get(*keyword).is_some_and(Value::is_array));
+    if has_union {
+        if let Some(title) = object.get("title").and_then(Value::as_str) {
+            return inline_named(cx, context, title, object);
+        }
+        return opaque(
+            cx,
+            "json-schema:discriminator",
+            "a discriminated union appears inline without a title, so it has no stable definition name",
+        );
+    }
+    opaque(
+        cx,
+        "json-schema:discriminator",
+        "a discriminator selects a variant at runtime and has no Pons enum representation",
+    )
+}
+
+fn inline_named(
+    cx: &mut TypeCx,
+    context: &Context<'_>,
+    title: &str,
+    object: &Map<String, Value>,
+) -> TypeRef {
     let id = member_id(context.base, title, context.direction);
     let origin = member_origin(context.base, title);
     let name = words(title);
@@ -537,7 +571,7 @@ fn resolve_ref(cx: &mut TypeCx, context: &Context<'_>, reference: &str) -> TypeR
     define_definition(cx, context, name)
 }
 
-fn definition_name(reference: &str) -> Option<&str> {
+pub(crate) fn definition_name(reference: &str) -> Option<&str> {
     let pointer = reference.strip_prefix('#')?;
     let name = pointer
         .strip_prefix("/$defs/")
@@ -570,7 +604,7 @@ fn define_definition(cx: &mut TypeCx, context: &Context<'_>, name: &str) -> Type
     )
 }
 
-fn opaque(cx: &mut TypeCx, codec: &str, message: impl Into<String>) -> TypeRef {
+pub(crate) fn opaque(cx: &mut TypeCx, codec: &str, message: impl Into<String>) -> TypeRef {
     cx.push_type_diagnostic(UNEXPRESSIBLE, message);
     TypeRef::Inline(InlineType::Opaque {
         codec: codec.to_owned(),
@@ -613,7 +647,7 @@ fn member_origin(base: &str, name: &str) -> String {
     format!("{base}::{name}")
 }
 
-fn words(source: &str) -> Name {
+pub(crate) fn words(source: &str) -> Name {
     let mut result = Vec::new();
     let mut current = String::new();
     let chars: Vec<char> = source.chars().collect();
