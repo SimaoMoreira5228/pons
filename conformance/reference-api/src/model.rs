@@ -120,6 +120,12 @@ pub struct User {
 }
 
 #[derive(Serialize, Schema)]
+pub struct Report {
+    pub id: i64,
+    pub title: String,
+}
+
+#[derive(Serialize, Schema)]
 #[serde(rename_all = "snake_case")]
 pub enum Delivery {
     Email { address: String },

@@ -4,16 +4,18 @@ use std::collections::BTreeMap;
 use std::convert::Infallible;
 
 use axum::extract::FromRequestParts;
+use axum::response::IntoResponse;
 use pons_axum::routing::{get_with, post_with};
 use pons_axum::{
-    Auth, AuthSpec, DescribeRequest, Header, HeaderSpec, Info, Json, NoContent, OperationCx,
-    OperationMeta, OptionalHeader, Path, Query, Router, WithStatus,
+    Auth, AuthSpec, DescribeRequest, Header, HeaderSpec, Info, Json, JsonResponse, MediaType,
+    NoContent, OperationCx, OperationMeta, OptionalHeader, Path, Query, Router, WithMedia,
+    WithResponse, WithStatus,
 };
 use pons_ir::{ApiKeyLocation, AuthScheme, CredentialLocator};
 
 pub use model::{
     AccountLocked, CreateUser, Delivery, InvalidCredentials, LoginRequest, Notification,
-    RateLimited, RoleFilter, Session, User, UsersGetQuery,
+    RateLimited, Report, RoleFilter, Session, User, UsersGetQuery,
 };
 
 struct SessionGuard;
@@ -126,6 +128,23 @@ async fn latest_delivery() -> axum::Json<Delivery> {
     })
 }
 
+struct VendorReport;
+
+impl MediaType for VendorReport {
+    const VALUE: &'static str = "application/vnd.acme.report.v1+json";
+}
+
+async fn vendor_report() -> WithMedia<Report, JsonResponse<200>, VendorReport> {
+    WithResponse::new(
+        axum::Json(Report {
+            id: 1,
+            title: "vendor".into(),
+        })
+        .into_response(),
+    )
+    .media::<VendorReport>()
+}
+
 pub fn router() -> Router {
     Router::<()>::new(Info {
         title: "Pons Conformance API".into(),
@@ -193,6 +212,13 @@ pub fn router() -> Router {
         get_with(
             latest_delivery,
             OperationMeta::new("notifications.delivery").summary("Read the latest delivery."),
+        ),
+    )
+    .route(
+        "/reports/vendor",
+        get_with(
+            vendor_report,
+            OperationMeta::new("reports.vendor").summary("Read the vendor report."),
         ),
     )
 }

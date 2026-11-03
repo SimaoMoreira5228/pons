@@ -44,6 +44,11 @@ data class User(
     val nickname: String?,
 )
 
+data class Report(
+    val id: Long,
+    val title: String,
+)
+
 enum class RoleFilter {
     @JsonProperty("admin")
     ADMIN,

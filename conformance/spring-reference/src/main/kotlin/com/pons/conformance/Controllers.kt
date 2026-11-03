@@ -89,6 +89,14 @@ class NotificationController {
     fun delivery(): Delivery = Delivery.Push(device = "phone")
 }
 
+@RestController
+@RequestMapping("/reports")
+class ReportController {
+    @GetMapping("/vendor", produces = ["application/vnd.acme.report.v1+json"])
+    @PonsOperation(name = "reports.vendor", summary = "Read the vendor report.")
+    fun vendor(): Report = Report(id = 1, title = "vendor")
+}
+
 @RestControllerAdvice
 class ApiErrors {
     @ExceptionHandler(AccountLockedException::class)
