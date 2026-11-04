@@ -37,4 +37,6 @@ pub fn bin_directories() -> Vec<PathBuf> {
     }
 }
 
+pub(crate) mod options;
 pub(crate) mod runtime;
+pub(crate) mod type_check;
