@@ -1,0 +1,18 @@
+[package]
+name = "pons-specta"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "Lower specta Type definitions into Pons IR"
+keywords = ["api", "ir", "specta", "typescript"]
+categories = ["development-tools", "web-programming"]
+
+[dependencies]
+pons-core = { path = "../pons-core" }
+pons-ir = { path = "../pons-ir" }
+serde.workspace = true
+specta.workspace = true
+
+[dev-dependencies]
+serde_json.workspace = true
