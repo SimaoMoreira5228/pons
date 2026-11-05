@@ -270,7 +270,7 @@ fn a_bytes_response_runs_its_validator_on_the_read_bytes() {
         .files;
     let transport = files
         .iter()
-        .find(|file| file.path == "runtime/transport.ts")
+        .find(|file| file.path == "runtime/transport/request.ts")
         .unwrap();
     assert!(transport.content.contains("responseKind !== \"bytes\""));
     assert!(transport.content.contains("responseKind === \"bytes\""));

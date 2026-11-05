@@ -69,14 +69,7 @@ pub fn run_bun_with(files: &[GeneratedFile], harness: &str, runtime: Runtime) {
 fn install_runtime_package(output: &Path) {
     let source = Path::new(env!("CARGO_MANIFEST_DIR")).join("runtime");
     let installed = output.join("runtime");
-    fs::create_dir_all(&installed).unwrap();
-    for entry in fs::read_dir(source).unwrap() {
-        let entry = entry.unwrap();
-        let name = entry.file_name();
-        if name.to_string_lossy().ends_with(".ts") || name == "package.json" {
-            fs::copy(entry.path(), installed.join(&name)).unwrap();
-        }
-    }
+    copy_runtime(&source, &installed);
     let scope = output.join("node_modules").join("@pons");
     fs::create_dir_all(&scope).unwrap();
     let link = scope.join("runtime");
@@ -84,6 +77,23 @@ fn install_runtime_package(output: &Path) {
     std::os::unix::fs::symlink(&installed, &link).unwrap();
     #[cfg(windows)]
     std::os::windows::fs::symlink_dir(&installed, &link).unwrap();
+}
+
+fn copy_runtime(source: &Path, destination: &Path) {
+    fs::create_dir_all(destination).unwrap();
+    for entry in fs::read_dir(source).unwrap() {
+        let entry = entry.unwrap();
+        let target = destination.join(entry.file_name());
+        if entry.path().is_dir() {
+            copy_runtime(&entry.path(), &target);
+        } else {
+            let name = entry.file_name();
+            let name = name.to_string_lossy();
+            if name.ends_with(".ts") || name == "package.json" {
+                fs::copy(entry.path(), target).unwrap();
+            }
+        }
+    }
 }
 
 pub fn operation(id: Value, path: &str) -> Value {

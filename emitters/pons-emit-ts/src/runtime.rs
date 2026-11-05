@@ -11,6 +11,42 @@ const MODULES: &[(&str, &str)] = &[
     ("pagination.ts", include_str!("../runtime/pagination.ts")),
     ("credentials.ts", include_str!("../runtime/credentials.ts")),
     ("transport.ts", include_str!("../runtime/transport.ts")),
+    (
+        "transport/spec.ts",
+        include_str!("../runtime/transport/spec.ts"),
+    ),
+    (
+        "transport/failures.ts",
+        include_str!("../runtime/transport/failures.ts"),
+    ),
+    (
+        "transport/preflight.ts",
+        include_str!("../runtime/transport/preflight.ts"),
+    ),
+    (
+        "transport/status.ts",
+        include_str!("../runtime/transport/status.ts"),
+    ),
+    (
+        "transport/retry.ts",
+        include_str!("../runtime/transport/retry.ts"),
+    ),
+    (
+        "transport/response-body.ts",
+        include_str!("../runtime/transport/response-body.ts"),
+    ),
+    (
+        "transport/response.ts",
+        include_str!("../runtime/transport/response.ts"),
+    ),
+    (
+        "transport/redirect.ts",
+        include_str!("../runtime/transport/redirect.ts"),
+    ),
+    (
+        "transport/request.ts",
+        include_str!("../runtime/transport/request.ts"),
+    ),
     ("websocket.ts", include_str!("../runtime/websocket.ts")),
 ];
 
@@ -143,6 +179,14 @@ mod tests {
                 "\"../client.js\"".to_owned(),
                 "\"../errors.js\"".to_owned(),
                 "\"../types.js\"".to_owned(),
+                "\"../../client.js\"".to_owned(),
+                "\"../../errors.js\"".to_owned(),
+                "\"../../types.js\"".to_owned(),
+                "\"../codec.js\"".to_owned(),
+                "\"../credentials.js\"".to_owned(),
+                "\"../stream.js\"".to_owned(),
+                "\"../validate.js\"".to_owned(),
+                "\"../wire.js\"".to_owned(),
             ]),
             "the runtime reaches the client only through these names, so the package root has to \
              be the directory they leave, one below the client that wrote them"

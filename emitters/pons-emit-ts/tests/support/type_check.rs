@@ -245,16 +245,8 @@ pub(crate) fn install_package(output: &Path, name: &str) {
 pub(crate) fn install_runtime_package(output: &Path) -> Vec<String> {
     let source = Path::new(env!("CARGO_MANIFEST_DIR")).join("runtime");
     let installed = output.join("runtime");
-    fs::create_dir_all(&installed).unwrap();
     let mut written = Vec::new();
-    for entry in fs::read_dir(&source).unwrap() {
-        let entry = entry.unwrap();
-        let name = entry.file_name();
-        if name.to_string_lossy().ends_with(".ts") {
-            fs::copy(entry.path(), installed.join(&name)).unwrap();
-            written.push(format!("runtime/{}", name.to_string_lossy()));
-        }
-    }
+    copy_runtime(&source, &installed, Path::new("runtime"), &mut written);
     fs::copy(source.join("package.json"), installed.join("package.json")).unwrap();
     let scope = output.join("node_modules").join("@pons");
     fs::create_dir_all(&scope).unwrap();
@@ -264,6 +256,26 @@ pub(crate) fn install_runtime_package(output: &Path) -> Vec<String> {
     #[cfg(windows)]
     std::os::windows::fs::symlink_dir(&installed, &link).unwrap();
     written
+}
+
+fn copy_runtime(source: &Path, destination: &Path, relative: &Path, written: &mut Vec<String>) {
+    fs::create_dir_all(destination).unwrap();
+    for entry in fs::read_dir(source).unwrap() {
+        let entry = entry.unwrap();
+        let path = entry.path();
+        let relative = relative.join(entry.file_name());
+        if path.is_dir() {
+            copy_runtime(
+                &path,
+                &destination.join(entry.file_name()),
+                &relative,
+                written,
+            );
+        } else if entry.file_name().to_string_lossy().ends_with(".ts") {
+            fs::copy(&path, destination.join(entry.file_name())).unwrap();
+            written.push(relative.to_string_lossy().replace('\\', "/"));
+        }
+    }
 }
 
 pub(crate) fn written_sources(root: &Path) -> Vec<String> {

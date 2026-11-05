@@ -26,7 +26,9 @@ fn emits_a_client_for_the_contract_fixture() {
     let errors = &files["errors.ts"];
     let auth = &files["operations/auth.ts"];
     let events = &files["operations/events.ts"];
-    let transport = &files["runtime/transport.ts"];
+    let transport = &files["runtime/transport/request.ts"];
+    let retry = &files["runtime/transport/retry.ts"];
+    let response = &files["runtime/transport/response.ts"];
     let credentials = &files["runtime/credentials.ts"];
     let stream = &files["runtime/stream.ts"];
     assert!(types.contains("export type User"));
@@ -60,19 +62,19 @@ fn emits_a_client_for_the_contract_fixture() {
     assert!(transport.contains("_tag: \"TransportHookError\""));
     assert!(client.contains("export type RetryOptions"));
     assert!(client.contains("retry?: RetryOptions | false"));
-    assert!(transport.contains("fetchWithRetry"));
-    assert!(transport.contains("retry-after"));
-    assert!(transport.contains("Date.parse(retryAfterText)"));
-    assert!(transport.contains("idempotent: boolean"));
-    assert!(transport.contains("setTimeout"));
+    assert!(retry.contains("fetchWithRetry"));
+    assert!(retry.contains("retry-after"));
+    assert!(retry.contains("Date.parse(retryAfterText)"));
+    assert!(retry.contains("idempotent: boolean"));
+    assert!(retry.contains("setTimeout"));
     assert!(transport.contains("_tag: \"TimeoutError\""));
     assert!(transport.contains("_tag: \"AbortedError\""));
     assert!(auth.contains("ApiError<number, Extract<Types.LoginError"));
     assert!(auth.contains("ApiError<number"));
     assert!(transport.contains("headers: declaredError.headers"));
     assert!(errors.contains("ResponseWithHeaders"));
-    assert!(transport.contains("withResponseHeaders"));
-    assert!(transport.contains("return { value, headers: responseHeaders"));
+    assert!(response.contains("withResponseHeaders"));
+    assert!(response.contains("return { value, headers: responseHeaders"));
     assert!(client.contains("export type TokenStore"));
     assert!(
         client.contains("A store returns a `{ value, ...metadata }` record, never a bare string")
@@ -104,7 +106,7 @@ fn emits_a_client_for_the_contract_fixture() {
         transport
             .contains("responseMediaTypeMatches(actualContentType, expectedContentType ?? \"\")")
     );
-    assert!(transport.contains("function mediaTypeMatches"));
+    assert!(response.contains("function mediaTypeMatches"));
     assert!(transport.contains("const text = await readResponseText(response, responseContent)"));
     assert!(transport.contains("rawValue = parseJson(text, preserveWideIntegers)"));
     assert!(transport.contains("invalid JSON response"));
@@ -151,7 +153,7 @@ fn emits_auth_scopes_for_custom_adapters() {
     let output = crate::emit(&document).unwrap();
     assert!(file(&output, "operations/events.ts").contains("\"tenant\": [\"events:read\"]"));
     assert!(
-        file(&output, "runtime/transport.ts")
+        file(&output, "runtime/transport/request.ts")
             .contains("Object.prototype.hasOwnProperty.call(authScopes, scheme)")
     );
 }
@@ -391,7 +393,7 @@ fn emits_unknown_success_statuses() {
     document.operations[0].responses[0].status = ResponseStatus::Unknown;
     let output = crate::emit(&document).unwrap();
     let auth = file(&output, "operations/auth.ts");
-    let transport = file(&output, "runtime/transport.ts");
+    let transport = file(&output, "runtime/transport/request.ts");
     assert!(auth.contains("ResponseWithStatus<"));
     assert!(auth.contains("status: \"unknown\""));
     assert!(
@@ -505,7 +507,7 @@ fn preserves_wide_integers_in_error_response_headers() {
     document.common_errors.push(common);
 
     let output = crate::emit(&document).unwrap();
-    let transport = file(&output, "runtime/transport.ts");
+    let transport = file(&output, "runtime/transport/response.ts");
     assert!(file(&output, "operations/auth.ts").contains("\"X-Retry-Count\": [bigint]"));
     assert!(transport.contains(
         "decodeWire(parseJson(value, preserveWideIntegers), schema, preserveWideIntegers, opaque)"
@@ -583,7 +585,7 @@ fn emits_ndjson_streams_and_rejects_other_stream_kinds() {
     };
     let files = crate::emit(&document).unwrap();
     assert!(file(&files, "runtime/stream.ts").contains("readNdjson"));
-    assert!(file(&files, "runtime/transport.ts").contains("application/x-ndjson"));
+    assert!(file(&files, "runtime/transport/request.ts").contains("application/x-ndjson"));
     assert!(file(&files, "operations/events.ts").contains("AsyncIterable<Result"));
 
     document.operations[stream_index]

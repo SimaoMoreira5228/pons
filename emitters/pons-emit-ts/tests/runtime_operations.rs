@@ -53,7 +53,7 @@ fn generated_client_preflights_request_inputs() {
         .files;
     let optional_client = optional_files
         .iter()
-        .find(|file| file.path == "runtime/transport.ts")
+        .find(|file| file.path == "runtime/transport/request.ts")
         .unwrap();
     assert!(optional_client.content.contains("preflightPath"));
     assert!(
@@ -68,7 +68,7 @@ fn generated_client_preflights_request_inputs() {
     let url = optional_client.content.find("const url = new URL").unwrap();
     let fetch = optional_client
         .content
-        .find("const response = await fetchWithRetry")
+        .find("const redirectResult = await fetchWithRedirect")
         .unwrap();
     assert!(preflight < url && url < fetch);
 

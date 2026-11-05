@@ -50,17 +50,27 @@ fn run_websocket_harness() {
 fn install_runtime_package(directory: &Path) {
     let source = Path::new(env!("CARGO_MANIFEST_DIR")).join("runtime");
     let installed = directory.join("runtime");
-    fs::create_dir_all(&installed).unwrap();
-    for entry in fs::read_dir(source).unwrap() {
-        let entry = entry.unwrap();
-        let name = entry.file_name();
-        if name.to_string_lossy().ends_with(".ts") || name == "package.json" {
-            fs::copy(entry.path(), installed.join(&name)).unwrap();
-        }
-    }
+    copy_runtime(&source, &installed);
     let scope = directory.join("node_modules").join("@pons");
     fs::create_dir_all(&scope).unwrap();
     link(&installed, &scope.join("runtime"));
+}
+
+fn copy_runtime(source: &Path, destination: &Path) {
+    fs::create_dir_all(destination).unwrap();
+    for entry in fs::read_dir(source).unwrap() {
+        let entry = entry.unwrap();
+        let target = destination.join(entry.file_name());
+        if entry.path().is_dir() {
+            copy_runtime(&entry.path(), &target);
+        } else {
+            let name = entry.file_name();
+            let name = name.to_string_lossy();
+            if name.ends_with(".ts") || name == "package.json" {
+                fs::copy(entry.path(), target).unwrap();
+            }
+        }
+    }
 }
 
 fn link(source: &Path, destination: &Path) {

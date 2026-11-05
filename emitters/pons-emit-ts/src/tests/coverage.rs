@@ -20,7 +20,7 @@ fn strict_mode_uses_bigint_and_lossy_mode_warns() {
     let files = crate::emit(&document).unwrap();
     let types = files.iter().find(|file| file.path == "types.ts").unwrap();
     assert!(types.content.contains("\"id\": bigint"));
-    let transport = file(&files, "runtime/transport.ts");
+    let transport = file(&files, "runtime/transport/request.ts");
     assert!(transport.contains("parseJson(text, preserveWideIntegers)"));
     assert!(transport.contains("stringifyJson(encodedBody)"));
 

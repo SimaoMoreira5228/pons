@@ -108,6 +108,15 @@ fn the_check_covers_the_vendored_runtime_sources() {
         "runtime/pagination.ts",
         "runtime/credentials.ts",
         "runtime/transport.ts",
+        "runtime/transport/spec.ts",
+        "runtime/transport/failures.ts",
+        "runtime/transport/preflight.ts",
+        "runtime/transport/status.ts",
+        "runtime/transport/retry.ts",
+        "runtime/transport/response-body.ts",
+        "runtime/transport/response.ts",
+        "runtime/transport/redirect.ts",
+        "runtime/transport/request.ts",
         "runtime/websocket.ts",
     ] {
         assert!(
