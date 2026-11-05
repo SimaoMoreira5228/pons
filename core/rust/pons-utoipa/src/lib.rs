@@ -1,10 +1,13 @@
 use std::any::type_name;
+use std::collections::BTreeMap;
 
 use pons_core::{Schema, TypeCx};
-use pons_ir::{Direction, TypeRef};
+use pons_ir::{Direction, InlineType, OpaqueWire, TypeRef};
 use pons_json_schema::RootType;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
+use serde_json::{Map, Value};
 use utoipa::ToSchema;
+use utoipa::openapi::Components;
 
 #[repr(transparent)]
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -63,5 +66,64 @@ where
                 direction,
             },
         )
+    }
+}
+
+pub fn schema_for<T: ToSchema>(
+    components: &Components,
+    cx: &mut TypeCx,
+    direction: Direction,
+) -> TypeRef {
+    let name = T::name();
+    let name = name.as_ref();
+    if !components.schemas.contains_key(name) {
+        cx.push_type_diagnostic(
+            "PONS-W202",
+            format!("the component \"{name}\" is missing from the OpenAPI document"),
+        );
+        return TypeRef::Inline(InlineType::Opaque {
+            codec: "json-schema:ref".to_owned(),
+            wire: OpaqueWire::Json,
+            ext: BTreeMap::new(),
+        });
+    }
+
+    let mut defs = Map::new();
+    for (component, schema) in &components.schemas {
+        let mut value = serde_json::to_value(schema)
+            .expect("a utoipa component schema serializes to a JSON value");
+        rewrite_component_refs(&mut value);
+        defs.insert(component.clone(), value);
+    }
+
+    let root = Value::Object(Map::from_iter([
+        ("$defs".to_owned(), Value::Object(defs)),
+        ("$ref".to_owned(), Value::String(format!("#/$defs/{name}"))),
+    ]));
+    let base = type_name::<T>().to_owned();
+    pons_json_schema::lower(
+        cx,
+        root,
+        RootType {
+            id: &base,
+            name,
+            origin: Some(&base),
+            direction,
+        },
+    )
+}
+
+fn rewrite_component_refs(value: &mut Value) {
+    match value {
+        Value::Object(object) => {
+            if let Some(Value::String(reference)) = object.get_mut("$ref")
+                && let Some(component) = reference.strip_prefix("#/components/schemas/")
+            {
+                *reference = format!("#/$defs/{component}");
+            }
+            object.values_mut().for_each(rewrite_component_refs);
+        }
+        Value::Array(items) => items.iter_mut().for_each(rewrite_component_refs),
+        _ => {}
     }
 }

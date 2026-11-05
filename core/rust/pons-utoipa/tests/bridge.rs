@@ -6,8 +6,9 @@ use pons_ir::{
     Direction, Document, EnumRepr, Field, IR_VERSION, Info, InlineType, ObjectOpenness, OpaqueWire,
     Presence, TypeKind, TypeRef, VariantPayload,
 };
-use pons_utoipa::Utoipa;
+use pons_utoipa::{Utoipa, schema_for};
 use serde::{Deserialize, Serialize};
+use utoipa::OpenApi;
 
 #[derive(Debug, utoipa::ToSchema, Serialize, Deserialize)]
 #[allow(dead_code)]
@@ -24,6 +25,17 @@ enum Tier {
     Free,
     Pro,
 }
+
+#[derive(Debug, utoipa::ToSchema, Serialize, Deserialize)]
+#[allow(dead_code)]
+struct User {
+    name: String,
+    address: Address,
+}
+
+#[derive(utoipa::OpenApi)]
+#[openapi(components(schemas(Address, User)))]
+struct Api;
 
 #[derive(Debug, utoipa::ToSchema, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -228,6 +240,71 @@ fn the_wrapper_keeps_the_wire() {
     );
     let back: Utoipa<Account> = serde_json::from_value(json).unwrap();
     assert_eq!(back.into_inner().user_id, 7);
+}
+
+#[test]
+fn a_component_table_resolves_cross_type_references() {
+    let components = Api::openapi()
+        .components
+        .expect("the derived document holds its component table");
+    let mut cx = TypeCx::new();
+    let reference = schema_for::<User>(&components, &mut cx, Direction::Input);
+
+    let TypeRef::Named(root) = &reference else {
+        panic!()
+    };
+    assert_eq!(root.id, format!("{}#input", type_name::<User>()));
+    let TypeKind::Newtype { inner } = &cx.definitions()[&root.id].definition else {
+        panic!()
+    };
+    let TypeRef::Named(user) = inner else {
+        panic!()
+    };
+    assert_eq!(user.id, format!("{}::User#input", type_name::<User>()));
+    assert_eq!(cx.definitions()[&user.id].name, vec!["user"]);
+
+    let (fields, _) = struct_definition(&cx, inner);
+    let TypeRef::Named(address) = &field(fields, "address").ty else {
+        panic!()
+    };
+    assert_eq!(
+        address.id,
+        format!("{}::Address#input", type_name::<User>())
+    );
+    assert_eq!(cx.definitions()[&address.id].name, vec!["address"]);
+
+    let (address_fields, _) = struct_definition(&cx, &field(fields, "address").ty);
+    assert_eq!(
+        address_fields
+            .iter()
+            .map(|field| field.wire.as_str())
+            .collect::<Vec<_>>(),
+        ["street", "zip"]
+    );
+    assert!(cx.diagnostics().is_empty());
+
+    let (types, diagnostics) = cx.into_parts();
+    let document = document(types, diagnostics);
+    document.validate().unwrap();
+    assert!(!document.has_opaque());
+}
+
+#[test]
+fn a_missing_component_lowers_to_opaque() {
+    let components = utoipa::openapi::Components::new();
+    let mut cx = TypeCx::new();
+    let reference = schema_for::<User>(&components, &mut cx, Direction::Both);
+
+    let TypeRef::Inline(InlineType::Opaque { codec, .. }) = &reference else {
+        panic!()
+    };
+    assert_eq!(codec, "json-schema:ref");
+    let diagnostic = cx
+        .diagnostics()
+        .iter()
+        .find(|diagnostic| diagnostic.code == "PONS-W202")
+        .expect("the missing component is reported");
+    assert!(diagnostic.message.contains("\"User\""));
 }
 
 #[test]
