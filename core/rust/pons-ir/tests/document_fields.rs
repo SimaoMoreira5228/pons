@@ -1,6 +1,9 @@
 mod support;
 
-use pons_ir::{Direction, Violation, validate_value};
+use pons_ir::{
+    Direction, Document, InlineType, NamedRef, ObjectOpenness, TypeKind, TypeRef, Violation,
+    validate_value,
+};
 use serde_json::{Value, json};
 use support::{
     contract, field, field_type, fixture, refuses, request_body, string, struct_type, with,
@@ -446,4 +449,59 @@ fn a_required_field_cannot_carry_a_default() {
         }
         contract(accepted).validate().unwrap();
     }
+}
+
+#[test]
+fn rejects_nullable_flattened_types() {
+    let mut document: Document =
+        serde_json::from_str(include_str!("../../../../spec/fixtures/login.json")).unwrap();
+    let TypeKind::Struct { flattened, .. } =
+        &mut document.types.get_mut("User").unwrap().definition
+    else {
+        panic!()
+    };
+    flattened.push(TypeRef::Inline(InlineType::Nullable {
+        inner: Box::new(TypeRef::Inline(InlineType::Bool)),
+    }));
+    assert!(
+        document
+            .validate()
+            .unwrap_err()
+            .iter()
+            .any(|error| error.to_string().contains("nullable flattened"))
+    );
+}
+
+#[test]
+fn object_openness_is_explicit_and_typed_references_are_validated() {
+    let mut document: Document =
+        serde_json::from_str(include_str!("../../../../spec/fixtures/login.json")).unwrap();
+    let user = document.types.get_mut("User").unwrap();
+    let TypeKind::Struct {
+        fields, flattened, ..
+    } = &user.definition
+    else {
+        unreachable!()
+    };
+    user.definition = TypeKind::Struct {
+        fields: fields.clone(),
+        flattened: flattened.clone(),
+        openness: ObjectOpenness::PreserveTyped {
+            value: TypeRef::Named(NamedRef {
+                id: "Missing".into(),
+                variant: None,
+            }),
+        },
+    };
+    let errors = document.validate().unwrap_err();
+    assert!(
+        errors
+            .iter()
+            .any(|error| error.to_string().contains("Missing"))
+    );
+    let encoded = serde_json::to_value(&document).unwrap();
+    assert_eq!(
+        encoded["types"]["User"]["openness"]["preserve_typed"]["value"]["ref"],
+        "Missing"
+    );
 }

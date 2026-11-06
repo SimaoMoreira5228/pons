@@ -1,7 +1,10 @@
 mod support;
 
-use pons_ir::{NamedRef, PathSegment, TypeKind, TypeRef};
+use pons_ir::{
+    Direction, Document, InlineType, NamedRef, PathSegment, Presence, TypeDef, TypeKind, TypeRef,
+};
 use serde_json::{Value, json};
+use std::collections::BTreeMap;
 use support::{
     CARRIERS, access_carrier, agreed, carried_by_every_carrier, carrier_document, carrier_struct,
     contract, field, fixture, refused_by_every_carrier, refuses, string, verdict, with,
@@ -510,4 +513,75 @@ fn a_request_header_the_runtime_owns_is_refused() {
         .unwrap(),
     );
     response.validate().unwrap();
+}
+
+#[test]
+fn rejects_required_nullable_headers_and_path_parameters() {
+    fn fixture() -> Document {
+        serde_json::from_str(include_str!("../../../../spec/fixtures/login.json")).unwrap()
+    }
+    fn nullable() -> TypeRef {
+        TypeRef::Inline(InlineType::Nullable {
+            inner: Box::new(TypeRef::Inline(InlineType::Bool)),
+        })
+    }
+    fn rejects(document: &Document, message: &str) {
+        let errors = document
+            .validate()
+            .unwrap_err()
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>();
+        assert!(
+            errors.iter().any(|error| error.contains(message)),
+            "{message:?} missing from {errors:?}"
+        );
+    }
+
+    let mut document = fixture();
+    let watch = &mut document.operations[1];
+    watch.headers[0].presence = Presence::Required;
+    watch.headers[0].ty = nullable();
+    rejects(
+        &document,
+        "required request header X-Request-ID cannot be nullable",
+    );
+
+    let mut document = fixture();
+    document.types.insert(
+        "MaybeHeader".into(),
+        TypeDef {
+            name: vec!["maybe".into(), "header".into()],
+            direction: Direction::Input,
+            definition: TypeKind::Newtype { inner: nullable() },
+            origin: None,
+            doc: None,
+            diagnostics: Vec::new(),
+            ext: BTreeMap::new(),
+        },
+    );
+    let watch = &mut document.operations[1];
+    watch.headers[0].presence = Presence::Required;
+    watch.headers[0].ty = TypeRef::Named(NamedRef {
+        id: "MaybeHeader".into(),
+        variant: None,
+    });
+    rejects(
+        &document,
+        "required request header X-Request-ID cannot be nullable",
+    );
+
+    let mut document = fixture();
+    document.operations[1].path[1] = PathSegment::Param {
+        param: "cursor".into(),
+        ty: nullable(),
+    };
+    rejects(
+        &document,
+        "required path parameter cursor cannot be nullable",
+    );
+
+    let mut document = fixture();
+    document.operations[1].headers[0].ty = nullable();
+    document.validate().unwrap();
 }

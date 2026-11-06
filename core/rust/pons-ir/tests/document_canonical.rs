@@ -1,6 +1,6 @@
 mod support;
 
-use pons_ir::{Direction, validate_value};
+use pons_ir::{Direction, Document, TypeKind, validate_value};
 use serde_json::{Value, json};
 use support::{contract, field_type, refuses};
 
@@ -258,4 +258,26 @@ fn an_alias_is_refused_where_the_request_side_never_reads_the_key() {
         &keyed(Some("read_only"), "input"),
         "name input spellings of a key that never crosses a request boundary",
     );
+}
+
+#[test]
+fn canonical_json_ignores_order_of_unordered_contract_members() {
+    let document: Document =
+        serde_json::from_str(include_str!("../../../../spec/fixtures/login.json")).unwrap();
+    let mut shuffled = document.clone();
+    shuffled.operations.reverse();
+    if let TypeKind::Struct { fields, .. } = &mut shuffled.types.get_mut("User").unwrap().definition
+    {
+        fields.reverse();
+    }
+
+    assert_ne!(
+        serde_json::to_string(&document).unwrap(),
+        serde_json::to_string(&shuffled).unwrap()
+    );
+    assert_eq!(
+        document.to_canonical_json().unwrap(),
+        shuffled.to_canonical_json().unwrap()
+    );
+    assert_eq!(shuffled.operations[0].id[0], ["events"]);
 }

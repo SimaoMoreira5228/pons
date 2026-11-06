@@ -299,3 +299,118 @@ fn validation_checks_integer_bounds_in_both_directions() {
         assert!(document.validate().is_ok());
     }
 }
+
+#[test]
+fn error_diagnostics_block_document_validation() {
+    let mut document: Document =
+        serde_json::from_str(include_str!("../../../../spec/fixtures/login.json")).unwrap();
+    document.operations[0].diagnostics.push(Diagnostic {
+        severity: DiagnosticSeverity::Error,
+        code: "PONS-E999".into(),
+        message: "unsupported boundary".into(),
+        origin: None,
+        fidelity: None,
+        capability: None,
+        ext: BTreeMap::new(),
+    });
+    assert!(
+        document
+            .validate()
+            .unwrap_err()
+            .iter()
+            .any(|error| error.to_string().contains("PONS-E999"))
+    );
+}
+
+#[test]
+fn validation_rejects_inconsistent_payload_header_and_numeric_contracts() {
+    let json = r#"{
+        "ir_version": "0.2",
+        "info": {"title": "Example", "version": "1"},
+        "types": {
+            "Bad": {
+                "kind": "struct",
+                "openness": "reject",
+                "name": ["bad"],
+                "direction": "both",
+                "fields": [{
+                    "wire": "value",
+                    "ident": ["value"],
+                    "ty": {
+                        "kind": "int",
+                        "bits": 32,
+                        "signed": true,
+                        "wire": "number",
+                        "minimum": "zero",
+                        "maximum": null,
+                        "multiple_of": 0
+                    },
+                    "presence": "required"
+                }, {
+                    "wire": "bounded",
+                    "ident": ["bounded"],
+                    "ty": {
+                        "kind": "int",
+                        "bits": 8,
+                        "signed": false,
+                        "wire": "number",
+                        "minimum": -1,
+                        "maximum": 300
+                    },
+                    "presence": "required"
+                }]
+            },
+            "Empty": {
+                "kind": "enum",
+                "name": ["empty"],
+                "direction": "both",
+                "repr": {"kind": "string"},
+                "variants": []
+            }
+        },
+        "operations": [{
+            "id": [["test"]],
+            "method": "POST",
+            "path": [],
+            "headers": [
+                {"wire": "X-Trace", "ident": ["trace"], "ty": {"kind": "string"}, "presence": "optional"},
+                {"wire": "x-trace", "ident": ["trace"], "ty": {"kind": "string"}, "presence": "optional"},
+                {"wire": "bad header", "ident": ["bad"], "ty": {"kind": "string"}, "presence": "optional"}
+            ],
+            "body": {"ty": {"kind": "string"}, "content": "empty", "required": true},
+            "responses": [
+                {"status": 200, "content": "json"},
+                {"status": 201, "content": "empty", "body": {"kind": "string"}},
+                {"status": 202, "content": "stream"}
+            ],
+            "errors": [{
+                "status": 400,
+                "name": ["bad"],
+                "content": "empty",
+                "body": {"kind": "string"}
+            }],
+            "auth": {"alternatives": [], "optional": false},
+            "semantics": {"safe": false, "idempotent": false}
+        }]
+    }"#;
+
+    let document: Document = serde_json::from_str(json).unwrap();
+    let errors = document.validate().unwrap_err();
+    let messages = errors
+        .iter()
+        .map(ToString::to_string)
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(messages.contains("integer minimum must be a number"));
+    assert!(messages.contains("integer multiple_of must be greater than zero"));
+    assert!(messages.contains("integer minimum is below its native range"));
+    assert!(messages.contains("integer maximum is above its native range"));
+    assert!(messages.contains("enum needs at least one variant"));
+    assert!(messages.contains("request body content Empty"));
+    assert!(messages.contains("duplicate request header x-trace"));
+    assert!(messages.contains("not a valid HTTP field name"));
+    assert!(messages.contains("response 200 content Json"));
+    assert!(messages.contains("response 201 content Empty"));
+    assert!(messages.contains("0 stream descriptions and 1 stream responses"));
+    assert!(messages.contains("error content Empty"));
+}

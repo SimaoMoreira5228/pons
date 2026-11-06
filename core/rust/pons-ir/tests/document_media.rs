@@ -1,6 +1,11 @@
 mod support;
 
+use pons_ir::{
+    ByteEncoding, ContentKind, Direction, Document, InlineType, NamedRef, OpaqueWire, StreamKind,
+    TypeDef, TypeKind, TypeRef,
+};
 use serde_json::{Value, json};
+use std::collections::BTreeMap;
 use support::{contract, field, fixture, refuses, request_body, string, struct_type};
 
 #[test]
@@ -125,4 +130,250 @@ fn a_websocket_message_needs_the_direction_the_operation_uses() {
         &socket("Sent", "Sent"),
         "the websocket server message needs a type of the output or both direction, but Sent is declared input",
     );
+}
+
+#[test]
+fn media_types_validate_and_empty_payloads_reject_them() {
+    let mut document: Document =
+        serde_json::from_str(include_str!("../../../../spec/fixtures/login.json")).unwrap();
+    document.operations[0]
+        .body
+        .as_mut()
+        .unwrap()
+        .media
+        .clone_from(&Some(pons_ir::MediaDescriptor::from_declared(
+            "application/vnd.acme+json; charset=utf-8",
+        )));
+    document.validate().unwrap();
+    document.operations[0].body.as_mut().unwrap().media =
+        Some(pons_ir::MediaDescriptor::from_declared("not-a-media-type"));
+    document.operations[0].responses[0].content = ContentKind::Empty;
+    document.operations[0].responses[0].body = None;
+    document.operations[0].responses[0].media =
+        Some(pons_ir::MediaDescriptor::from_declared("application/json"));
+    let errors = document.validate().unwrap_err();
+    assert!(
+        errors
+            .iter()
+            .any(|error| error.to_string().contains("invalid media type"))
+    );
+    assert!(
+        errors
+            .iter()
+            .any(|error| error.to_string().contains("empty response"))
+    );
+}
+
+#[test]
+fn byte_stream_media_types_are_consistent_and_validated() {
+    let mut document: Document =
+        serde_json::from_str(include_str!("../../../../spec/fixtures/login.json")).unwrap();
+    let operation_index = document
+        .operations
+        .iter()
+        .position(|operation| operation.stream.is_some())
+        .unwrap();
+    document.operations[operation_index]
+        .stream
+        .as_mut()
+        .unwrap()
+        .kind = StreamKind::Bytes {
+        content_type: "Application/PDF ; Version=1".into(),
+    };
+    document.validate().unwrap();
+    document.operations[operation_index].responses[0].media = Some(
+        pons_ir::MediaDescriptor::from_declared("application/pdf; version=2"),
+    );
+    assert!(document.validate().unwrap_err().iter().any(|error| {
+        error
+            .to_string()
+            .contains("does not match stream kind media type")
+    }));
+    document.operations[operation_index].responses[0].media = Some(
+        pons_ir::MediaDescriptor::from_declared("application/pdf; version=1; extra=value"),
+    );
+    document.validate().unwrap();
+    document.operations[operation_index]
+        .stream
+        .as_mut()
+        .unwrap()
+        .kind = StreamKind::Bytes {
+        content_type: "not-a-media-type".into(),
+    };
+    assert!(document.validate().unwrap_err().iter().any(|error| {
+        error
+            .to_string()
+            .contains("invalid byte stream content type")
+    }));
+}
+
+#[test]
+fn sse_and_ndjson_media_types_are_checked_against_their_kind() {
+    let mut document: Document =
+        serde_json::from_str(include_str!("../../../../spec/fixtures/login.json")).unwrap();
+    let operation_index = document
+        .operations
+        .iter()
+        .position(|operation| operation.stream.is_some())
+        .unwrap();
+    for (kind, expected) in [
+        (StreamKind::Sse { events: vec![] }, "text/event-stream"),
+        (
+            StreamKind::Ndjson {
+                item: TypeRef::Inline(InlineType::Bool),
+            },
+            "application/x-ndjson",
+        ),
+    ] {
+        document.operations[operation_index]
+            .stream
+            .as_mut()
+            .unwrap()
+            .kind = kind;
+
+        for accepted in [
+            expected.to_owned(),
+            format!("{expected}; charset=utf-8"),
+            format!("{expected} ; CharSet=UTF-8"),
+        ] {
+            document.operations[operation_index].responses[0].media =
+                Some(pons_ir::MediaDescriptor::from_declared(accepted));
+            document.validate().unwrap();
+        }
+        for rejected in ["application/json", "application/octet-stream", "text/plain"] {
+            document.operations[operation_index].responses[0].media =
+                Some(pons_ir::MediaDescriptor::from_declared(rejected));
+            assert!(
+                document.validate().unwrap_err().iter().any(|error| error
+                    .to_string()
+                    .contains("does not match stream kind media type")),
+                "{rejected:?} must not serve an {expected} stream"
+            );
+        }
+    }
+}
+
+#[test]
+fn byte_bodies_must_resolve_to_a_byte_value() {
+    const REQUEST: &str =
+        "raw byte bodies must use a byte type, byte newtype, nullable bytes, or a bytes opaque";
+    const RESPONSE: &str = "raw byte response bodies must use a byte type, byte newtype, nullable bytes, or a bytes opaque";
+
+    fn bytes() -> TypeRef {
+        TypeRef::Inline(InlineType::Bytes {
+            encoding: ByteEncoding::Base64,
+        })
+    }
+    fn nullable(inner: TypeRef) -> TypeRef {
+        TypeRef::Inline(InlineType::Nullable {
+            inner: Box::new(inner),
+        })
+    }
+    fn opaque(wire: OpaqueWire) -> TypeRef {
+        TypeRef::Inline(InlineType::Opaque {
+            codec: "Raw".into(),
+            wire,
+            ext: Default::default(),
+        })
+    }
+    fn string() -> TypeRef {
+        TypeRef::Inline(InlineType::String {
+            format: None,
+            min_length: None,
+            max_length: None,
+            pattern: None,
+        })
+    }
+    fn named(id: &str) -> TypeRef {
+        TypeRef::Named(NamedRef {
+            id: id.into(),
+            variant: None,
+        })
+    }
+    fn newtype(document: &mut Document, id: &str, inner: TypeRef) -> TypeRef {
+        document.types.insert(
+            id.into(),
+            TypeDef {
+                name: vec![id.to_ascii_lowercase()],
+                direction: Direction::Both,
+                definition: TypeKind::Newtype { inner },
+                origin: None,
+                doc: None,
+                diagnostics: Vec::new(),
+                ext: BTreeMap::new(),
+            },
+        );
+        named(id)
+    }
+    fn rejects(document: &Document, message: &str) {
+        let errors = document
+            .validate()
+            .unwrap_err()
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>();
+        assert!(
+            errors.iter().any(|error| error.contains(message)),
+            "{message:?} missing from {errors:?}"
+        );
+    }
+
+    let mut document: Document =
+        serde_json::from_str(include_str!("../../../../spec/fixtures/login.json")).unwrap();
+    let login = &mut document.operations[0];
+    login.body.as_mut().unwrap().content = ContentKind::Bytes;
+    login.body.as_mut().unwrap().ty = bytes();
+    login.responses[0].content = ContentKind::Bytes;
+    login.responses[0].body = Some(bytes());
+    document.validate().unwrap();
+
+    let mut document = document.clone();
+    document.operations[0].body.as_mut().unwrap().ty = string();
+    rejects(&document, REQUEST);
+    document.operations[0].body.as_mut().unwrap().ty = named("User");
+    rejects(&document, REQUEST);
+    document.operations[0].body.as_mut().unwrap().ty = newtype(&mut document, "Text", string());
+    rejects(&document, REQUEST);
+
+    let mut document = document.clone();
+    document.operations[0].responses[0].body = Some(named("User"));
+    rejects(&document, RESPONSE);
+
+    let raw = newtype(&mut document, "RawBytes", bytes());
+    let nested = newtype(&mut document, "NestedBytes", raw);
+    document.operations[0].body.as_mut().unwrap().ty = nested.clone();
+    document.operations[0].responses[0].body = Some(nested);
+    document.validate().unwrap();
+
+    for accepted in [
+        nullable(bytes()),
+        newtype(&mut document, "MaybeBytes", nullable(bytes())),
+        opaque(OpaqueWire::Bytes),
+        nullable(opaque(OpaqueWire::Bytes)),
+        newtype(&mut document, "OpaqueBytes", opaque(OpaqueWire::Bytes)),
+    ] {
+        let mut document = document.clone();
+        document.operations[0].body.as_mut().unwrap().ty = accepted.clone();
+        document.operations[0].responses[0].body = Some(accepted);
+        document.validate().unwrap();
+    }
+
+    for rejected in [
+        nullable(string()),
+        nullable(named("User")),
+        opaque(OpaqueWire::Text),
+        opaque(OpaqueWire::Json),
+        opaque(OpaqueWire::Unknown),
+        newtype(&mut document, "OpaqueText", opaque(OpaqueWire::Text)),
+    ] {
+        let mut document = document.clone();
+        document.operations[0].body.as_mut().unwrap().ty = rejected.clone();
+        rejects(&document, REQUEST);
+        document.operations[0].responses[0].body = Some(rejected);
+        rejects(&document, RESPONSE);
+    }
+
+    document.operations[0].body.as_mut().unwrap().ty =
+        newtype(&mut document, "Loop", named("Loop"));
+    rejects(&document, REQUEST);
 }

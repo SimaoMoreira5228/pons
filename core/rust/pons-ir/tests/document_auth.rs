@@ -1,6 +1,6 @@
 mod support;
 
-use pons_ir::TypeKind;
+use pons_ir::{Document, TypeKind};
 use serde_json::{Value, json};
 use std::collections::BTreeMap;
 use support::{fixture, refuses};
@@ -234,5 +234,26 @@ fn scopes_are_legal_on_every_auth_scheme() {
     refuses(
         &with_scopes(json!({"tenant": {"kind": "bearer", "format": "jwt"}}), &[]),
         "auth scheme tenant has an empty scope list",
+    );
+}
+
+#[test]
+fn auth_scopes_validate_scheme_and_uniqueness() {
+    let mut document: Document =
+        serde_json::from_str(include_str!("../../../../spec/fixtures/login.json")).unwrap();
+    document.operations[1]
+        .auth
+        .scopes
+        .insert("missing".into(), vec!["read".into(), "read".into()]);
+    let errors = document.validate().unwrap_err();
+    assert!(
+        errors
+            .iter()
+            .any(|error| error.to_string().contains("missing"))
+    );
+    assert!(
+        errors
+            .iter()
+            .any(|error| error.to_string().contains("repeats scope read"))
     );
 }

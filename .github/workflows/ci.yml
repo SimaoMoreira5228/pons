@@ -56,7 +56,7 @@ jobs:
         run: cargo test --workspace --all-features
       - name: Schema drift
         if: matrix.os == 'ubuntu-latest'
-        run: cargo test -p pons-ir --all-features --test document_model checked_in_schema_matches_the_rust_model
+        run: cargo test -p pons-ir --all-features --test schema_drift checked_in_schema_matches_the_rust_model
       - name: Fixture matrix
         if: matrix.os == 'ubuntu-latest'
         run: cargo test -p pons-cli --all-features --test emit every_target_classifies_every_fixture_the_same_way

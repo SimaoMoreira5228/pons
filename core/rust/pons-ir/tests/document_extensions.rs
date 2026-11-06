@@ -1,6 +1,6 @@
 mod support;
 
-use pons_ir::{Diagnostic, InlineType, TypeKind, TypeRef};
+use pons_ir::{Diagnostic, Document, InlineType, OpaqueWire, TypeKind, TypeRef};
 use std::collections::BTreeMap;
 use support::{fixture, refuses, rejections};
 
@@ -189,4 +189,61 @@ fn an_opaque_value_must_name_a_codec() {
         ext: BTreeMap::new(),
     });
     refuses(&document, "opaque codec cannot be empty");
+}
+
+#[test]
+fn opaque_values_require_a_codec_and_can_be_scanned() {
+    let mut document: Document =
+        serde_json::from_str(include_str!("../../../../spec/fixtures/login.json")).unwrap();
+    let user = document.types.get_mut("User").unwrap();
+    let TypeKind::Struct { fields, .. } = &mut user.definition else {
+        panic!()
+    };
+    fields[0].ty = TypeRef::Inline(InlineType::Opaque {
+        codec: String::new(),
+        wire: OpaqueWire::Unknown,
+        ext: Default::default(),
+    });
+    let errors = document.validate().unwrap_err();
+    assert!(
+        errors
+            .iter()
+            .any(|error| error.to_string().contains("opaque codec cannot be empty"))
+    );
+    assert!(document.has_opaque());
+    let TypeKind::Struct { fields, .. } = &mut document.types.get_mut("User").unwrap().definition
+    else {
+        panic!()
+    };
+    fields[0].ty = TypeRef::Inline(InlineType::Opaque {
+        codec: "example".into(),
+        wire: OpaqueWire::Json,
+        ext: Default::default(),
+    });
+    document.validate().unwrap();
+}
+
+#[test]
+fn common_errors_only_root_opaque_when_an_operation_inherits_them() {
+    let mut document: Document =
+        serde_json::from_str(include_str!("../../../../spec/fixtures/login.json")).unwrap();
+    let mut common = document.operations[0].errors[0].clone();
+    common.name = vec!["common".into(), "error".into()];
+    common.body = Some(TypeRef::Inline(InlineType::Opaque {
+        codec: "example".into(),
+        wire: OpaqueWire::Json,
+        ext: Default::default(),
+    }));
+    document.common_errors.push(common);
+    document.operations[0].errors.clear();
+    document
+        .operations
+        .iter_mut()
+        .for_each(|operation| operation.errors_inherit = false);
+    document.validate().unwrap();
+    assert!(document.has_opaque());
+    assert!(!document.has_reachable_opaque());
+
+    document.operations[0].errors_inherit = true;
+    assert!(document.has_reachable_opaque());
 }
