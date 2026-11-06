@@ -63,7 +63,12 @@ pub(crate) fn extensions(
 ) -> std::collections::BTreeMap<String, serde_json::Value> {
     object
         .iter()
-        .filter(|(key, _)| key.starts_with("x-"))
+        .filter(|(key, _)| {
+            key.starts_with("x-")
+                && !key
+                    .to_ascii_lowercase()
+                    .starts_with(pons_ir::EXT_RESERVED_PREFIX)
+        })
         .map(|(key, value)| {
             (
                 format!("openapi.x.{}/v1", slug(&key["x-".len()..])),

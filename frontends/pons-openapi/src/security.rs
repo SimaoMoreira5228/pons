@@ -7,7 +7,95 @@ use crate::document::push_dropped;
 use crate::error::ImportError;
 use crate::refs::{Resolver, Site};
 
+pub(crate) struct Schemes {
+    pub(crate) definitions: BTreeMap<String, AuthScheme>,
+    names: BTreeMap<String, String>,
+}
+
+impl Schemes {
+    pub(crate) fn resolve(&self, scheme: &str) -> Option<String> {
+        if self.definitions.contains_key(scheme) {
+            return Some(scheme.to_owned());
+        }
+        if let Some(mapped) = self.names.get(scheme)
+            && self.definitions.contains_key(mapped)
+        {
+            return Some(mapped.clone());
+        }
+        let mut matching = self
+            .definitions
+            .keys()
+            .filter(|key| key.eq_ignore_ascii_case(scheme));
+        let first = matching.next()?;
+        if matching.next().is_some() {
+            return None;
+        }
+        Some(first.clone())
+    }
+}
+
 pub(crate) fn schemes<'v>(
+    declared: Option<&'v Map<String, Value>>,
+    stored: Option<&Value>,
+    resolver: &'v Resolver<'_>,
+    diagnostics: &mut Vec<Diagnostic>,
+) -> Result<Schemes, ImportError> {
+    let derived = derived_schemes(declared, resolver, diagnostics)?;
+    let Some(stored) = stored_schemes(stored, diagnostics) else {
+        return Ok(Schemes {
+            definitions: derived,
+            names: BTreeMap::new(),
+        });
+    };
+    let names = scheme_names(&derived, &stored);
+    Ok(Schemes {
+        definitions: stored,
+        names,
+    })
+}
+
+fn stored_schemes(
+    stored: Option<&Value>,
+    diagnostics: &mut Vec<Diagnostic>,
+) -> Option<BTreeMap<String, AuthScheme>> {
+    let stored = stored?;
+    if stored.is_null() {
+        return None;
+    }
+    match serde_json::from_value(stored.clone()) {
+        Ok(schemes) => Some(schemes),
+        Err(error) => {
+            push_dropped(
+                diagnostics,
+                None,
+                format!(
+                    "the x-pons auth_schemes member is malformed ({error}), so the security schemes come from components.securitySchemes"
+                ),
+            );
+            None
+        }
+    }
+}
+
+fn scheme_names(
+    derived: &BTreeMap<String, AuthScheme>,
+    stored: &BTreeMap<String, AuthScheme>,
+) -> BTreeMap<String, String> {
+    let mut names = BTreeMap::new();
+    for (declared, definition) in derived {
+        let candidates = stored
+            .iter()
+            .filter(|(key, scheme)| key.eq_ignore_ascii_case(declared) || *scheme == definition)
+            .map(|(key, _)| key.clone())
+            .collect::<Vec<_>>();
+        if candidates.len() == 1 {
+            names.insert(declared.clone(), candidates[0].clone());
+        }
+    }
+    names
+}
+
+fn derived_schemes<'v>(
     declared: Option<&'v Map<String, Value>>,
     resolver: &'v Resolver<'_>,
     diagnostics: &mut Vec<Diagnostic>,
@@ -221,7 +309,7 @@ fn scopes_of(value: Option<&Value>) -> BTreeMap<String, String> {
 
 pub(crate) fn requirement(
     declared: Option<&Value>,
-    schemes: &BTreeMap<String, AuthScheme>,
+    schemes: &Schemes,
     operation: &str,
     diagnostics: &mut Vec<Diagnostic>,
 ) -> Result<AuthRequirement, ImportError> {
@@ -246,12 +334,12 @@ pub(crate) fn requirement(
         }
         let mut alternative = Vec::new();
         for (scheme, scopes) in entry {
-            if !schemes.contains_key(scheme) {
+            let Some(resolved) = schemes.resolve(scheme) else {
                 return Err(ImportError::Document(format!(
                     "operation {operation}: the security requirement names the unknown scheme {scheme}"
                 )));
-            }
-            alternative.push(scheme.clone());
+            };
+            alternative.push(resolved.clone());
             let Some(scopes) = scopes.as_array() else {
                 return Err(ImportError::Document(format!(
                     "operation {operation}: the security requirement for {scheme} is not an array of scopes"
@@ -264,7 +352,7 @@ pub(crate) fn requirement(
                         "operation {operation}: the security requirement for {scheme} has a non-string scope"
                     )));
                 };
-                if !declared_scopes(schemes.get(scheme), scope) {
+                if !declared_scopes(schemes.definitions.get(&resolved), scope) {
                     push_dropped(
                         diagnostics,
                         Some(operation),
@@ -277,11 +365,7 @@ pub(crate) fn requirement(
                 kept.push(scope.to_owned());
             }
             if !kept.is_empty() {
-                requirement
-                    .scopes
-                    .entry(scheme.clone())
-                    .or_default()
-                    .extend(kept);
+                requirement.scopes.entry(resolved).or_default().extend(kept);
             }
         }
         requirement.alternatives.push(alternative);

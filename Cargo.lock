@@ -1435,6 +1435,7 @@ name = "pons-openapi"
 version = "0.1.0"
 dependencies = [
  "pons-core",
+ "pons-emit-openapi",
  "pons-ir",
  "pons-json-schema",
  "serde_json",

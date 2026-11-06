@@ -7,6 +7,7 @@ use serde_json::{Map, Value};
 
 use crate::document::Importer;
 use crate::error::ImportError;
+use crate::metadata::OperationMetadata;
 use crate::naming::{extensions, label as operation_label, slug, words};
 use crate::parameters::{self, DeclaredParameter, Location};
 use crate::refs::{Resolver, Site};
@@ -95,8 +96,13 @@ fn build_operation(
             method.as_str()
         )));
     };
-    let id = operation_id(object, method, path);
+    let metadata = OperationMetadata::read(object, &importer.schemes);
+    let id = metadata
+        .id
+        .clone()
+        .unwrap_or_else(|| operation_id(object, method, path));
     let label = operation_label(&id);
+    metadata.report(&label, &mut importer.diagnostics);
     let base = format!("openapi::{label}");
 
     let own = parameters::read(
@@ -203,13 +209,23 @@ fn build_operation(
         object.get("responses"),
         resolver,
     )?;
-    let security_value = object.get("security").or(root_security);
-    let auth = security::requirement(
-        security_value,
-        &importer.auth_schemes,
-        &label,
-        &mut importer.diagnostics,
-    )?;
+    let auth = match metadata.auth {
+        Some(auth) => auth,
+        None => security::requirement(
+            object.get("security").or(root_security),
+            &importer.schemes,
+            &label,
+            &mut importer.diagnostics,
+        )?,
+    };
+    let semantics = metadata.semantics.unwrap_or(OperationSemantics {
+        safe: matches!(method, Method::Get | Method::Head | Method::Options),
+        idempotent: matches!(
+            method,
+            Method::Get | Method::Put | Method::Delete | Method::Head | Method::Options
+        ),
+        pagination: None,
+    });
 
     Ok(Operation {
         id,
@@ -220,21 +236,14 @@ fn build_operation(
         body,
         responses,
         errors,
-        errors_inherit: false,
+        errors_inherit: metadata.errors_inherit.unwrap_or(false),
         stream: None,
         auth,
-        provides: None,
-        semantics: OperationSemantics {
-            safe: matches!(method, Method::Get | Method::Head | Method::Options),
-            idempotent: matches!(
-                method,
-                Method::Get | Method::Put | Method::Delete | Method::Head | Method::Options
-            ),
-            pagination: None,
-        },
+        provides: metadata.provides,
+        semantics,
         doc: operation_doc(object),
         origin: None,
-        ext: extensions(object),
+        ext: metadata.ext.unwrap_or_else(|| extensions(object)),
         diagnostics: Vec::new(),
     })
 }

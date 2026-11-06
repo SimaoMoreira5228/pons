@@ -14,3 +14,6 @@ pons-ir = { path = "../../core/rust/pons-ir" }
 pons-json-schema = { path = "../../core/rust/pons-json-schema" }
 serde_json.workspace = true
 serde_yaml_ng = "0.10"
+
+[dev-dependencies]
+pons-emit-openapi = { path = "../../emitters/pons-emit-openapi" }

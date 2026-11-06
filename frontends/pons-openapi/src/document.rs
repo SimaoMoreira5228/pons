@@ -1,6 +1,6 @@
 use std::collections::BTreeMap;
 
-use pons_ir::{AuthScheme, Diagnostic, DiagnosticSeverity, Document, Fidelity, IR_VERSION, Info};
+use pons_ir::{Diagnostic, DiagnosticSeverity, Document, Fidelity, IR_VERSION, Info};
 use serde_json::{Map, Value};
 
 use crate::dialect::Dialect;
@@ -14,7 +14,7 @@ use crate::security;
 pub(crate) struct Importer {
     pub(crate) types: TypeLowering,
     pub(crate) diagnostics: Vec<Diagnostic>,
-    pub(crate) auth_schemes: BTreeMap<String, AuthScheme>,
+    pub(crate) schemes: security::Schemes,
 }
 
 impl Importer {
@@ -96,11 +96,20 @@ pub(crate) fn import(bytes: &[u8]) -> Result<Document, ImportError> {
 
     let resolver = Resolver::new(&root);
     let mut diagnostics = Vec::new();
-    let auth_schemes = security::schemes(security_schemes, &resolver, &mut diagnostics)?;
+    let stored_schemes = root
+        .get("x-pons")
+        .and_then(Value::as_object)
+        .and_then(|metadata| metadata.get("auth_schemes"));
+    let schemes = security::schemes(
+        security_schemes,
+        stored_schemes,
+        &resolver,
+        &mut diagnostics,
+    )?;
     let mut importer = Importer {
         types: TypeLowering::new(schemas.clone(), dialect),
         diagnostics,
-        auth_schemes,
+        schemes,
     };
     let operations = operations::build(&mut importer, &root, &resolver)?;
     let (types, schema_diagnostics) = importer.types.into_parts();
@@ -132,7 +141,7 @@ pub(crate) fn import(bytes: &[u8]) -> Result<Document, ImportError> {
             ext: extensions(info),
         },
         types,
-        auth_schemes: importer.auth_schemes,
+        auth_schemes: importer.schemes.definitions,
         common_errors: Vec::new(),
         operations,
         ext: extensions(&root),

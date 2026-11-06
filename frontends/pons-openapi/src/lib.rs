@@ -2,6 +2,7 @@ mod dialect;
 mod document;
 mod error;
 mod media;
+mod metadata;
 mod naming;
 mod operations;
 mod parameters;
