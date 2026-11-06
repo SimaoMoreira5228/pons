@@ -3,11 +3,11 @@ use std::collections::BTreeMap;
 
 use pons_core::Schema;
 use pons_ir::{
-    Body, ContentKind, Diagnostic, DiagnosticSeverity, Direction, NamedRef, Response,
-    ResponseStatus, TypeDef, TypeKind, TypeRef,
+    Body, ContentKind, Diagnostic, DiagnosticSeverity, Direction, InlineType, NamedRef, Presence,
+    Response, ResponseStatus, TypeDef, TypeKind, TypeRef,
 };
 #[cfg(feature = "typed-header")]
-use pons_ir::{HeaderParameter, InlineType, OpaqueWire, Presence};
+use pons_ir::{HeaderParameter, OpaqueWire};
 
 use crate::describe::OperationCx;
 

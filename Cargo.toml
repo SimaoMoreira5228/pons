@@ -1,5 +1,5 @@
 [workspace]
-members = ["conformance/reference-api", "conformance/pons-conformance", "cli/pons-cli", "core/rust/pons-core", "core/rust/pons-derive", "core/rust/pons-ir", "core/rust/pons-json-schema", "core/rust/pons-plugin", "core/rust/pons-schemars", "core/rust/pons-specta", "core/rust/pons-utoipa", "emitters/pons-emit-openapi", "emitters/pons-emit-ts", "frontends/pons-actix", "frontends/pons-axum", "frontends/pons-openapi", "frontends/pons-tako"]
+members = ["conformance/reference-api", "conformance/pons-conformance", "cli/pons-cli", "core/rust/pons-core", "core/rust/pons-derive", "core/rust/pons-ir", "core/rust/pons-json-schema", "core/rust/pons-plugin", "core/rust/pons-schemars", "core/rust/pons-specta", "core/rust/pons-utoipa", "emitters/pons-emit-openapi", "emitters/pons-emit-ts", "frontends/pons-actix", "frontends/pons-axum", "frontends/pons-openapi", "frontends/pons-tako", "frontends/pons-tako-macros"]
 resolver = "3"
 
 [workspace.package]

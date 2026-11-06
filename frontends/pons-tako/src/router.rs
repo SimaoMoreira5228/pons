@@ -42,6 +42,19 @@ impl Router {
         self.register(method, path, handler, None)
     }
 
+    pub fn route_with<H, T>(
+        &mut self,
+        method: http::Method,
+        path: &str,
+        handler: H,
+        meta: OperationMeta,
+    ) -> Arc<Route>
+    where
+        H: Handler<T> + Clone + DescribeHandler<T> + 'static,
+    {
+        self.register(method, path, handler, Some(meta))
+    }
+
     fn register<H, T>(
         &mut self,
         method: http::Method,

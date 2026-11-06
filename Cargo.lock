@@ -1733,10 +1733,20 @@ dependencies = [
  "linkme",
  "pons-core",
  "pons-ir",
+ "pons-tako-macros",
  "serde",
  "serde_json",
  "tako-rs",
  "tako-rs-core",
+]
+
+[[package]]
+name = "pons-tako-macros"
+version = "0.1.0"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 3.0.6",
 ]
 
 [[package]]
