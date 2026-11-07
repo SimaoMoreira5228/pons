@@ -1,3 +1,4 @@
+mod auth;
 mod describe;
 mod document;
 mod handler;
@@ -8,6 +9,7 @@ mod operation;
 mod operation_cx;
 mod router;
 
+pub use auth::{Auth, AuthSpec, SessionAuth};
 pub use describe::{DescribeRequest, DescribeResponse, OperationCx, WithStatus};
 pub use handler::DescribeHandler;
 #[cfg(feature = "macros")]

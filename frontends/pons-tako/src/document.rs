@@ -1,13 +1,15 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use pons_ir::{
-    Document, Info, Operation, ResponseHeader, TypeDef, TypeKind, TypeRef, ValidationError,
+    AuthScheme, Document, Info, Operation, ResponseHeader, TypeDef, TypeKind, TypeRef,
+    ValidationError,
 };
 
 pub(crate) fn assemble(
     info: Info,
     types: BTreeMap<String, TypeDef>,
     carriers: Vec<TypeRef>,
+    auth_schemes: BTreeMap<String, AuthScheme>,
     operations: Vec<Operation>,
     diagnostics: Vec<pons_ir::Diagnostic>,
 ) -> Document {
@@ -15,7 +17,7 @@ pub(crate) fn assemble(
         ir_version: pons_ir::IR_VERSION.to_owned(),
         info,
         types,
-        auth_schemes: BTreeMap::new(),
+        auth_schemes,
         common_errors: Vec::new(),
         operations,
         ext: BTreeMap::new(),

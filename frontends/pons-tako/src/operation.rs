@@ -1,8 +1,8 @@
 use std::collections::{BTreeMap, HashMap};
 
 use pons_ir::{
-    AuthRequirement, Diagnostic, Method, Name, Operation, OperationSemantics, PathSegment, TypeDef,
-    TypeKind, TypeRef,
+    Diagnostic, Method, Name, Operation, OperationSemantics, PathSegment, TypeDef, TypeKind,
+    TypeRef,
 };
 
 use crate::describe::OperationCx;
@@ -54,10 +54,10 @@ pub(crate) fn build(path: &str, description: RouteDescription) -> BuiltOperation
         headers: cx.headers,
         body: cx.body,
         responses: cx.responses,
-        errors: Vec::new(),
+        errors: cx.errors,
         errors_inherit: true,
         stream: None,
-        auth: AuthRequirement::default(),
+        auth: cx.auth,
         provides: None,
         semantics: OperationSemantics {
             safe: matches!(method, Method::Get | Method::Head | Method::Options),

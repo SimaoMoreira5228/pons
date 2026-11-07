@@ -1,6 +1,9 @@
 use http::StatusCode;
-use pons_core::Schema;
-use pons_ir::{Body, ContentKind, Diagnostic, HeaderParameter, Response, ResponseStatus, TypeRef};
+use pons_core::{ErrorSpec, Schema};
+use pons_ir::{
+    AuthRequirement, Body, ContentKind, Diagnostic, ErrorResponse, HeaderParameter, Response,
+    ResponseStatus, TypeRef,
+};
 use tako_rs_core::responder::Responder;
 use tako_rs_core::types::Response as TakoResponse;
 
@@ -14,6 +17,8 @@ pub struct OperationCx {
     pub(crate) query: Option<TypeRef>,
     pub(crate) body: Option<Body>,
     pub(crate) responses: Vec<Response>,
+    pub(crate) errors: Vec<ErrorResponse>,
+    pub(crate) auth: AuthRequirement,
     pub(crate) diagnostics: Vec<Diagnostic>,
 }
 
@@ -59,6 +64,17 @@ fn valid_status(status: u16, wrapper: &str) -> u16 {
         "{wrapper} requires an HTTP status representable by Pons IR"
     );
     status
+}
+
+impl<R, E> DescribeResponse for Result<R, E>
+where
+    R: DescribeResponse,
+    E: ErrorSpec,
+{
+    fn describe(cx: &mut OperationCx) {
+        R::describe(cx);
+        cx.errors.extend(E::errors(&mut cx.types));
+    }
 }
 
 impl<T: Schema> DescribeRequest for tako::extractors::json::Json<T> {

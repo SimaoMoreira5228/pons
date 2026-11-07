@@ -1,7 +1,10 @@
+use std::collections::BTreeMap;
 use std::ops::{Deref, DerefMut};
 use std::sync::Arc;
 
-use pons_ir::{Diagnostic, Document, Info, Operation, TypeDef, TypeRef, ValidationError};
+use pons_ir::{
+    AuthScheme, Diagnostic, Document, Info, Operation, TypeDef, TypeRef, ValidationError,
+};
 use tako::route::Route;
 use tako_rs_core::handler::Handler;
 
@@ -17,8 +20,9 @@ pub struct Router {
     info: Info,
     pub(crate) prefix: String,
     operations: Vec<Operation>,
-    types: std::collections::BTreeMap<String, TypeDef>,
+    types: BTreeMap<String, TypeDef>,
     carriers: Vec<TypeRef>,
+    auth_schemes: BTreeMap<String, AuthScheme>,
     diagnostics: Vec<Diagnostic>,
 }
 
@@ -29,10 +33,31 @@ impl Router {
             info,
             prefix: String::new(),
             operations: Vec::new(),
-            types: std::collections::BTreeMap::new(),
+            types: BTreeMap::new(),
             carriers: Vec::new(),
+            auth_schemes: BTreeMap::new(),
             diagnostics: Vec::new(),
         }
+    }
+
+    pub fn auth_scheme(&mut self, id: impl Into<String>, scheme: AuthScheme) -> &mut Self {
+        self.insert_auth_scheme(id.into(), scheme);
+        self
+    }
+
+    fn insert_auth_scheme(&mut self, id: String, scheme: AuthScheme) {
+        if self
+            .auth_schemes
+            .get(&id)
+            .is_some_and(|existing| existing != &scheme)
+        {
+            push_diagnostic(
+                &mut self.diagnostics,
+                "PONS-E102",
+                format!("auth scheme {id} is declared twice with different definitions"),
+            );
+        }
+        self.auth_schemes.insert(id, scheme);
     }
 
     pub fn route<H, T>(&mut self, method: http::Method, path: &str, handler: H) -> Arc<Route>
@@ -109,6 +134,7 @@ impl Router {
             mut operations,
             types,
             carriers,
+            auth_schemes,
             diagnostics,
             ..
         } = other;
@@ -118,6 +144,9 @@ impl Router {
         });
         self.types.extend(types);
         self.carriers.extend(carriers);
+        for (id, scheme) in auth_schemes {
+            self.insert_auth_scheme(id, scheme);
+        }
         self.diagnostics.extend(diagnostics);
         self.operations.extend(operations);
         self
@@ -132,6 +161,7 @@ impl Router {
             self.info.clone(),
             self.types.clone(),
             self.carriers.clone(),
+            self.auth_schemes.clone(),
             self.operations.clone(),
             self.diagnostics.clone(),
         )
@@ -165,6 +195,7 @@ impl Router {
             self.info,
             self.types,
             self.carriers,
+            self.auth_schemes,
             self.operations,
             self.diagnostics,
         )
