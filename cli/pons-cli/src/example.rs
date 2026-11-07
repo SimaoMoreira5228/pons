@@ -118,6 +118,9 @@ impl<'a> Examples<'a> {
                 .map(|item| self.value_in(item, direction))
                 .collect::<Result<Vec<_>, _>>()
                 .map(Value::Array),
+            InlineType::Struct {
+                fields, flattened, ..
+            } => self.object(fields, flattened, direction).map(Value::Object),
         }
     }
 

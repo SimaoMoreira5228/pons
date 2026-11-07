@@ -681,6 +681,74 @@ fn type_ref_with_namespace(
                     .collect::<Result<Vec<_>, _>>()?
                     .join(", ")
             )),
+            InlineType::Struct {
+                fields,
+                flattened,
+                openness,
+            } => {
+                let flattened_types = flattened_field_types(flattened, document, names, options)?;
+                let visible = fields
+                    .iter()
+                    .filter(|field| field_is_visible(field, Direction::Both))
+                    .collect::<Vec<_>>();
+                let mut known_types = visible
+                    .iter()
+                    .map(|field| local_type_ref(&field.ty, document, names, options))
+                    .collect::<Result<Vec<_>, _>>()?;
+                known_types.extend(flattened_types);
+                let mut members = visible
+                    .iter()
+                    .map(|field| {
+                        field_type(
+                            field,
+                            Direction::Both,
+                            document,
+                            names,
+                            options,
+                            qualify,
+                            narrowed,
+                        )
+                        .map(|member| (field.doc.as_ref(), member))
+                    })
+                    .collect::<Result<Vec<_>, _>>()?;
+                match openness.as_ref() {
+                    ObjectOpenness::Reject => {}
+                    ObjectOpenness::PreserveTyped { value } => {
+                        let extra = local_type_ref(
+                            openness_value(value, document),
+                            document,
+                            names,
+                            options,
+                        )?;
+                        if known_types.iter().any(|ty| *ty != extra) {
+                            return Err(EmitError(
+                                "TypeScript cannot represent typed object openness when direct or flattened fields have different types"
+                                    .into(),
+                            ));
+                        }
+                        let index_type = if visible.iter().any(|field| {
+                            field.presence == pons_ir::Presence::Optional
+                                || matches!(
+                                    field.access,
+                                    Some(Access::ReadOnly | Access::WriteOnly)
+                                )
+                        }) {
+                            format!("{extra} | undefined")
+                        } else {
+                            extra
+                        };
+                        members.push((None, format!("[key: string]: {index_type}")));
+                    }
+                    ObjectOpenness::PreserveOpaque => {
+                        members.push((None, String::from("[key: string]: unknown")));
+                    }
+                }
+                let mut ty = object_type(&members);
+                for flat in flattened {
+                    ty = format!("{ty} & {}", local_type_ref(flat, document, names, options)?);
+                }
+                Ok(ty)
+            }
         },
     }
 }

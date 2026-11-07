@@ -362,6 +362,21 @@ fn normalize_inline(
                 normalize_ref(item, ids)?;
             }
         }
+        crate::InlineType::Struct {
+            fields,
+            flattened,
+            openness,
+        } => {
+            for field in fields {
+                normalize_ref(&mut field.ty, ids)?;
+            }
+            for member in flattened {
+                normalize_ref(member, ids)?;
+            }
+            if let crate::ObjectOpenness::PreserveTyped { value } = openness.as_mut() {
+                normalize_ref(value, ids)?;
+            }
+        }
         _ => {}
     }
     Ok(())

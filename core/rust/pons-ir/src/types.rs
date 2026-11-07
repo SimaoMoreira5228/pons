@@ -269,6 +269,17 @@ impl TypeRef {
             Self::Inline(InlineType::Tuple { items }) => {
                 items.iter().for_each(|item| item.visit_refs(visit));
             }
+            Self::Inline(InlineType::Struct {
+                fields,
+                flattened,
+                openness,
+            }) => {
+                fields.iter().for_each(|field| field.ty.visit_refs(visit));
+                flattened.iter().for_each(|ty| ty.visit_refs(visit));
+                if let ObjectOpenness::PreserveTyped { value } = openness.as_ref() {
+                    value.visit_refs(visit);
+                }
+            }
             Self::Inline(_) => {}
         }
     }
@@ -333,6 +344,13 @@ pub enum InlineType {
     },
     Tuple {
         items: Vec<TypeRef>,
+    },
+    Struct {
+        #[serde(default)]
+        fields: Vec<Field>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        flattened: Vec<TypeRef>,
+        openness: Box<ObjectOpenness>,
     },
 }
 

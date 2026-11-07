@@ -25,9 +25,5 @@ tako-rs = "2.7"
 tako-rs-core = "2.7"
 
 [dev-dependencies]
-axum.workspace = true
 headers = "0.4.1"
-pons-axum = { path = "../pons-axum" }
-pons-core = { path = "../../core/rust/pons-core", features = ["serde_json"] }
-pons-ir = { path = "../../core/rust/pons-ir" }
 serde.workspace = true

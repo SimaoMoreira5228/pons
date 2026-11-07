@@ -1079,6 +1079,36 @@
             "kind",
             "items"
           ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "fields": {
+              "type": "array",
+              "default": [],
+              "items": {
+                "$ref": "#/$defs/Field"
+              }
+            },
+            "flattened": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/TypeRef"
+              }
+            },
+            "kind": {
+              "type": "string",
+              "const": "struct"
+            },
+            "openness": {
+              "$ref": "#/$defs/ObjectOpenness"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "openness"
+          ]
         }
       ]
     },

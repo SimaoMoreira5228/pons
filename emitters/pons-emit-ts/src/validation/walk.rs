@@ -604,6 +604,13 @@ impl<'a> Walk<'a> {
                 let items = self.items(backend, items)?;
                 backend.tuple(&items)
             }
+            InlineType::Struct {
+                fields,
+                flattened,
+                openness,
+            } => {
+                return self.structure(backend, fields, flattened, openness, Direction::Both);
+            }
         };
         self.record(backend.name(), rendered)
     }

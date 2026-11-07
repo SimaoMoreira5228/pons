@@ -3,6 +3,7 @@ use pons_ir::{
 };
 use serde_json::{Value, json};
 
+use super::objects::fields_schema_with;
 use super::patterns::stated_pattern;
 use crate::{Builder, EmitError};
 
@@ -154,6 +155,25 @@ impl<'a> Builder<'a> {
             InlineType::Tuple { items } => {
                 json!({"type":"array","prefixItems":items.iter().map(|item| self.type_schema(item)).collect::<Result<Vec<_>,_>>()?,"minItems":items.len(),"maxItems":items.len(),"items":false})
             }
+            InlineType::Struct {
+                fields,
+                flattened,
+                openness,
+            } => {
+                let mut all: Vec<&pons_ir::Field> = fields.iter().collect();
+                for member in flattened {
+                    let Some((inner, _)) = self.object_fields(member, &mut Vec::new())? else {
+                        return Err(EmitError(
+                            "an inline struct member cannot be flattened because it is not a struct"
+                                .into(),
+                        ));
+                    };
+                    all.extend(inner);
+                }
+                let mut object = fields_schema_with(self, all)?;
+                object["additionalProperties"] = self.openness_schema(openness)?;
+                object
+            }
         })
     }
 
@@ -251,9 +271,10 @@ impl<'a> Builder<'a> {
                     place => self.wire_form_of(inner, place, visiting),
                 };
             }
-            InlineType::Array { .. } | InlineType::Map { .. } | InlineType::Tuple { .. } => {
-                WireForm::Json
-            }
+            InlineType::Array { .. }
+            | InlineType::Map { .. }
+            | InlineType::Tuple { .. }
+            | InlineType::Struct { .. } => WireForm::Json,
 
             InlineType::Bytes {
                 encoding: ByteEncoding::Array,

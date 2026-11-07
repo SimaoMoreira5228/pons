@@ -195,6 +195,21 @@ fn collect_type_ref(ty: &crate::TypeRef, namespaces: &mut BTreeSet<String>) {
         crate::InlineType::Tuple { items } => items
             .iter()
             .for_each(|item| collect_type_ref(item, namespaces)),
+        crate::InlineType::Struct {
+            fields,
+            flattened,
+            openness,
+        } => {
+            fields
+                .iter()
+                .for_each(|field| collect_field(field, namespaces));
+            flattened
+                .iter()
+                .for_each(|member| collect_type_ref(member, namespaces));
+            if let crate::ObjectOpenness::PreserveTyped { value } = openness.as_ref() {
+                collect_type_ref(value, namespaces);
+            }
+        }
         _ => {}
     }
 }

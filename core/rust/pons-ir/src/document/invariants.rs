@@ -589,6 +589,25 @@ impl Document {
                 TypeRef::Inline(InlineType::Tuple { items }) => items
                     .iter()
                     .find_map(|item| self.direction_reached(item, boundary, visited)),
+                TypeRef::Inline(InlineType::Struct {
+                    fields,
+                    flattened,
+                    openness,
+                }) => fields
+                    .iter()
+                    .filter(|field| field_crosses(field, boundary))
+                    .find_map(|field| self.direction_reached(&field.ty, boundary, visited))
+                    .or_else(|| {
+                        flattened
+                            .iter()
+                            .find_map(|member| self.direction_reached(member, boundary, visited))
+                    })
+                    .or_else(|| match openness.as_ref() {
+                        ObjectOpenness::PreserveTyped { value } => {
+                            self.direction_reached(value, boundary, visited)
+                        }
+                        _ => None,
+                    }),
                 _ => None,
             };
         };

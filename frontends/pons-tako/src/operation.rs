@@ -54,7 +54,7 @@ pub(crate) fn build(path: &str, description: RouteDescription) -> BuiltOperation
         headers: cx.headers,
         body: cx.body,
         responses: cx.responses,
-        errors: cx.errors,
+        errors: Vec::new(),
         errors_inherit: true,
         stream: None,
         auth: AuthRequirement::default(),

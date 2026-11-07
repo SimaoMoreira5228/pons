@@ -70,6 +70,11 @@ impl<'a> Validator<'a> {
             InlineType::Array { item, unique } => self.sequence(item, *unique, path, value),
             InlineType::Map { key, value: item } => self.mapping(key, item, path, value),
             InlineType::Tuple { items } => self.tuple(items, path, value),
+            InlineType::Struct {
+                fields,
+                flattened,
+                openness,
+            } => self.object(fields, flattened, openness, path, value),
         }
     }
 }

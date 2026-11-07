@@ -1,7 +1,9 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use pons_core::TypeCx;
-use pons_ir::{EnumRepr, Field, ObjectOpenness, TypeKind, Variant, VariantPayload};
+use pons_ir::{
+    EnumRepr, Field, InlineType, ObjectOpenness, TypeKind, TypeRef, Variant, VariantPayload,
+};
 use serde_json::{Map, Value};
 
 use crate::convert::{
@@ -42,6 +44,21 @@ pub(crate) fn named(
     object
         .contains_key("allOf")
         .then(|| all_of(cx, context, object))
+}
+
+pub(crate) fn inline_all_of(
+    cx: &mut TypeCx,
+    context: &Context<'_>,
+    object: &Map<String, Value>,
+) -> TypeRef {
+    match merged_object(cx, context, object) {
+        Ok((fields, openness)) => TypeRef::Inline(InlineType::Struct {
+            fields,
+            flattened: Vec::new(),
+            openness: Box::new(openness),
+        }),
+        Err(message) => opaque(cx, "json-schema:allOf", message),
+    }
 }
 
 fn discriminated(cx: &mut TypeCx, context: &Context<'_>, object: &Map<String, Value>) -> TypeKind {

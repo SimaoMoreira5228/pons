@@ -117,6 +117,7 @@ fn inline_wrong(document: &Document, inline: &InlineType, direction: Direction) 
         InlineType::Map { .. } => Value::Array(Vec::new()),
         InlineType::Tuple { items } if items.is_empty() => Value::String("not-a-tuple".into()),
         InlineType::Tuple { .. } => Value::Array(Vec::new()),
+        InlineType::Struct { .. } => Value::String("__pons_invalid__".into()),
     })
 }
 

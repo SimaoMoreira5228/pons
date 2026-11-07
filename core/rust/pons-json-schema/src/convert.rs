@@ -101,9 +101,6 @@ fn composite(
             return Some(lower_branches(cx, context, keyword, branches));
         }
     }
-    if let Some(branches) = object.get("allOf") {
-        return Some(lower_all_of(cx, context, branches));
-    }
     None
 }
 
@@ -152,23 +149,19 @@ fn is_null_schema(schema: &Value) -> bool {
         .is_some_and(|object| object.get("type").and_then(Value::as_str) == Some("null"))
 }
 
-fn lower_all_of(cx: &mut TypeCx, context: &Context<'_>, branches: &Value) -> TypeRef {
-    let Some(branches) = branches.as_array() else {
-        return opaque(cx, "json-schema:allOf", "allOf must be an array of schemas");
-    };
-    if let [branch] = branches.as_slice()
+fn all_of_inline(cx: &mut TypeCx, context: &Context<'_>, object: &Map<String, Value>) -> TypeRef {
+    if let Some(title) = object.get("title").and_then(Value::as_str) {
+        return inline_named(cx, context, title, object);
+    }
+    if let Some([branch]) = object
+        .get("allOf")
+        .and_then(Value::as_array)
+        .map(Vec::as_slice)
         && branch.get("$ref").and_then(Value::as_str).is_some()
     {
         return lower_ref(cx, context, branch);
     }
-    opaque(
-        cx,
-        "json-schema:allOf",
-        format!(
-            "allOf with {} branches composes schemas and has no Pons type representation",
-            branches.len()
-        ),
-    )
+    composition::inline_all_of(cx, context, object)
 }
 
 fn names_fields(object: &Map<String, Value>) -> bool {
@@ -290,6 +283,9 @@ fn lower_object_ref(
     }
     if object.contains_key("discriminator") {
         return discriminator_inline(cx, context, object);
+    }
+    if object.contains_key("allOf") {
+        return all_of_inline(cx, context, object);
     }
     if let Some(ty) = composite(cx, context, object) {
         return ty;
