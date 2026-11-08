@@ -110,6 +110,14 @@ sealed class InlineType {
     @Serializable
     @SerialName("tuple")
     data class TupleType(val items: List<TypeRef>) : InlineType()
+
+    @Serializable
+    @SerialName("struct")
+    data class StructType(
+        val fields: List<Field>,
+        val flattened: List<TypeRef> = emptyList(),
+        val openness: ObjectOpenness,
+    ) : InlineType()
 }
 
 @Serializable

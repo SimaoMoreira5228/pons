@@ -1729,8 +1729,10 @@ name = "pons-tako"
 version = "0.1.0"
 dependencies = [
  "axum",
+ "futures-util",
  "headers",
  "http 1.5.0",
+ "http-body-util",
  "linkme",
  "pons-axum",
  "pons-core",

@@ -107,6 +107,7 @@ private class ValueValidator(
             is InlineType.ArrayType -> sequence(type.item, type.unique, path, value)
             is InlineType.MapType -> mapping(type.key, type.value, path, value)
             is InlineType.TupleType -> tuple(type.items, path, value)
+            is InlineType.StructType -> objectValue(type.fields, type.flattened, type.openness, path, value)
         }
     }
 
