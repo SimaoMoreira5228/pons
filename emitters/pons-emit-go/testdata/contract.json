@@ -79,7 +79,36 @@
       "direction": "output",
       "fields": [
         {"wire": "id", "ident": ["id"], "ty": {"kind": "int", "bits": 64, "signed": true, "wire": "number"}, "presence": "required"},
-        {"wire": "name", "ident": ["name"], "ty": {"kind": "string"}, "presence": "required"}
+        {"wire": "name", "ident": ["name"], "ty": {"kind": "string"}, "presence": "required"},
+        {
+          "wire": "details",
+          "ident": ["details"],
+          "presence": "optional",
+          "ty": {
+            "kind": "struct",
+            "openness": "reject",
+            "fields": [
+              {"wire": "source", "ident": ["source"], "ty": {"kind": "string"}, "presence": "required"},
+              {"wire": "origin", "ident": ["source"], "ty": {"kind": "string"}, "presence": "optional"},
+              {"wire": "readings", "ident": ["readings"], "ty": {"kind": "array", "item": {
+                "kind": "struct",
+                "openness": "reject",
+                "fields": [
+                  {"wire": "at", "ident": ["at"], "ty": {"kind": "string"}, "presence": "required"},
+                  {"wire": "value", "ident": ["value"], "ty": {"kind": "float", "bits": 64}, "presence": "required"}
+                ]
+              }}, "presence": "required"},
+              {"wire": "counters", "ident": ["counters"], "ty": {"kind": "map", "key": {"kind": "string"}, "value": {
+                "kind": "struct",
+                "openness": "reject",
+                "fields": [
+                  {"wire": "count", "ident": ["count"], "ty": {"kind": "int", "bits": 32, "signed": true, "wire": "number"}, "presence": "required"}
+                ]
+              }}, "presence": "required"}
+            ],
+            "flattened": [{"ref": "fixture::Problem"}]
+          }
+        }
       ]
     },
     "fixture::EventPage": {

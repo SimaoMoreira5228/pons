@@ -2,7 +2,7 @@ use http::StatusCode;
 use pons_core::{ErrorSpec, Schema};
 use pons_ir::{
     AuthRequirement, Body, ContentKind, Diagnostic, ErrorResponse, HeaderParameter, Response,
-    ResponseStatus, StreamDescription, TypeRef,
+    ResponseStatus, TypeRef,
 };
 use tako_rs_core::responder::Responder;
 use tako_rs_core::types::Response as TakoResponse;
@@ -17,7 +17,6 @@ pub struct OperationCx {
     pub(crate) query: Option<TypeRef>,
     pub(crate) body: Option<Body>,
     pub(crate) responses: Vec<Response>,
-    pub(crate) stream: Option<StreamDescription>,
     pub(crate) errors: Vec<ErrorResponse>,
     pub(crate) auth: AuthRequirement,
     pub(crate) diagnostics: Vec<Diagnostic>,
@@ -138,13 +137,6 @@ where
 impl<T: Schema> DescribeResponse for tako::extractors::json::Json<T> {
     fn describe(cx: &mut OperationCx) {
         cx.response::<T>(200, ContentKind::Json);
-    }
-}
-
-#[cfg(feature = "sse")]
-impl<T: Schema, S> DescribeResponse for crate::PonsSse<T, S> {
-    fn describe(cx: &mut OperationCx) {
-        cx.sse::<T>("message");
     }
 }
 

@@ -96,7 +96,7 @@ func (a *analysis) buildPagination(plan *operationPlan, origin string) *paginati
 		a.markLossy(origin, "the Go emitter cannot generate a pagination iterator for %s, because the items pointer %q does not end at an array", subject, descriptor.Items)
 		return nil
 	}
-	itemType, err := a.goType(*terminal.Inline.Item)
+	itemType, err := a.goType(*terminal.Inline.Item, "operations."+origin)
 	if err != nil {
 		a.markLossy(origin, "the Go emitter cannot generate a pagination iterator for %s, because the items pointer %q has an item type that %s", subject, descriptor.Items, err)
 		return nil

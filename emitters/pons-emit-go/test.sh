@@ -258,7 +258,7 @@ func TestEventsListAll(t *testing.T) {
 		response.Header().Set("Content-Type", "application/json")
 		switch calls {
 		case 1:
-			response.Write([]byte(`{"items":[{"id":1,"name":"one"},{"id":2,"name":"two"}],"next_cursor":"c2"}`))
+			response.Write([]byte(`{"items":[{"id":1,"name":"one","details":{"source":"api","origin":"sensor","readings":[{"at":"t1","value":1.5}],"counters":{"ok":{"count":2}},"code":"c1","message":"first"}},{"id":2,"name":"two"}],"next_cursor":"c2"}`))
 		case 2:
 			response.Write([]byte(`{"items":[{"id":3,"name":"three"}],"next_cursor":""}`))
 		default:
@@ -271,6 +271,26 @@ func TestEventsListAll(t *testing.T) {
 	ids := []int64{}
 	err := client.EventsListAll(context.Background(), EventQuery{}, func(event Event) error {
 		ids = append(ids, event.ID)
+		if event.ID == 1 {
+			if event.Details == nil {
+				t.Fatal("event 1 has no details")
+			}
+			if event.Details.Source != "api" || event.Details.Source2 == nil || *event.Details.Source2 != "sensor" {
+				t.Errorf("details = %#v", event.Details)
+			}
+			if len(event.Details.Readings) != 1 || event.Details.Readings[0].At != "t1" || event.Details.Readings[0].Value != 1.5 {
+				t.Errorf("readings = %#v", event.Details.Readings)
+			}
+			if got := event.Details.Counters["ok"].Count; got != 2 {
+				t.Errorf("counter = %d", got)
+			}
+			if event.Details.Code != "c1" || event.Details.Message != "first" {
+				t.Errorf("flattened fields = %#v", event.Details)
+			}
+		}
+		if event.ID == 2 && event.Details != nil {
+			t.Errorf("event 2 details = %#v", event.Details)
+		}
 		return nil
 	})
 	if err != nil {

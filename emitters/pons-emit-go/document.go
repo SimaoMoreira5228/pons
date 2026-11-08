@@ -108,6 +108,9 @@ type inlineType struct {
 	Key        *typeRef                   `json:"key"`
 	Value      *typeRef                   `json:"value"`
 	Items      []typeRef                  `json:"items"`
+	Fields     []field                    `json:"fields"`
+	Flattened  []typeRef                  `json:"flattened"`
+	Openness   json.RawMessage            `json:"openness"`
 	Ext        map[string]json.RawMessage `json:"ext"`
 }
 

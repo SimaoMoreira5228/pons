@@ -11,18 +11,15 @@ categories = ["web-programming::http-server", "development-tools"]
 [features]
 default = []
 macros = ["dep:linkme", "dep:pons-tako-macros"]
-sse = ["dep:futures-util", "tako-rs/sse"]
 typed-header = ["dep:headers", "tako-rs/typed-header"]
 
 [dependencies]
-futures-util = { workspace = true, optional = true }
 headers = { version = "0.4.1", optional = true }
 http = "1"
 linkme = { version = "0.3.36", optional = true }
 pons-core = { path = "../../core/rust/pons-core", features = ["serde_json"] }
 pons-ir = { path = "../../core/rust/pons-ir" }
 pons-tako-macros = { path = "../pons-tako-macros", optional = true }
-serde.workspace = true
 serde_json.workspace = true
 tako-rs = "2.7"
 tako-rs-core = "2.7"
@@ -30,7 +27,6 @@ tako-rs-core = "2.7"
 [dev-dependencies]
 axum.workspace = true
 headers = "0.4.1"
-http-body-util = "0.1"
 pons-axum = { path = "../pons-axum" }
 pons-core = { path = "../../core/rust/pons-core", features = ["serde_json"] }
 pons-ir = { path = "../../core/rust/pons-ir" }

@@ -107,7 +107,7 @@ func (a *analysis) lossyProblems() []problem {
 		problems = append(problems, problem{
 			code:    "GO-E003",
 			message: entry.message,
-			origin:  strings.TrimPrefix(entry.subject, "operations."),
+			origin:  originOf(entry.subject),
 		})
 	}
 	return problems

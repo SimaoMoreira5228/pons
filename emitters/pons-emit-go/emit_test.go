@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"os"
+	"strings"
 	"testing"
 )
 
@@ -227,6 +228,133 @@ func TestTypesMapTheWireShapes(t *testing.T) {
 	}
 }
 
+func TestInlineStructRendersItsShape(t *testing.T) {
+	doc := decodeFixture(t)
+	analysis := newAnalysis(doc, "fixture")
+	if len(analysis.problems) > 0 {
+		t.Fatalf("analysis problems: %#v", analysis.problems)
+	}
+	event := analysis.typeByID["fixture::Event"]
+	var details *fieldPlan
+	for index := range event.Fields {
+		if event.Fields[index].Wire == "details" {
+			details = &event.Fields[index]
+		}
+	}
+	if details == nil {
+		t.Fatal("Event details plan is missing")
+	}
+	shape := details.GoType
+	if !strings.HasPrefix(shape, "*struct {\n") {
+		t.Fatalf("details = %q", shape)
+	}
+	for _, want := range []string{
+		"Source string `json:\"source\"`",
+		"Source2 *string `json:\"origin,omitempty\"`",
+		"Readings []struct {\n",
+		"Counters map[string]struct {\n",
+		"Count int32 `json:\"count\"`",
+		"Code string `json:\"code\"`",
+		"Message string `json:\"message\"`",
+	} {
+		if !strings.Contains(shape, want) {
+			t.Fatalf("details = %q does not contain %q", shape, want)
+		}
+	}
+}
+
+func inlineMutation(t *testing.T, mutate func(map[string]any)) map[string]any {
+	t.Helper()
+	value := mutateFixture(t)
+	types := value["types"].(map[string]any)
+	fields := types["fixture::Event"].(map[string]any)["fields"].([]any)
+	for _, raw := range fields {
+		field := raw.(map[string]any)
+		if field["wire"] == "details" {
+			mutate(field["ty"].(map[string]any))
+			return value
+		}
+	}
+	t.Fatal("Event details field is missing")
+	return nil
+}
+
+func TestOpenInlineStructIsLossy(t *testing.T) {
+	for _, testCase := range []struct {
+		name  string
+		value any
+	}{
+		{"preserve_typed", map[string]any{"preserve_typed": map[string]any{"value": map[string]any{"kind": "string"}}}},
+		{"preserve_opaque", "preserve_opaque"},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			value := inlineMutation(t, func(details map[string]any) {
+				details["openness"] = testCase.value
+			})
+			raw, err := json.Marshal(value)
+			if err != nil {
+				t.Fatal(err)
+			}
+			strict := emitFixture(t, raw, map[string]any{"package": "fixture"})
+			if strict.Error == "" || !bytes.Contains([]byte(strict.Error), []byte("object openness")) {
+				t.Fatalf("strict response = %#v", strict)
+			}
+			lossy := emitFixtureMode(t, raw, map[string]any{"package": "fixture"}, "lossy")
+			if lossy.Error != "" {
+				t.Fatalf("lossy emit failed: %s", lossy.Error)
+			}
+			if lossy.Coverage == nil || len(lossy.Coverage.Lossy) != 1 || lossy.Coverage.Lossy[0] != "types.fixture::Event" {
+				t.Fatalf("coverage = %#v", lossy.Coverage)
+			}
+			if len(lossy.Diagnostics) != 1 || !bytes.Contains([]byte(lossy.Diagnostics[0].Message), []byte("inline struct")) {
+				t.Fatalf("diagnostics = %#v", lossy.Diagnostics)
+			}
+			if types := invokeResponse(t, lossy, "types.go"); !bytes.Contains([]byte(types), []byte(`json:"readings"`)) {
+				t.Fatalf("types.go does not keep the inline shape:\n%s", types)
+			}
+		})
+	}
+}
+
+func TestOpenInlineStructInAnOperationIsLossy(t *testing.T) {
+	value := mutateFixture(t)
+	operations := value["operations"].([]any)
+	body := operations[1].(map[string]any)["body"].(map[string]any)
+	body["ty"] = map[string]any{
+		"kind":     "struct",
+		"openness": "preserve_opaque",
+		"fields": []any{
+			map[string]any{"wire": "name", "ident": []any{"name"}, "ty": map[string]any{"kind": "string"}, "presence": "required"},
+		},
+	}
+	raw, err := json.Marshal(value)
+	if err != nil {
+		t.Fatal(err)
+	}
+	lossy := emitFixtureMode(t, raw, map[string]any{"package": "fixture"}, "lossy")
+	if lossy.Error != "" {
+		t.Fatalf("lossy emit failed: %s", lossy.Error)
+	}
+	if lossy.Coverage == nil || len(lossy.Coverage.Lossy) != 1 || lossy.Coverage.Lossy[0] != "operations.users.create" {
+		t.Fatalf("coverage = %#v", lossy.Coverage)
+	}
+	if operations := invokeResponse(t, lossy, "operations.go"); !bytes.Contains([]byte(operations), []byte("Name string `json:\"name\"`")) {
+		t.Fatalf("operations.go does not use the inline body:\n%s", operations)
+	}
+}
+
+func TestFlattenedInlineMapIsRejected(t *testing.T) {
+	value := inlineMutation(t, func(details map[string]any) {
+		details["flattened"] = []any{
+			map[string]any{"kind": "map", "key": map[string]any{"kind": "string"}, "value": map[string]any{"kind": "string"}},
+		}
+	})
+	response := emitMutated(t, value)
+	if response.Error == "" || !bytes.Contains([]byte(response.Error), []byte("flattens")) {
+		t.Fatalf("response = %#v", response)
+	}
+}
+
 func TestUnsupportedConstructsAreRejected(t *testing.T) {
 	for _, testCase := range []struct {
 		name   string
@@ -307,6 +435,21 @@ func TestUnsupportedConstructsAreRejected(t *testing.T) {
 				types := value["types"].(map[string]any)
 				fields := types["fixture::User"].(map[string]any)["fields"].([]any)
 				fields[0].(map[string]any)["ty"] = map[string]any{"ref": "fixture::User"}
+			},
+			want: "required cycle",
+		},
+		{
+			name: "required cycle through an inline struct",
+			change: func(value map[string]any) {
+				types := value["types"].(map[string]any)
+				fields := types["fixture::User"].(map[string]any)["fields"].([]any)
+				fields[0].(map[string]any)["ty"] = map[string]any{
+					"kind":     "struct",
+					"openness": "reject",
+					"fields": []any{
+						map[string]any{"wire": "self", "ident": []any{"self"}, "ty": map[string]any{"ref": "fixture::User"}, "presence": "required"},
+					},
+				}
 			},
 			want: "required cycle",
 		},

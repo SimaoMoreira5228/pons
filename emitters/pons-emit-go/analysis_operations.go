@@ -53,7 +53,7 @@ func (a *analysis) buildPath(plan *operationPlan, params *nameRegistry, origin s
 				a.addProblem(origin, "the path parameter %s is not a scalar", *segment.Param)
 				continue
 			}
-			goType, err := a.goType(*segment.Ty)
+			goType, err := a.goType(*segment.Ty, "operations."+origin)
 			if err != nil {
 				a.addProblem(origin, "the path parameter %s %s", *segment.Param, err)
 				continue
@@ -102,7 +102,7 @@ func (a *analysis) buildHeaders(plan *operationPlan, params *nameRegistry, origi
 			a.addProblem(origin, "the request header %s is not a scalar", header.Wire)
 			continue
 		}
-		goType, err := a.goType(header.Ty)
+		goType, err := a.goType(header.Ty, "operations."+origin)
 		if err != nil {
 			a.addProblem(origin, "the request header %s %s", header.Wire, err)
 			continue
@@ -141,7 +141,7 @@ func (a *analysis) buildBody(plan *operationPlan, params *nameRegistry, origin s
 		a.addProblem(origin, "the optional request body is nullable, which this emitter does not support")
 		return
 	}
-	goType, err := a.goType(requestBody.Ty)
+	goType, err := a.goType(requestBody.Ty, "operations."+origin)
 	if err != nil {
 		a.addProblem(origin, "the request body %s", err)
 		return
@@ -179,7 +179,7 @@ func (a *analysis) buildSuccess(plan *operationPlan, origin string) {
 			a.addProblem(origin, "the JSON success response has no body type")
 			return
 		}
-		goType, err := a.goType(*response.Body)
+		goType, err := a.goType(*response.Body, "operations."+origin)
 		if err != nil {
 			a.addProblem(origin, "the success body %s", err)
 			return
@@ -230,16 +230,19 @@ func (a *analysis) observeError(response *errorResponse, origin string) (string,
 		a.addProblem(origin, "the error %s %s", statusText(response.Status), err)
 		return "", false
 	}
+	bodyGo := ""
 	switch response.Content {
 	case "json":
 		if response.Body == nil {
 			a.addProblem(origin, "the JSON error %s has no body type", statusText(response.Status))
 			return "", false
 		}
-		if _, err := a.goType(*response.Body); err != nil {
+		goType, err := a.goType(*response.Body, "operations."+origin)
+		if err != nil {
 			a.addProblem(origin, "the error body %s", err)
 			return "", false
 		}
+		bodyGo = goType
 	case "text":
 		if response.Body == nil {
 			a.addProblem(origin, "the text error %s has no body type", statusText(response.Status))
@@ -267,6 +270,7 @@ func (a *analysis) observeError(response *errorResponse, origin string) (string,
 			Message: message,
 			Content: response.Content,
 			Body:    response.Body,
+			BodyGo:  bodyGo,
 			Words:   response.Name,
 			Status:  statusText(response.Status),
 			Code:    response.Status.Code,
@@ -354,6 +358,16 @@ func refSignature(ref typeRef) string {
 			parts = append(parts, refSignature(item))
 		}
 		return "tuple(" + strings.Join(parts, ",") + ")"
+	case "struct":
+		parts := make([]string, 0, len(inline.Fields)+len(inline.Flattened)+1)
+		for _, field := range inline.Fields {
+			parts = append(parts, field.Wire+"="+refSignature(field.Ty))
+		}
+		for _, flat := range inline.Flattened {
+			parts = append(parts, "flat("+refSignature(flat)+")")
+		}
+		parts = append(parts, "open("+string(inline.Openness)+")")
+		return "struct(" + strings.Join(parts, ",") + ")"
 	}
 	return inline.Kind
 }

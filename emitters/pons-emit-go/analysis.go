@@ -76,6 +76,7 @@ type errorType struct {
 	Message string
 	Content string
 	Body    *typeRef
+	BodyGo  string
 	Words   []string
 	Status  string
 	Code    int
@@ -166,10 +167,21 @@ func (a *analysis) addProblem(origin, format string, args ...any) {
 }
 
 func (a *analysis) markLossy(origin, format string, args ...any) {
+	a.markLossySubject("operations."+origin, format, args...)
+}
+
+func (a *analysis) markLossySubject(subject, format string, args ...any) {
 	a.lossy = append(a.lossy, lossyOperation{
-		subject: "operations." + origin,
+		subject: subject,
 		message: fmt.Sprintf(format, args...),
 	})
+}
+
+func originOf(subject string) string {
+	if trimmed, ok := strings.CutPrefix(subject, "types."); ok {
+		return trimmed
+	}
+	return strings.TrimPrefix(subject, "operations.")
 }
 
 func (a *analysis) assignTypeNames() {

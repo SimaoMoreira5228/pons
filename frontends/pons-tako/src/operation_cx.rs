@@ -8,8 +8,6 @@ use pons_ir::{
 };
 #[cfg(feature = "typed-header")]
 use pons_ir::{HeaderParameter, OpaqueWire};
-#[cfg(feature = "sse")]
-use pons_ir::{StreamDescription, StreamKind, StreamMessage};
 
 use crate::describe::OperationCx;
 
@@ -90,26 +88,6 @@ impl OperationCx {
         self.responses.push(Response {
             status: ResponseStatus::Exact(status),
             content: ContentKind::Empty,
-            media: None,
-            body: None,
-            headers: Vec::new(),
-            ext: Default::default(),
-        });
-    }
-
-    #[cfg(feature = "sse")]
-    pub(crate) fn sse<T: Schema>(&mut self, event: &'static str) {
-        self.stream = Some(StreamDescription {
-            kind: StreamKind::Sse {
-                events: vec![StreamMessage {
-                    event: event.to_owned(),
-                    data: T::schema(&mut self.types, Direction::Output),
-                }],
-            },
-        });
-        self.responses.push(Response {
-            status: ResponseStatus::Exact(200),
-            content: ContentKind::Stream,
             media: None,
             body: None,
             headers: Vec::new(),

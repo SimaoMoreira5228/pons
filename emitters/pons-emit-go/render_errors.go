@@ -55,7 +55,7 @@ func (e *DecodeError) Unwrap() error {
 
 	for _, key := range a.errorOrder {
 		def := a.errorDefs[key]
-		bodyType := errorBodyType(a, def)
+		bodyType := errorBodyType(def)
 		builder.WriteString("\n")
 		fmt.Fprintf(&builder, "type %s struct {\n", def.Name)
 		builder.WriteString("\tStatusCode int\n")
@@ -71,20 +71,16 @@ func (e *DecodeError) Unwrap() error {
 	return builder.String()
 }
 
-func errorBodyType(a *analysis, def *errorType) string {
+func errorBodyType(def *errorType) string {
 	switch def.Content {
 	case "json":
 		if def.Body == nil {
 			return ""
 		}
-		goType, err := a.goType(*def.Body)
-		if err != nil {
-			return ""
-		}
 		if def.Body.Named {
-			return "*" + goType
+			return "*" + def.BodyGo
 		}
-		return goType
+		return def.BodyGo
 	case "text":
 		return "string"
 	default:

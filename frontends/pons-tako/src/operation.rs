@@ -56,7 +56,7 @@ pub(crate) fn build(path: &str, description: RouteDescription) -> BuiltOperation
         responses: cx.responses,
         errors: cx.errors,
         errors_inherit: true,
-        stream: cx.stream,
+        stream: None,
         auth: cx.auth,
         provides: None,
         semantics: OperationSemantics {

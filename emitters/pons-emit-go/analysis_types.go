@@ -27,7 +27,7 @@ func (a *analysis) buildTypePlans() {
 				a.addProblem(id, "the newtype %s has no inner type", id)
 				continue
 			}
-			inner, err := a.goType(*def.Inner)
+			inner, err := a.goType(*def.Inner, "types."+id)
 			if err != nil {
 				a.addProblem(id, "%s", err)
 				continue
@@ -46,29 +46,36 @@ func (a *analysis) buildStructPlan(plan *typePlan) {
 	if len(def.Flattened) > 0 {
 		a.addProblem(plan.ID, "the struct %s uses flattened members, which this emitter does not support", plan.ID)
 	}
-	if err := checkOpenness(def.Openness); err != nil {
-		a.addProblem(plan.ID, "the struct %s %s", plan.ID, err)
-	}
-	fieldNames := newNameRegistry()
-	for _, field := range def.Fields {
+	subject := "types." + plan.ID
+	a.classifyOpenness(def.Openness, subject, "the struct "+plan.ID)
+	plan.Fields = a.buildFields(def.Fields, newNameRegistry(), map[string]bool{}, subject, "the struct "+plan.ID)
+}
+func (a *analysis) buildFields(fields []field, names *nameRegistry, wires map[string]bool, subject, label string) []fieldPlan {
+	plans := []fieldPlan{}
+	for _, field := range fields {
+		if wires[field.Wire] {
+			a.addProblem(originOf(subject), "%s has more than one field with the wire name %q", label, field.Wire)
+			continue
+		}
 		if field.Access != nil && *field.Access != "read_write" {
-			a.addProblem(plan.ID, "the field %s.%s is %s; this emitter only generates read_write fields", plan.ID, field.Wire, *field.Access)
+			a.addProblem(originOf(subject), "%s field %s is %s; this emitter only generates read_write fields", label, field.Wire, *field.Access)
 			continue
 		}
 		optional := field.Presence == "optional"
 		if optional && isNullable(field.Ty) {
-			a.addProblem(plan.ID, "the field %s.%s is optional and nullable; Go needs a pointer to distinguish absent from null, which this emitter does not generate", plan.ID, field.Wire)
+			a.addProblem(originOf(subject), "%s field %s is optional and nullable; Go needs a pointer to distinguish absent from null, which this emitter does not generate", label, field.Wire)
 			continue
 		}
-		goType, err := a.goType(field.Ty)
+		goType, err := a.goType(field.Ty, subject)
 		if err != nil {
-			a.addProblem(plan.ID, "the field %s.%s %s", plan.ID, field.Wire, err)
+			a.addProblem(originOf(subject), "%s field %s %s", label, field.Wire, err)
 			continue
 		}
 		if err := validateJSONTag(field.Wire); err != nil {
-			a.addProblem(plan.ID, "the field %s.%s %s", plan.ID, field.Wire, err)
+			a.addProblem(originOf(subject), "%s field %s %s", label, field.Wire, err)
 			continue
 		}
+		wires[field.Wire] = true
 		if optional {
 			goType = "*" + goType
 		}
@@ -76,18 +83,83 @@ func (a *analysis) buildStructPlan(plan *typePlan) {
 		if len(words) == 0 {
 			words = wordsFromWire(field.Wire)
 		}
-		name := fieldNames.claim(exportedName(words))
-		tag := `json:` + quoteTag(field.Wire, optional)
-		plan.Fields = append(plan.Fields, fieldPlan{
+		plans = append(plans, fieldPlan{
 			Wire:     field.Wire,
-			Name:     name,
+			Name:     names.claim(exportedName(words)),
 			GoType:   goType,
-			Tag:      tag,
+			Tag:      quoteTag(field.Wire, optional),
 			Ty:       field.Ty,
 			Optional: optional,
 		})
 	}
+	return plans
 }
+func (a *analysis) structFields(inline *inlineType, subject string) []fieldPlan {
+	const label = "an inline struct"
+	a.classifyOpenness(inline.Openness, subject, label)
+	names := newNameRegistry()
+	wires := map[string]bool{}
+	plans := a.buildFields(inline.Fields, names, wires, subject, label)
+	for _, flattened := range inline.Flattened {
+		plans = append(plans, a.flattenedFields(flattened, names, wires, subject, label, map[string]bool{})...)
+	}
+	return plans
+}
+func (a *analysis) flattenedFields(ref typeRef, names *nameRegistry, wires map[string]bool, subject, label string, seen map[string]bool) []fieldPlan {
+	if ref.Named {
+		if ref.Variant != "" {
+			a.addProblem(originOf(subject), "%s flattens the %s variant of %s, which cannot be inlined", label, ref.Variant, ref.ID)
+			return nil
+		}
+		if seen[ref.ID] {
+			a.addProblem(originOf(subject), "%s flattens %s in a cycle", label, ref.ID)
+			return nil
+		}
+		def, ok := a.doc.Types[ref.ID]
+		if !ok {
+			a.addProblem(originOf(subject), "%s flattens the unknown type %s", label, ref.ID)
+			return nil
+		}
+		switch def.Kind {
+		case "struct":
+			seen[ref.ID] = true
+			a.classifyOpenness(def.Openness, subject, "the flattened struct "+ref.ID)
+			plans := a.buildFields(def.Fields, names, wires, subject, label)
+			for _, nested := range def.Flattened {
+				plans = append(plans, a.flattenedFields(nested, names, wires, subject, label, seen)...)
+			}
+			delete(seen, ref.ID)
+			return plans
+		case "newtype":
+			if def.Inner == nil {
+				a.addProblem(originOf(subject), "%s flattens the newtype %s, which has no inner type", label, ref.ID)
+				return nil
+			}
+			seen[ref.ID] = true
+			plans := a.flattenedFields(*def.Inner, names, wires, subject, label, seen)
+			delete(seen, ref.ID)
+			return plans
+		default:
+			a.addProblem(originOf(subject), "%s flattens the %s %s; only struct members can be inlined into one object", label, def.Kind, ref.ID)
+			return nil
+		}
+	}
+	if ref.Inline == nil {
+		a.addProblem(originOf(subject), "%s flattens a value that is not a type reference", label)
+		return nil
+	}
+	if ref.Inline.Kind != "struct" {
+		a.addProblem(originOf(subject), "%s flattens an inline %s; only struct members can be inlined into one object", label, ref.Inline.Kind)
+		return nil
+	}
+	a.classifyOpenness(ref.Inline.Openness, subject, label)
+	plans := a.buildFields(ref.Inline.Fields, names, wires, subject, label)
+	for _, nested := range ref.Inline.Flattened {
+		plans = append(plans, a.flattenedFields(nested, names, wires, subject, label, seen)...)
+	}
+	return plans
+}
+
 func (a *analysis) buildEnumPlan(plan *typePlan) {
 	def := plan.Def
 	if def.Repr == nil {
@@ -112,7 +184,7 @@ func (a *analysis) buildEnumPlan(plan *typePlan) {
 		plan.Consts = append(plan.Consts, constPlan{Name: constName, Wire: variant.Wire})
 	}
 }
-func (a *analysis) goType(ref typeRef) (string, error) {
+func (a *analysis) goType(ref typeRef, subject string) (string, error) {
 	if ref.Named {
 		name, ok := a.typeNames[ref.ID]
 		if !ok {
@@ -186,7 +258,7 @@ func (a *analysis) goType(ref typeRef) (string, error) {
 		if inline.Inner == nil {
 			return "", fmt.Errorf("has a nullable wrapper with no inner type")
 		}
-		inner, err := a.goType(*inline.Inner)
+		inner, err := a.goType(*inline.Inner, subject)
 		if err != nil {
 			return "", err
 		}
@@ -198,7 +270,7 @@ func (a *analysis) goType(ref typeRef) (string, error) {
 		if inline.Item == nil {
 			return "", fmt.Errorf("has an array with no item type")
 		}
-		item, err := a.goType(*inline.Item)
+		item, err := a.goType(*inline.Item, subject)
 		if err != nil {
 			return "", err
 		}
@@ -210,17 +282,19 @@ func (a *analysis) goType(ref typeRef) (string, error) {
 		if !a.stringUnderlying(*inline.Key) {
 			return "", fmt.Errorf("uses a map key that is not string-like")
 		}
-		key, err := a.goType(*inline.Key)
+		key, err := a.goType(*inline.Key, subject)
 		if err != nil {
 			return "", err
 		}
-		value, err := a.goType(*inline.Value)
+		value, err := a.goType(*inline.Value, subject)
 		if err != nil {
 			return "", err
 		}
 		return "map[" + key + "]" + value, nil
 	case "tuple":
 		return "", fmt.Errorf("uses a tuple, which this emitter does not generate")
+	case "struct":
+		return anonymousStruct(a.structFields(inline, subject)), nil
 	default:
 		return "", fmt.Errorf("uses the unsupported type kind %q", inline.Kind)
 	}
@@ -271,19 +345,48 @@ func (a *analysis) scalar(ref typeRef, seen map[string]bool) bool {
 		return false
 	}
 }
-func checkOpenness(raw json.RawMessage) error {
+
+type opennessPolicy int
+
+const (
+	closedObject opennessPolicy = iota
+	typedOpenObject
+	opaqueOpenObject
+)
+
+func (a *analysis) classifyOpenness(raw json.RawMessage, subject, label string) {
+	policy, err := decodeOpenness(raw)
+	if err != nil {
+		a.addProblem(originOf(subject), "%s %s", label, err)
+		return
+	}
+	switch policy {
+	case typedOpenObject:
+		a.markLossySubject(subject, "%s preserves typed unknown properties, which this emitter drops when decoding; the object openness is lossy", label)
+	case opaqueOpenObject:
+		a.markLossySubject(subject, "%s preserves unknown properties, which this emitter drops when decoding; the object openness is lossy", label)
+	}
+}
+
+func decodeOpenness(raw json.RawMessage) (opennessPolicy, error) {
 	var word string
 	if err := json.Unmarshal(raw, &word); err == nil {
-		if word == "reject" {
-			return nil
+		switch word {
+		case "reject":
+			return closedObject, nil
+		case "preserve_opaque":
+			return opaqueOpenObject, nil
+		default:
+			return closedObject, fmt.Errorf("uses object openness %q, which this emitter does not know", word)
 		}
-		return fmt.Errorf("uses object openness %q; this emitter only rejects unknown properties", word)
 	}
 	var object map[string]json.RawMessage
 	if err := json.Unmarshal(raw, &object); err == nil {
-		return fmt.Errorf("preserves unknown properties; this emitter only generates closed structs")
+		if _, ok := object["preserve_typed"]; ok {
+			return typedOpenObject, nil
+		}
 	}
-	return fmt.Errorf("has no usable object openness policy")
+	return closedObject, fmt.Errorf("has no usable object openness policy")
 }
 func validateJSONTag(wire string) error {
 	if strings.ContainsAny(wire, "`,") {
@@ -293,9 +396,9 @@ func validateJSONTag(wire string) error {
 }
 func quoteTag(wire string, optional bool) string {
 	if optional {
-		return fmt.Sprintf("%q", wire+",omitempty")
+		return fmt.Sprintf("json:%q", wire+",omitempty")
 	}
-	return fmt.Sprintf("%q", wire)
+	return fmt.Sprintf("json:%q", wire)
 }
 func isNullable(ref typeRef) bool {
 	return !ref.Named && ref.Inline != nil && ref.Inline.Kind == "nullable"
@@ -310,15 +413,11 @@ func (a *analysis) checkValueCycles() {
 				if field.Presence == "optional" || isNullable(field.Ty) {
 					continue
 				}
-				if target, ok := valueEdge(field.Ty); ok {
-					edges[id] = append(edges[id], target)
-				}
+				edges[id] = append(edges[id], valueEdges(field.Ty)...)
 			}
 		case "newtype":
 			if def.Inner != nil {
-				if target, ok := valueEdge(*def.Inner); ok {
-					edges[id] = append(edges[id], target)
-				}
+				edges[id] = append(edges[id], valueEdges(*def.Inner)...)
 			}
 		}
 	}
@@ -360,9 +459,22 @@ func (a *analysis) checkValueCycles() {
 	}
 }
 
-func valueEdge(ref typeRef) (string, bool) {
+func valueEdges(ref typeRef) []string {
 	if ref.Named {
-		return ref.ID, true
+		return []string{ref.ID}
 	}
-	return "", false
+	if ref.Inline == nil || ref.Inline.Kind != "struct" {
+		return nil
+	}
+	var edges []string
+	for _, field := range ref.Inline.Fields {
+		if field.Presence == "optional" || isNullable(field.Ty) {
+			continue
+		}
+		edges = append(edges, valueEdges(field.Ty)...)
+	}
+	for _, flattened := range ref.Inline.Flattened {
+		edges = append(edges, valueEdges(flattened)...)
+	}
+	return edges
 }

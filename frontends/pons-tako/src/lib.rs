@@ -8,8 +8,6 @@ mod mount;
 mod operation;
 mod operation_cx;
 mod router;
-#[cfg(feature = "sse")]
-mod sse;
 
 pub use auth::{Auth, AuthSpec, SessionAuth};
 pub use describe::{DescribeRequest, DescribeResponse, OperationCx, WithStatus};
@@ -24,8 +22,6 @@ pub use pons_ir::{Document, Info, ValidationError};
 #[cfg(feature = "macros")]
 pub use pons_tako_macros::{delete, get, head, options, patch, post, put, route};
 pub use router::Router;
-#[cfg(feature = "sse")]
-pub use sse::PonsSse;
 
 pub use tako::extractors;
 pub use tako::route::Route;

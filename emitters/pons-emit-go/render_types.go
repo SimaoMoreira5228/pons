@@ -28,9 +28,7 @@ func renderTypes(a *analysis) string {
 		switch plan.Kind {
 		case "struct":
 			fmt.Fprintf(&builder, "type %s struct {\n", plan.Name)
-			for _, field := range plan.Fields {
-				fmt.Fprintf(&builder, "\t%s %s `%s`\n", field.Name, field.GoType, field.Tag)
-			}
+			writeStructMembers(&builder, plan.Fields)
 			builder.WriteString("}\n")
 		case "enum":
 			fmt.Fprintf(&builder, "type %s string\n", plan.Name)
@@ -69,5 +67,19 @@ func renderTypes(a *analysis) string {
 		builder.WriteString("}\n")
 	}
 
+	return builder.String()
+}
+
+func writeStructMembers(builder *strings.Builder, fields []fieldPlan) {
+	for _, field := range fields {
+		fmt.Fprintf(builder, "\t%s %s `%s`\n", field.Name, field.GoType, field.Tag)
+	}
+}
+
+func anonymousStruct(fields []fieldPlan) string {
+	var builder strings.Builder
+	builder.WriteString("struct {\n")
+	writeStructMembers(&builder, fields)
+	builder.WriteString("}")
 	return builder.String()
 }
