@@ -287,7 +287,7 @@ mod tests {
             "name": "go",
             "version": "0.1.0",
             "protocol": {"min": "3.0", "max": "3.0"},
-            "ir_version": {"min": "0.2", "max": "0.2"},
+            "ir_version": {"min": "0.3", "max": "0.3"},
             "capabilities": {
                 "pagination": pagination,
                 "object_openness": ["reject"],
@@ -298,7 +298,7 @@ mod tests {
 
     fn paginated(kind: &str) -> Document {
         let document = json!({
-            "ir_version": "0.2",
+            "ir_version": "0.3",
             "info": {"title": "Events", "version": "1"},
             "types": {
                 "ListQuery": {

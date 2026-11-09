@@ -205,7 +205,7 @@ fn an_untagged_enum_is_lossy_and_strict_mode_refuses_it() {
 
 fn untagged_document() -> pons_ir::Document {
     let document: pons_ir::Document = serde_json::from_value(json!({
-        "ir_version": "0.2",
+        "ir_version": "0.3",
         "info": {"title": "Example", "version": "1"},
         "types": {
             "Choice": {

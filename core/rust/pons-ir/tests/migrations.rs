@@ -59,12 +59,12 @@ fn the_current_version_decodes_without_a_migration() {
 #[test]
 fn an_unknown_version_rejects_without_running_a_migration() {
     let mut raw = fixture();
-    raw["ir_version"] = json!("0.3");
+    raw["ir_version"] = json!("0.4");
     raw["operations"][0]["method"] = json!("BREW");
     let error = decode(&serde_json::to_vec(&raw).unwrap()).unwrap_err();
     assert_eq!(
         error.to_string(),
-        "unsupported IR version 0.3, this build reads 0.2"
+        "unsupported IR version 0.4, this build reads 0.3"
     );
 }
 
@@ -81,13 +81,26 @@ fn a_registered_migration_runs_before_the_current_shape_is_decoded() {
 }
 
 #[test]
+fn a_zero_two_document_migrates_to_the_current_version() {
+    let mut raw = fixture();
+    raw["ir_version"] = json!("0.2");
+    let document: Document = decode_with(
+        &serde_json::to_vec(&raw).unwrap(),
+        &MigrationRegistry::standard(),
+    )
+    .unwrap();
+    assert_eq!(document.ir_version, IR_VERSION);
+    assert_eq!(document.info.title, raw["info"]["title"]);
+}
+
+#[test]
 fn the_default_registry_has_no_migrations() {
     let mut raw = fixture();
     raw["ir_version"] = json!("0.1");
     let error = decode(&serde_json::to_vec(&raw).unwrap()).unwrap_err();
     assert_eq!(
         error.to_string(),
-        "unsupported IR version 0.1, this build reads 0.2"
+        "unsupported IR version 0.1, this build reads 0.3"
     );
 }
 

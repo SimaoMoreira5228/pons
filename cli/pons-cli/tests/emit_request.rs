@@ -52,7 +52,7 @@ fn an_external_target_takes_its_options_from_the_file_and_puts_them_on_the_wire(
     assert_eq!(sent["target"], "python");
     assert_eq!(sent["mode"], "strict");
     assert_eq!(sent["protocol"], 3);
-    assert_eq!(sent["source_ir_version"], "0.2");
+    assert_eq!(sent["source_ir_version"], "0.3");
     assert!(directory.path().join("generated/acme/__init__.py").exists());
 }
 
@@ -241,7 +241,7 @@ fn dump_request_writes_the_request_and_runs_no_emitter() {
         serde_json::json!({ "package": "acme-sdk" })
     );
     assert_eq!(sent["protocol"], 3);
-    assert_eq!(sent["source_ir_version"], "0.2");
+    assert_eq!(sent["source_ir_version"], "0.3");
     assert_eq!(sent["mode"], "strict");
 
     let mut expected: pons_ir::Document = serde_json::from_str(FIXTURE).unwrap();

@@ -3,12 +3,12 @@ use serde_json::{Value, json};
 #[test]
 fn decoding_refuses_a_version_it_does_not_read_before_reading_anything_else() {
     let mut raw: Value = serde_json::from_str(fixture_json()).unwrap();
-    raw["ir_version"] = json!("0.3");
+    raw["ir_version"] = json!("0.4");
     raw["operations"][0]["method"] = json!("BREW");
     let error = pons_ir::decode(&serde_json::to_vec(&raw).unwrap()).unwrap_err();
     assert_eq!(
         error.to_string(),
-        "unsupported IR version 0.3, this build reads 0.2"
+        "unsupported IR version 0.4, this build reads 0.3"
     );
 
     let mut raw: Value = serde_json::from_str(fixture_json()).unwrap();

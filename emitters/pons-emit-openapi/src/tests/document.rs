@@ -813,3 +813,45 @@ fn canonicalizes_equivalent_documents_before_emitting() {
 
     assert_eq!(crate::emit(&shuffled).unwrap(), expected);
 }
+
+#[test]
+fn emits_every_float_bound() {
+    let mut raw = serde_json::to_value(fixture()).unwrap();
+    raw["types"]["Measurement"] = json!({
+        "kind": "struct",
+        "name": ["measurement"],
+        "direction": "both",
+        "openness": "reject",
+        "fields": [{
+            "wire": "range",
+            "ident": ["range"],
+            "ty": {
+                "kind": "float",
+                "bits": 64,
+                "minimum": 0,
+                "maximum": 100,
+                "multiple_of": 0.5
+            },
+            "presence": "required"
+        }, {
+            "wire": "open_range",
+            "ident": ["open", "range"],
+            "ty": {
+                "kind": "float",
+                "bits": 64,
+                "exclusive_minimum": 0,
+                "exclusive_maximum": 100
+            },
+            "presence": "required"
+        }]
+    });
+    let document: pons_ir::Document = serde_json::from_value(raw).unwrap();
+    let output: Value = serde_json::from_str(&crate::emit(&document).unwrap()).unwrap();
+    let properties = &output["components"]["schemas"]["Measurement"]["properties"];
+
+    assert_eq!(properties["range"]["minimum"], 0);
+    assert_eq!(properties["range"]["maximum"], 100);
+    assert_eq!(properties["range"]["multipleOf"], 0.5);
+    assert_eq!(properties["open_range"]["exclusiveMinimum"], 0);
+    assert_eq!(properties["open_range"]["exclusiveMaximum"], 100);
+}

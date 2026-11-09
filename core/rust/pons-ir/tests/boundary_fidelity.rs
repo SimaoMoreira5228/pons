@@ -5,7 +5,7 @@ type InsertUnknown = fn(&mut serde_json::Value);
 #[test]
 fn numeric_values_round_trip_without_precision_loss() {
     let source = r#"{
-        "ir_version": "0.2",
+        "ir_version": "0.3",
         "info": {"title": "Example", "version": "1"},
         "types": {
             "Wide": {

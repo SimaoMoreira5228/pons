@@ -145,15 +145,46 @@ fn translate_exclusive(
     }
     object.remove(bound.exclusive());
     if !is_integer(object) {
-        warn(
-            diagnostics,
-            location,
-            Fidelity::Lossy,
-            format!(
-                "\"{}\" on a non-integer schema has no exact Pons bound, so the exclusivity is dropped",
-                bound.exclusive()
-            ),
-        );
+        if is_number(object) {
+            let Some(value) = object.get(bound.plain()).cloned() else {
+                warn(
+                    diagnostics,
+                    location,
+                    Fidelity::Lossy,
+                    format!(
+                        "\"{}\" has no {} to translate, so the exclusivity is dropped",
+                        bound.exclusive(),
+                        bound.plain()
+                    ),
+                );
+                return;
+            };
+            if value.is_number() {
+                object.remove(bound.plain());
+                object.insert(bound.exclusive().into(), value);
+            } else {
+                warn(
+                    diagnostics,
+                    location,
+                    Fidelity::Lossy,
+                    format!(
+                        "\"{}\" has a non-numeric {}, so the exclusivity is dropped",
+                        bound.exclusive(),
+                        bound.plain()
+                    ),
+                );
+            }
+        } else {
+            warn(
+                diagnostics,
+                location,
+                Fidelity::Lossy,
+                format!(
+                    "\"{}\" on a non-numeric schema has no exact Pons bound, so the exclusivity is dropped",
+                    bound.exclusive()
+                ),
+            );
+        }
         return;
     }
     let Some(value) = object.get(bound.plain()).cloned() else {
@@ -206,6 +237,15 @@ fn is_integer(object: &Map<String, Value>) -> bool {
         _ => return false,
     };
     names.contains(&"integer") && names.iter().all(|name| matches!(*name, "integer" | "null"))
+}
+
+fn is_number(object: &Map<String, Value>) -> bool {
+    let names = match object.get("type") {
+        Some(Value::String(name)) => vec![name.as_str()],
+        Some(Value::Array(types)) => types.iter().filter_map(Value::as_str).collect(),
+        _ => return false,
+    };
+    names.contains(&"number") && names.iter().all(|name| matches!(*name, "number" | "null"))
 }
 
 fn adjusted(value: &Value, bound: Bound) -> Option<Value> {

@@ -155,7 +155,7 @@ fn a_contract_mismatch_exits_five() {
 
 fn secured() -> Value {
     json!({
-        "ir_version": "0.2",
+        "ir_version": "0.3",
         "info": {"title": "Auth", "version": "1"},
         "auth_schemes": {
             "session": {"kind": "bearer"},
@@ -266,7 +266,7 @@ fn a_provided_credential_is_reused_later_in_the_run() {
     });
 
     let document = json!({
-        "ir_version": "0.2",
+        "ir_version": "0.3",
         "info": {"title": "Login", "version": "1"},
         "types": {
             "Session": {

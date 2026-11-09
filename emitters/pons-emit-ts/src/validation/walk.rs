@@ -576,7 +576,7 @@ impl<'a> Walk<'a> {
                 maximum: maximum.as_ref(),
                 multiple_of: multiple_of.as_ref(),
             })?,
-            InlineType::Float { bits } => backend.float(*bits),
+            InlineType::Float { bits, .. } => backend.float(*bits),
             InlineType::Decimal { wire } => backend.decimal(*wire),
             InlineType::String {
                 format,

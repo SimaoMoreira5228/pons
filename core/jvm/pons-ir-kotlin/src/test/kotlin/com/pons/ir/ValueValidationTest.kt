@@ -12,7 +12,7 @@ class ValueValidationTest {
         Document.serializer(),
         """
         {
-          "ir_version": "0.2",
+          "ir_version": "0.3",
           "info": {"title": "Validation", "version": "1"},
           "types": {
             "Filter#input": {

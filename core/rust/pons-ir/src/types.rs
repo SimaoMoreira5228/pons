@@ -305,6 +305,16 @@ pub enum InlineType {
     Float {
         #[schemars(extend("enum" = [32, 64]))]
         bits: u8,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        minimum: Option<Value>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        maximum: Option<Value>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        exclusive_minimum: Option<Value>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        exclusive_maximum: Option<Value>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        multiple_of: Option<Value>,
     },
     Decimal {
         wire: DecimalWire,

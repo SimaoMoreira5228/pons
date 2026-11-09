@@ -46,7 +46,7 @@ fn validation_coverage_names_the_subjects_the_backend_checks() {
 #[test]
 fn a_document_with_only_input_types_writes_no_validators_file() {
     let document: Document = serde_json::from_value(json!({
-        "ir_version": "0.2",
+        "ir_version": "0.3",
         "info": {"title": "Input", "version": "1"},
         "types": {
             "Filter": {

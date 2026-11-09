@@ -28,7 +28,7 @@ fn imports_an_openapi_document_to_canonical_json() {
     );
     let canonical = String::from_utf8(output.stdout).unwrap();
     let document: Value = serde_json::from_str(&canonical).unwrap();
-    assert_eq!(document["ir_version"], "0.2");
+    assert_eq!(document["ir_version"], "0.3");
     assert_eq!(document["info"]["title"], "Orders");
     let ids = document["operations"]
         .as_array()
@@ -85,7 +85,7 @@ fn imports_a_yaml_document_to_canonical_json() {
     );
     let canonical = String::from_utf8(output.stdout).unwrap();
     let document: Value = serde_json::from_str(&canonical).unwrap();
-    assert_eq!(document["ir_version"], "0.2");
+    assert_eq!(document["ir_version"], "0.3");
     assert_eq!(document["info"]["title"], "Orders");
 }
 

@@ -54,7 +54,14 @@ sealed class InlineType {
 
     @Serializable
     @SerialName("float")
-    data class FloatType(val bits: Int) : InlineType()
+    data class FloatType(
+        val bits: Int,
+        val minimum: JsonElement? = null,
+        val maximum: JsonElement? = null,
+        @SerialName("exclusive_minimum") val exclusiveMinimum: JsonElement? = null,
+        @SerialName("exclusive_maximum") val exclusiveMaximum: JsonElement? = null,
+        @SerialName("multiple_of") val multipleOf: JsonElement? = null,
+    ) : InlineType()
 
     @Serializable
     @SerialName("decimal")

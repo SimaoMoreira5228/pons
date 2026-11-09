@@ -102,7 +102,14 @@ pub(super) fn lower_number(object: &Map<String, Value>) -> TypeRef {
         Some("float") => 32,
         _ => 64,
     };
-    TypeRef::Inline(InlineType::Float { bits })
+    TypeRef::Inline(InlineType::Float {
+        bits,
+        minimum: object.get("minimum").cloned(),
+        maximum: object.get("maximum").cloned(),
+        exclusive_minimum: object.get("exclusiveMinimum").cloned(),
+        exclusive_maximum: object.get("exclusiveMaximum").cloned(),
+        multiple_of: object.get("multipleOf").cloned(),
+    })
 }
 
 fn bytes(encoding: ByteEncoding) -> TypeRef {

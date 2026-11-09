@@ -31,7 +31,7 @@ fn fmt_rewrites_valid_contracts_in_canonical_order() {
 fn fmt_leaves_invalid_input_untouched() {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("api.json");
-    let input = FIXTURE.replace("\"ir_version\": \"0.2\"", "\"ir_version\": \"9.0\"");
+    let input = FIXTURE.replace("\"ir_version\": \"0.3\"", "\"ir_version\": \"9.0\"");
     fs::write(&path, &input).unwrap();
 
     let output = pons().arg("fmt").arg(&path).output().unwrap();

@@ -76,7 +76,7 @@ def build_document(app: FastAPI) -> dict[str, Any]:
         for error in config.common_errors
     ]
     document: dict[str, Any] = {
-        "ir_version": "0.2",
+        "ir_version": "0.3",
         "info": _info(app, config),
         "types": registry.definitions(),
         "auth_schemes": _auth_schemes(config),

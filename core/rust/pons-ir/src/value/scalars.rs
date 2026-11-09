@@ -5,7 +5,7 @@ use serde_json::Value;
 use super::Validator;
 use super::violations::child;
 use crate::document::{Exact, exact_integer};
-use crate::violation::{IntegerProblem, Violation};
+use crate::violation::{FloatProblem, IntegerProblem, Violation};
 use crate::{ByteEncoding, DecimalWire, InlineType, IntegerWire};
 
 impl<'a> Validator<'a> {
@@ -119,20 +119,39 @@ impl<'a> Validator<'a> {
         }
     }
 
-    pub(super) fn floating(&mut self, bits: u8, path: &str, value: &Value) {
-        self.number(path, value);
-        if bits != 32 {
+    pub(super) fn floating(&mut self, ty: &'a InlineType, path: &str, value: &Value) {
+        let InlineType::Float {
+            bits,
+            minimum,
+            maximum,
+            exclusive_minimum,
+            exclusive_maximum,
+            multiple_of,
+        } = ty
+        else {
             return;
-        }
-        match value.as_f64() {
-            Some(number) if number.is_finite() && number.abs() > f64::from(f32::MAX) => {
-                self.reject(Violation::FloatRange {
-                    path: path.to_owned(),
-                    bits,
-                });
-            }
-            _ => {}
-        }
+        };
+        self.number(path, value);
+        let Some(number) = value.as_f64().filter(|number| number.is_finite()) else {
+            return;
+        };
+        let problem = (*bits == 32 && number.abs() > f64::from(f32::MAX))
+            .then_some(FloatProblem::NativeRange { bits: *bits })
+            .or_else(|| minimum_problem(number, minimum.as_ref()))
+            .or_else(|| maximum_problem(number, maximum.as_ref()))
+            .or_else(|| exclusive_minimum_problem(number, exclusive_minimum.as_ref()))
+            .or_else(|| exclusive_maximum_problem(number, exclusive_maximum.as_ref()));
+        let problem = match problem {
+            Some(problem) => problem,
+            None => match multiple_problem(number, multiple_of.as_ref()) {
+                Some(problem) => problem,
+                None => return,
+            },
+        };
+        self.reject(Violation::Float {
+            path: path.to_owned(),
+            problem,
+        });
     }
 
     pub(super) fn decimal(&mut self, wire: DecimalWire, path: &str, value: &Value) {
@@ -294,6 +313,82 @@ fn divisible(integer: (bool, u128), multiple_of: Option<&Value>) -> Option<Integ
         });
     }
     (!integer.1.is_multiple_of(divisor)).then(|| IntegerProblem::NotAMultiple {
+        multiple_of: step.to_string(),
+    })
+}
+
+fn positive_float_bound(value: &Value) -> Option<f64> {
+    value
+        .as_f64()
+        .filter(|number| number.is_finite() && *number > 0.0)
+}
+
+fn readable_float_bound(value: &Value) -> Option<f64> {
+    value.as_f64().filter(|number| number.is_finite())
+}
+
+fn minimum_problem(number: f64, minimum: Option<&Value>) -> Option<FloatProblem> {
+    let minimum = minimum?;
+    match readable_float_bound(minimum) {
+        None => Some(FloatProblem::UnreadableConstraint {
+            constraint: minimum.to_string(),
+        }),
+        Some(bound) if number < bound => Some(FloatProblem::BelowMinimum {
+            minimum: minimum.to_string(),
+        }),
+        Some(_) => None,
+    }
+}
+
+fn maximum_problem(number: f64, maximum: Option<&Value>) -> Option<FloatProblem> {
+    let maximum = maximum?;
+    match readable_float_bound(maximum) {
+        None => Some(FloatProblem::UnreadableConstraint {
+            constraint: maximum.to_string(),
+        }),
+        Some(bound) if number > bound => Some(FloatProblem::AboveMaximum {
+            maximum: maximum.to_string(),
+        }),
+        Some(_) => None,
+    }
+}
+
+fn exclusive_minimum_problem(number: f64, minimum: Option<&Value>) -> Option<FloatProblem> {
+    let minimum = minimum?;
+    match readable_float_bound(minimum) {
+        None => Some(FloatProblem::UnreadableConstraint {
+            constraint: minimum.to_string(),
+        }),
+        Some(bound) if number <= bound => Some(FloatProblem::NotAboveExclusiveMinimum {
+            minimum: minimum.to_string(),
+        }),
+        Some(_) => None,
+    }
+}
+
+fn exclusive_maximum_problem(number: f64, maximum: Option<&Value>) -> Option<FloatProblem> {
+    let maximum = maximum?;
+    match readable_float_bound(maximum) {
+        None => Some(FloatProblem::UnreadableConstraint {
+            constraint: maximum.to_string(),
+        }),
+        Some(bound) if number >= bound => Some(FloatProblem::NotBelowExclusiveMaximum {
+            maximum: maximum.to_string(),
+        }),
+        Some(_) => None,
+    }
+}
+
+fn multiple_problem(number: f64, multiple_of: Option<&Value>) -> Option<FloatProblem> {
+    let step = multiple_of?;
+    let Some(divisor) = positive_float_bound(step) else {
+        return Some(FloatProblem::UnreadableConstraint {
+            constraint: step.to_string(),
+        });
+    };
+    let quotient = number / divisor;
+    let tolerance = f64::EPSILON * 8.0 * quotient.abs().max(1.0);
+    ((quotient - quotient.round()).abs() > tolerance).then(|| FloatProblem::NotAMultiple {
         multiple_of: step.to_string(),
     })
 }

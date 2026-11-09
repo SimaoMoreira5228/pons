@@ -89,29 +89,31 @@ type namedRef struct {
 }
 
 type inlineType struct {
-	Kind       string                     `json:"kind"`
-	Bits       uint16                     `json:"bits"`
-	Signed     bool                       `json:"signed"`
-	Wire       string                     `json:"wire"`
-	Minimum    json.RawMessage            `json:"minimum"`
-	Maximum    json.RawMessage            `json:"maximum"`
-	MultipleOf json.RawMessage            `json:"multiple_of"`
-	Format     string                     `json:"format"`
-	MinLength  *uint64                    `json:"min_length"`
-	MaxLength  *uint64                    `json:"max_length"`
-	Pattern    *string                    `json:"pattern"`
-	Encoding   string                     `json:"encoding"`
-	Codec      string                     `json:"codec"`
-	Inner      *typeRef                   `json:"inner"`
-	Item       *typeRef                   `json:"item"`
-	Unique     *bool                      `json:"unique"`
-	Key        *typeRef                   `json:"key"`
-	Value      *typeRef                   `json:"value"`
-	Items      []typeRef                  `json:"items"`
-	Fields     []field                    `json:"fields"`
-	Flattened  []typeRef                  `json:"flattened"`
-	Openness   json.RawMessage            `json:"openness"`
-	Ext        map[string]json.RawMessage `json:"ext"`
+	Kind             string                     `json:"kind"`
+	Bits             uint16                     `json:"bits"`
+	Signed           bool                       `json:"signed"`
+	Wire             string                     `json:"wire"`
+	Minimum          json.RawMessage            `json:"minimum"`
+	Maximum          json.RawMessage            `json:"maximum"`
+	ExclusiveMinimum json.RawMessage            `json:"exclusive_minimum"`
+	ExclusiveMaximum json.RawMessage            `json:"exclusive_maximum"`
+	MultipleOf       json.RawMessage            `json:"multiple_of"`
+	Format           string                     `json:"format"`
+	MinLength        *uint64                    `json:"min_length"`
+	MaxLength        *uint64                    `json:"max_length"`
+	Pattern          *string                    `json:"pattern"`
+	Encoding         string                     `json:"encoding"`
+	Codec            string                     `json:"codec"`
+	Inner            *typeRef                   `json:"inner"`
+	Item             *typeRef                   `json:"item"`
+	Unique           *bool                      `json:"unique"`
+	Key              *typeRef                   `json:"key"`
+	Value            *typeRef                   `json:"value"`
+	Items            []typeRef                  `json:"items"`
+	Fields           []field                    `json:"fields"`
+	Flattened        []typeRef                  `json:"flattened"`
+	Openness         json.RawMessage            `json:"openness"`
+	Ext              map[string]json.RawMessage `json:"ext"`
 }
 
 type pathSegment struct {
@@ -264,8 +266,8 @@ func decodeDocument(raw json.RawMessage) (*document, error) {
 	if err := json.Unmarshal(raw, &version); err != nil {
 		return nil, fmt.Errorf("cannot read the IR envelope: %w", err)
 	}
-	if version.IRVersion != "0.2" {
-		return nil, fmt.Errorf("unsupported IR version %q; this emitter reads 0.2", version.IRVersion)
+	if version.IRVersion != "0.3" {
+		return nil, fmt.Errorf("unsupported IR version %q; this emitter reads 0.3", version.IRVersion)
 	}
 	var decoded document
 	decoder := json.NewDecoder(bytes.NewReader(raw))

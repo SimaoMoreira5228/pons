@@ -42,6 +42,6 @@ pub use types::{
     ObjectOpenness, OpaqueWire, Presence, TypeDef, TypeKind, TypeRef, Variant, VariantPayload,
 };
 pub use value::validate_value;
-pub use violation::{IntegerProblem, Violation};
+pub use violation::{FloatProblem, IntegerProblem, Violation};
 
-pub const IR_VERSION: &str = "0.2";
+pub const IR_VERSION: &str = "0.3";

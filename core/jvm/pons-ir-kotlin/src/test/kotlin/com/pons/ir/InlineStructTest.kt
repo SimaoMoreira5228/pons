@@ -7,7 +7,7 @@ import org.junit.jupiter.api.Test
 
 private val inlineStructDocument = """
     {
-      "ir_version": "0.2",
+      "ir_version": "0.3",
       "info": {"title": "Inline structs", "version": "1"},
       "types": {
         "Address#input": {

@@ -15,6 +15,17 @@ pub enum IntegerProblem {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub enum FloatProblem {
+    NativeRange { bits: u8 },
+    BelowMinimum { minimum: String },
+    AboveMaximum { maximum: String },
+    NotAboveExclusiveMinimum { minimum: String },
+    NotBelowExclusiveMaximum { maximum: String },
+    NotAMultiple { multiple_of: String },
+    UnreadableConstraint { constraint: String },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Violation {
     UnknownType {
         path: String,
@@ -33,9 +44,9 @@ pub enum Violation {
         path: String,
         problem: IntegerProblem,
     },
-    FloatRange {
+    Float {
         path: String,
-        bits: u8,
+        problem: FloatProblem,
     },
     StringLength {
         path: String,
@@ -102,7 +113,7 @@ impl Violation {
             | Self::RecursiveType { path, .. }
             | Self::Type { path, .. }
             | Self::Integer { path, .. }
-            | Self::FloatRange { path, .. }
+            | Self::Float { path, .. }
             | Self::StringLength { path, .. }
             | Self::Pattern { path, .. }
             | Self::UnreadablePattern { path, .. }
@@ -147,7 +158,29 @@ impl Violation {
                     format!("integer constraint {constraint} is not an exact integer")
                 }
             },
-            Self::FloatRange { bits, .. } => format!("number is outside the f{bits} range"),
+            Self::Float { problem, .. } => match problem {
+                FloatProblem::NativeRange { bits } => {
+                    format!("number is outside the f{bits} range")
+                }
+                FloatProblem::BelowMinimum { minimum } => {
+                    format!("number is below its minimum of {minimum}")
+                }
+                FloatProblem::AboveMaximum { maximum } => {
+                    format!("number is above its maximum of {maximum}")
+                }
+                FloatProblem::NotAboveExclusiveMinimum { minimum } => {
+                    format!("number is not above its exclusive minimum of {minimum}")
+                }
+                FloatProblem::NotBelowExclusiveMaximum { maximum } => {
+                    format!("number is not below its exclusive maximum of {maximum}")
+                }
+                FloatProblem::NotAMultiple { multiple_of } => {
+                    format!("number is not a multiple of {multiple_of}")
+                }
+                FloatProblem::UnreadableConstraint { constraint } => {
+                    format!("number constraint {constraint} is not a positive number")
+                }
+            },
             Self::StringLength {
                 minimum,
                 maximum,

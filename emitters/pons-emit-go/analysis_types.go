@@ -184,6 +184,10 @@ func (a *analysis) buildEnumPlan(plan *typePlan) {
 		plan.Consts = append(plan.Consts, constPlan{Name: constName, Wire: variant.Wire})
 	}
 }
+func statedBound(raw json.RawMessage) bool {
+	return len(raw) > 0 && string(raw) != "null"
+}
+
 func (a *analysis) goType(ref typeRef, subject string) (string, error) {
 	if ref.Named {
 		name, ok := a.typeNames[ref.ID]
@@ -228,6 +232,11 @@ func (a *analysis) goType(ref typeRef, subject string) (string, error) {
 			return "", fmt.Errorf("uses a %d-bit integer; this emitter supports up to 64 bits", inline.Bits)
 		}
 	case "float":
+		if statedBound(inline.Minimum) || statedBound(inline.Maximum) ||
+			statedBound(inline.ExclusiveMinimum) || statedBound(inline.ExclusiveMaximum) ||
+			statedBound(inline.MultipleOf) {
+			a.markLossySubject(subject, "a float carries numeric bounds, which the generated Go types do not enforce")
+		}
 		switch inline.Bits {
 		case 32:
 			return "float32", nil

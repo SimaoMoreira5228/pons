@@ -3,7 +3,7 @@ use pons_ir::{Document, ValidationError};
 #[test]
 fn validation_finds_nested_unknown_types_and_bad_contract_links() {
     let json = r#"{
-        "ir_version": "0.2",
+        "ir_version": "0.3",
         "info": {"title": "Example", "version": "1"},
         "types": {"Items": {"kind": "struct", "openness": "reject", "name": ["items"], "direction": "both", "fields": [
             {"wire": "items", "ident": ["items"], "ty": {"kind": "array", "item": {"ref": "Missing"}}, "presence": "required"}

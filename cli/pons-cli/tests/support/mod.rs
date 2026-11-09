@@ -238,7 +238,7 @@ pub(crate) const STUB_RESPONSE: &str = r#"{"protocol":3,"files":[{"path":"acme/_
 #[cfg(target_os = "linux")]
 pub(crate) fn stub_manifest(option_schema: &str) -> String {
     let mut manifest = String::from(
-        r#"{"name":"python","version":"1.0.0","protocol":{"min":"3.0","max":"3.0"},"ir_version":{"min":"0.2","max":"0.2"},"capabilities":{"streaming":["sse"],"enum_reprs":["string","external","internal","adjacent","untagged"],"direction_split":true,"provides":true,"custom_auth":true,"flattened":true,"wide_integers":true,"opaque":true,"object_openness":["reject","preserve_typed","preserve_opaque"],"extensions":{"test.example.source/v1":"exact","test.example.large/v1":"exact"}}"#,
+        r#"{"name":"python","version":"1.0.0","protocol":{"min":"3.0","max":"3.0"},"ir_version":{"min":"0.3","max":"0.3"},"capabilities":{"streaming":["sse"],"enum_reprs":["string","external","internal","adjacent","untagged"],"direction_split":true,"provides":true,"custom_auth":true,"flattened":true,"wide_integers":true,"opaque":true,"object_openness":["reject","preserve_typed","preserve_opaque"],"extensions":{"test.example.source/v1":"exact","test.example.large/v1":"exact"}}"#,
     );
     if !option_schema.is_empty() {
         manifest.push_str(",\"option_schema\":");

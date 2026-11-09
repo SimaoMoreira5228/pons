@@ -305,13 +305,27 @@ impl Schema for bool {
 
 impl Schema for f32 {
     fn schema(_: &mut TypeCx, _: Direction) -> TypeRef {
-        TypeRef::Inline(InlineType::Float { bits: 32 })
+        TypeRef::Inline(InlineType::Float {
+            bits: 32,
+            minimum: None,
+            maximum: None,
+            exclusive_minimum: None,
+            exclusive_maximum: None,
+            multiple_of: None,
+        })
     }
 }
 
 impl Schema for f64 {
     fn schema(_: &mut TypeCx, _: Direction) -> TypeRef {
-        TypeRef::Inline(InlineType::Float { bits: 64 })
+        TypeRef::Inline(InlineType::Float {
+            bits: 64,
+            minimum: None,
+            maximum: None,
+            exclusive_minimum: None,
+            exclusive_maximum: None,
+            multiple_of: None,
+        })
     }
 }
 

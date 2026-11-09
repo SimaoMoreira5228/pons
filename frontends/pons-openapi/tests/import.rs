@@ -450,6 +450,20 @@ fn translates_a_30_document() {
     assert!(signed);
     assert_eq!(minimum.as_ref(), Some(&serde_json::json!(2)));
 
+    let total = fields.iter().find(|field| field.wire == "total").unwrap();
+    let TypeRef::Inline(InlineType::Float {
+        bits,
+        minimum,
+        exclusive_minimum,
+        ..
+    }) = &total.ty
+    else {
+        panic!("expected a float total, found {:?}", total.ty);
+    };
+    assert_eq!(*bits, 64);
+    assert_eq!(minimum.as_ref(), None);
+    assert_eq!(exclusive_minimum.as_ref(), Some(&serde_json::json!(0)));
+
     let attachment = fields
         .iter()
         .find(|field| field.wire == "attachment")
@@ -465,7 +479,6 @@ fn translates_a_30_document() {
             .iter()
             .any(|diagnostic| diagnostic.code == "PONS-W205" && diagnostic.message.contains(needle))
     };
-    assert!(warned("properties.total"), "{diagnostics:#?}");
     assert!(warned("properties.attachment"), "{diagnostics:#?}");
 }
 

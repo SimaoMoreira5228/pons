@@ -53,7 +53,7 @@ impl<'a> Validator<'a> {
             }
             InlineType::Any | InlineType::Opaque { .. } => {}
             InlineType::Int { .. } => self.integer(inline, path, value),
-            InlineType::Float { bits } => self.floating(*bits, path, value),
+            InlineType::Float { .. } => self.floating(inline, path, value),
             InlineType::Decimal { wire } => self.decimal(*wire, path, value),
             InlineType::String {
                 min_length,

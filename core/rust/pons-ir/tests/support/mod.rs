@@ -5,7 +5,7 @@ use serde_json::{Value, json};
 
 pub fn contract(types: Value) -> Document {
     serde_json::from_value(json!({
-        "ir_version": "0.2",
+        "ir_version": "0.3",
         "info": {"title": "Example", "version": "1"},
         "types": types,
     }))

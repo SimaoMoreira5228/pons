@@ -209,7 +209,7 @@ fn rejects_documents_with_an_unsupported_ir_version() {
     document.ir_version = "9.0".into();
     assert!(crate::emit(&document).is_err());
     assert_eq!(document.ir_version, "9.0");
-    assert_eq!(IR_VERSION, "0.2");
+    assert_eq!(IR_VERSION, "0.3");
 }
 
 #[test]

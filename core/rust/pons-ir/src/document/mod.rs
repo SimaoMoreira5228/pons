@@ -17,7 +17,7 @@ pub(crate) use invariants::{Exact, exact_integer};
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct Document {
-    #[schemars(regex(pattern = "^0\\.2$"))]
+    #[schemars(regex(pattern = "^0\\.3$"))]
     pub ir_version: String,
     pub info: Info,
     #[serde(default)]

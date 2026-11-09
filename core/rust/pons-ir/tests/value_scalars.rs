@@ -144,6 +144,68 @@ fn floats_match_the_range_the_client_enforces() {
 }
 
 #[test]
+fn floats_enforce_declared_bounds_and_multiples() {
+    let inclusive = inline(json!({
+        "kind": "float",
+        "bits": 64,
+        "minimum": -10,
+        "maximum": 10,
+        "multiple_of": 2.5
+    }));
+    let exclusive = inline(json!({
+        "kind": "float",
+        "bits": 64,
+        "exclusive_minimum": 0,
+        "exclusive_maximum": 1
+    }));
+    let types = json!({});
+    checked(types.clone(), &inclusive, json!(-10));
+    checked(types.clone(), &inclusive, json!(10));
+    checked(types.clone(), &inclusive, json!(7.5));
+    checked(types.clone(), &exclusive, json!(0.5));
+    assert_eq!(
+        messages(violations(
+            types.clone(),
+            &inclusive,
+            Direction::Both,
+            json!(-10.5)
+        )),
+        ["number is below its minimum of -10"]
+    );
+    assert_eq!(
+        messages(violations(
+            types.clone(),
+            &inclusive,
+            Direction::Both,
+            json!(10.5)
+        )),
+        ["number is above its maximum of 10"]
+    );
+    assert_eq!(
+        messages(violations(
+            types.clone(),
+            &inclusive,
+            Direction::Both,
+            json!(7)
+        )),
+        ["number is not a multiple of 2.5"]
+    );
+    assert_eq!(
+        messages(violations(
+            types.clone(),
+            &exclusive,
+            Direction::Both,
+            json!(0)
+        )),
+        ["number is not above its exclusive minimum of 0"]
+    );
+    assert_eq!(
+        messages(violations(types, &exclusive, Direction::Both, json!(1))),
+        ["number is not below its exclusive maximum of 1"]
+    );
+}
+
+#[test]
 fn decimals_accept_the_number_and_string_wires() {
     let number = inline(json!({"kind": "decimal", "wire": "number"}));
     let string = inline(json!({"kind": "decimal", "wire": "string"}));

@@ -183,7 +183,7 @@ pub fn emit_with_options(document: &Document, options: TsOptions) -> Result<Emit
         match pagination::plan(&document, operation)? {
             pagination::Planning::Absent => {}
             pagination::Planning::Emitted(plan) => {
-                pagination_plans.insert(index, plan);
+                pagination_plans.insert(index, *plan);
             }
             pagination::Planning::Lossy { pointer, reason } => {
                 let subject = format!("operations.{}", operation_subject(operation));

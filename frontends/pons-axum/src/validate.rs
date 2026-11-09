@@ -418,7 +418,7 @@ mod tests {
 
     fn contract() -> Document {
         serde_json::from_value(json!({
-            "ir_version": "0.2",
+            "ir_version": "0.3",
             "info": {"title": "Validation", "version": "1"},
             "types": {
                 "Filter#input": {

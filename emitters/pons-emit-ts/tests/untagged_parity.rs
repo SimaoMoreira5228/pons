@@ -4,7 +4,7 @@ use std::collections::BTreeSet;
 
 fn document(variants: Value) -> Document {
     let document: Document = serde_json::from_value(json!({
-        "ir_version": "0.2",
+        "ir_version": "0.3",
         "info": {"title": "Example", "version": "1"},
         "types": {
             "Choice": {

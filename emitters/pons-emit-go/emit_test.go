@@ -35,7 +35,7 @@ func emitFixtureMode(t *testing.T, raw []byte, options map[string]any, mode stri
 	t.Helper()
 	request := map[string]any{
 		"protocol":          protocolVersion,
-		"source_ir_version": "0.2",
+		"source_ir_version": "0.3",
 		"mode":              mode,
 		"ir":                json.RawMessage(raw),
 		"options":           options,

@@ -43,7 +43,7 @@ internal class PonsDocumentBuilder(
             }
         }
         return Document(
-            irVersion = "0.2",
+            irVersion = "0.3",
             info = info,
             types = types.buildAll(),
             authSchemes = schemes.toSortedMap(),

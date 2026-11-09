@@ -654,11 +654,63 @@ impl Document {
                     _ => {}
                 }
             }
-            InlineType::Float { bits } if ![32, 64].contains(bits) => {
-                errors.push(ValidationError::InvalidValue {
-                    path: owner.into(),
-                    message: format!("float width must be 32 or 64, got {bits}"),
-                });
+            InlineType::Float {
+                bits,
+                minimum,
+                maximum,
+                exclusive_minimum,
+                exclusive_maximum,
+                multiple_of,
+            } => {
+                if ![32, 64].contains(bits) {
+                    errors.push(ValidationError::InvalidValue {
+                        path: owner.into(),
+                        message: format!("float width must be 32 or 64, got {bits}"),
+                    });
+                }
+                for (name, value) in [
+                    ("minimum", minimum),
+                    ("maximum", maximum),
+                    ("exclusive_minimum", exclusive_minimum),
+                    ("exclusive_maximum", exclusive_maximum),
+                    ("multiple_of", multiple_of),
+                ] {
+                    let Some(value) = value else { continue };
+                    match value.as_f64() {
+                        None => errors.push(ValidationError::InvalidValue {
+                            path: owner.into(),
+                            message: format!("float {name} must be a number"),
+                        }),
+                        Some(number) if !number.is_finite() => {
+                            errors.push(ValidationError::InvalidValue {
+                                path: owner.into(),
+                                message: format!("float {name} must be finite"),
+                            })
+                        }
+                        Some(_) => {}
+                    }
+                }
+                if minimum.is_some() && exclusive_minimum.is_some() {
+                    errors.push(ValidationError::InvalidValue {
+                        path: owner.into(),
+                        message: "float minimum and exclusive_minimum cannot both apply".into(),
+                    });
+                }
+                if maximum.is_some() && exclusive_maximum.is_some() {
+                    errors.push(ValidationError::InvalidValue {
+                        path: owner.into(),
+                        message: "float maximum and exclusive_maximum cannot both apply".into(),
+                    });
+                }
+                if let Some(value) = multiple_of
+                    && value.is_number()
+                    && !positive_number(value)
+                {
+                    errors.push(ValidationError::InvalidValue {
+                        path: owner.into(),
+                        message: "float multiple_of must be greater than zero".into(),
+                    });
+                }
             }
             InlineType::String {
                 min_length,

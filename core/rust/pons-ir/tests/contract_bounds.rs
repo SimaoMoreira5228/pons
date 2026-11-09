@@ -325,7 +325,7 @@ fn error_diagnostics_block_document_validation() {
 #[test]
 fn validation_rejects_inconsistent_payload_header_and_numeric_contracts() {
     let json = r#"{
-        "ir_version": "0.2",
+        "ir_version": "0.3",
         "info": {"title": "Example", "version": "1"},
         "types": {
             "Bad": {
@@ -413,4 +413,52 @@ fn validation_rejects_inconsistent_payload_header_and_numeric_contracts() {
     assert!(messages.contains("response 201 content Empty"));
     assert!(messages.contains("0 stream descriptions and 1 stream responses"));
     assert!(messages.contains("error content Empty"));
+}
+
+#[test]
+fn validation_rejects_float_bounds_that_cannot_apply() {
+    let base: Document =
+        serde_json::from_str(include_str!("../../../../spec/fixtures/login.json")).unwrap();
+    let with_float = |extra: serde_json::Value| {
+        let mut document = base.clone();
+        let definition = document.types.get_mut("User").unwrap();
+        let TypeKind::Struct { fields, .. } = &mut definition.definition else {
+            panic!()
+        };
+        let mut ty = serde_json::json!({"kind": "float", "bits": 64});
+        ty.as_object_mut()
+            .unwrap()
+            .extend(extra.as_object().unwrap().clone());
+        fields[0].ty = serde_json::from_value(ty).unwrap();
+        document
+    };
+    for (extra, message) in [
+        (
+            serde_json::json!({"minimum": 0, "exclusive_minimum": 0}),
+            "float minimum and exclusive_minimum cannot both apply",
+        ),
+        (
+            serde_json::json!({"maximum": 0, "exclusive_maximum": 0}),
+            "float maximum and exclusive_maximum cannot both apply",
+        ),
+        (
+            serde_json::json!({"multiple_of": 0}),
+            "float multiple_of must be greater than zero",
+        ),
+        (
+            serde_json::json!({"minimum": "zero"}),
+            "float minimum must be a number",
+        ),
+    ] {
+        let errors = with_float(extra)
+            .validate()
+            .unwrap_err()
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>();
+        assert!(
+            errors.iter().any(|error| error.contains(message)),
+            "{message:?} missing from {errors:?}"
+        );
+    }
 }

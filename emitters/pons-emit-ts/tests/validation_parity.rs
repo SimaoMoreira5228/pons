@@ -17,7 +17,7 @@ struct Case {
 
 fn document() -> Document {
     let raw = json!({
-        "ir_version": "0.2",
+        "ir_version": "0.3",
         "info": {"title": "Parity", "version": "1"},
         "types": {
             "Parity": {
@@ -263,7 +263,7 @@ fn cases() -> Vec<Case> {
 
 fn shapes() -> Document {
     let raw = json!({
-        "ir_version": "0.2",
+        "ir_version": "0.3",
         "info": {"title": "Shapes", "version": "1"},
         "types": {
             "Forms": {

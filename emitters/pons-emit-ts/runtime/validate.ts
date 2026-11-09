@@ -129,6 +129,31 @@ function validateFloat(value: any, schema: any, path: readonly (string | number)
   if (schema.bits === 32 && !Number.isFinite(Math.fround(value))) {
     return issue(path, "number is outside the f32 range");
   }
+  if (schema.minimum !== undefined) {
+    if (typeof schema.minimum !== "number") return issue(path, "invalid float constraint");
+    if (value < schema.minimum) return issue(path, "number is below its minimum");
+  }
+  if (schema.maximum !== undefined) {
+    if (typeof schema.maximum !== "number") return issue(path, "invalid float constraint");
+    if (value > schema.maximum) return issue(path, "number is above its maximum");
+  }
+  if (schema.exclusive_minimum !== undefined) {
+    if (typeof schema.exclusive_minimum !== "number") return issue(path, "invalid float constraint");
+    if (value <= schema.exclusive_minimum) return issue(path, "number is not above its exclusive minimum");
+  }
+  if (schema.exclusive_maximum !== undefined) {
+    if (typeof schema.exclusive_maximum !== "number") return issue(path, "invalid float constraint");
+    if (value >= schema.exclusive_maximum) return issue(path, "number is not below its exclusive maximum");
+  }
+  if (schema.multiple_of !== undefined) {
+    if (typeof schema.multiple_of !== "number" || !(schema.multiple_of > 0)) {
+      return issue(path, "invalid float constraint");
+    }
+    const quotient = value / schema.multiple_of;
+    if (Math.abs(quotient - Math.round(quotient)) > 1e-9 * Math.max(1, Math.abs(quotient))) {
+      return issue(path, "number does not match its multiple");
+    }
+  }
   return null;
 }
 

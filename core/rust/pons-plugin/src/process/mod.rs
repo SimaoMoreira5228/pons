@@ -211,7 +211,7 @@ printf '%s' '{"name":"fixture","protokl":{"min":"3.0","max":"3.0"}}'
             "unparsable-response",
             r#"#!/bin/sh
 if [ "$1" = describe ]; then
-  printf '%s' '{"name":"fixture","version":"1.0.0","protocol":{"min":"3.0","max":"3.0"},"ir_version":{"min":"0.2","max":"0.2"},"capabilities":{"streaming":["sse"],"enum_reprs":["string","external","internal","adjacent","untagged"],"direction_split":true,"provides":true,"flattened":true,"opaque":true,"object_openness":["reject","preserve_typed","preserve_opaque"],"extensions":{"test.example.source/v1":"exact","test.example.large/v1":"exact"}}}'
+  printf '%s' '{"name":"fixture","version":"1.0.0","protocol":{"min":"3.0","max":"3.0"},"ir_version":{"min":"0.3","max":"0.3"},"capabilities":{"streaming":["sse"],"enum_reprs":["string","external","internal","adjacent","untagged"],"direction_split":true,"provides":true,"flattened":true,"opaque":true,"object_openness":["reject","preserve_typed","preserve_opaque"],"extensions":{"test.example.source/v1":"exact","test.example.large/v1":"exact"}}}'
   exit 0
 fi
 cat > /dev/null
@@ -274,7 +274,7 @@ printf '%s' '{"protocol":3,"coverag":{}}'
             "refusing",
             r#"#!/bin/sh
 printf '%s\n' 'cannot model preserved objects' >&2
-printf '%s' '{"name":"fixture","version":"1.0.0","protocol":{"min":"3.0","max":"3.0"},"ir_version":{"min":"0.2","max":"0.2"},"capabilities":{"streaming":["sse"],"enum_reprs":["string","external","internal","adjacent","untagged"],"direction_split":true,"provides":true,"flattened":true,"object_openness":["reject","preserve_typed","preserve_opaque"],"extensions":{"test.example.source/v1":"exact","test.example.large/v1":"exact"}}}'
+printf '%s' '{"name":"fixture","version":"1.0.0","protocol":{"min":"3.0","max":"3.0"},"ir_version":{"min":"0.3","max":"0.3"},"capabilities":{"streaming":["sse"],"enum_reprs":["string","external","internal","adjacent","untagged"],"direction_split":true,"provides":true,"flattened":true,"object_openness":["reject","preserve_typed","preserve_opaque"],"extensions":{"test.example.source/v1":"exact","test.example.large/v1":"exact"}}}'
 "#,
         );
         let error = invoke(
@@ -299,7 +299,7 @@ printf '%s' '{"name":"fixture","version":"1.0.0","protocol":{"min":"3.0","max":"
             "unclassified",
             r#"#!/bin/sh
 if [ "$1" = describe ]; then
-  printf '%s' '{"name":"fixture","version":"1.0.0","protocol":{"min":"3.0","max":"3.0"},"ir_version":{"min":"0.2","max":"0.2"},"capabilities":{"streaming":["sse"],"enum_reprs":["string","external","internal","adjacent","untagged"],"direction_split":true,"provides":true,"flattened":true,"opaque":true,"object_openness":["reject","preserve_typed","preserve_opaque"],"extensions":{"test.example.source/v1":"exact","test.example.large/v1":"exact"}}}'
+  printf '%s' '{"name":"fixture","version":"1.0.0","protocol":{"min":"3.0","max":"3.0"},"ir_version":{"min":"0.3","max":"0.3"},"capabilities":{"streaming":["sse"],"enum_reprs":["string","external","internal","adjacent","untagged"],"direction_split":true,"provides":true,"flattened":true,"opaque":true,"object_openness":["reject","preserve_typed","preserve_opaque"],"extensions":{"test.example.source/v1":"exact","test.example.large/v1":"exact"}}}'
   exit 0
 fi
 cat > /dev/null

@@ -421,7 +421,7 @@ pub fn lossy_options() -> TsOptions {
 
 pub fn paginated_document(pagination: serde_json::Value) -> pons_ir::Document {
     let document: pons_ir::Document = serde_json::from_value(serde_json::json!({
-        "ir_version": "0.2",
+        "ir_version": "0.3",
         "info": {"title": "Pages", "version": "1"},
         "types": {
             "EventQuery": {

@@ -97,7 +97,7 @@ private class ValueValidator(
                 Violation(path, "opaque type ${type.codec} is not supported by the request validator"),
             )
             is InlineType.IntType -> integer(type, path, value)
-            is InlineType.FloatType -> floating(type.bits, path, value)
+            is InlineType.FloatType -> floating(type, path, value)
             is InlineType.DecimalType -> decimal(type.wire, path, value)
             is InlineType.StringType -> text(type, path, value)
             is InlineType.BytesType -> bytes(type.encoding, path, value)
@@ -162,13 +162,19 @@ private class ValueValidator(
         if (problem != null) reject(Violation(path, problem))
     }
 
-    private fun floating(bits: Int, path: String, value: JsonElement) {
+    private fun floating(type: InlineType.FloatType, path: String, value: JsonElement) {
         if (!number(path, value)) return
-        if (bits != 32) return
-        val number = (value as? JsonPrimitive)?.doubleOrNull ?: return
-        if (number.isFinite() && kotlin.math.abs(number) > Float.MAX_VALUE.toDouble()) {
-            reject(Violation(path, "number is outside the f$bits range"))
+        val number = (value as? JsonPrimitive)?.content?.toBigDecimalOrNull() ?: return
+        if (type.bits == 32 && number.abs() > BigDecimal(Float.MAX_VALUE.toDouble())) {
+            reject(Violation(path, "number is outside the f${type.bits} range"))
+            return
         }
+        val problem = minimumProblem(number, type.minimum)
+            ?: maximumProblem(number, type.maximum)
+            ?: exclusiveMinimumProblem(number, type.exclusiveMinimum)
+            ?: exclusiveMaximumProblem(number, type.exclusiveMaximum)
+            ?: multipleProblem(number, type.multipleOf)
+        if (problem != null) reject(Violation(path, problem))
     }
 
     private fun decimal(wire: DecimalWire, path: String, value: JsonElement) {
@@ -648,6 +654,48 @@ private fun bound(actual: BigInteger, bound: JsonElement): Int {
         actual.compareTo(if (value.negative) value.magnitude.negate() else value.magnitude)
     } else {
         -1
+    }
+}
+
+private fun numericBound(bound: JsonElement): BigDecimal? =
+    (bound as? JsonPrimitive)?.takeIf(JsonPrimitive::isNumber)?.content?.toBigDecimalOrNull()
+
+private fun minimumProblem(actual: BigDecimal, bound: JsonElement?): String? {
+    if (bound == null) return null
+    val minimum = numericBound(bound)
+        ?: return "number constraint $bound is not a positive number"
+    return if (actual < minimum) "number is below its minimum of $bound" else null
+}
+
+private fun maximumProblem(actual: BigDecimal, bound: JsonElement?): String? {
+    if (bound == null) return null
+    val maximum = numericBound(bound)
+        ?: return "number constraint $bound is not a positive number"
+    return if (actual > maximum) "number is above its maximum of $bound" else null
+}
+
+private fun exclusiveMinimumProblem(actual: BigDecimal, bound: JsonElement?): String? {
+    if (bound == null) return null
+    val minimum = numericBound(bound)
+        ?: return "number constraint $bound is not a positive number"
+    return if (actual <= minimum) "number is not above its exclusive minimum of $bound" else null
+}
+
+private fun exclusiveMaximumProblem(actual: BigDecimal, bound: JsonElement?): String? {
+    if (bound == null) return null
+    val maximum = numericBound(bound)
+        ?: return "number constraint $bound is not a positive number"
+    return if (actual >= maximum) "number is not below its exclusive maximum of $bound" else null
+}
+
+private fun multipleProblem(actual: BigDecimal, multipleOf: JsonElement?): String? {
+    if (multipleOf == null) return null
+    val step = numericBound(multipleOf)?.takeIf { it.signum() > 0 }
+        ?: return "number constraint $multipleOf is not a positive number"
+    return if (actual.remainder(step).signum() != 0) {
+        "number is not a multiple of $multipleOf"
+    } else {
+        null
     }
 }
 

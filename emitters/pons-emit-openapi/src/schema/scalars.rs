@@ -69,12 +69,34 @@ impl<'a> Builder<'a> {
                     schema
                 }
             }
-            InlineType::Float { bits } => {
+            InlineType::Float {
+                bits,
+                minimum,
+                maximum,
+                exclusive_minimum,
+                exclusive_maximum,
+                multiple_of,
+            } => {
                 let mut schema =
                     json!({"type":"number","format":if *bits == 32 {"float"} else {"double"}});
                 if *bits == 32 {
                     schema["minimum"] = json!(-(f32::MAX as f64));
                     schema["maximum"] = json!(f32::MAX as f64);
+                }
+                if let Some(minimum) = minimum {
+                    schema["minimum"] = minimum.clone();
+                }
+                if let Some(maximum) = maximum {
+                    schema["maximum"] = maximum.clone();
+                }
+                if let Some(minimum) = exclusive_minimum {
+                    schema["exclusiveMinimum"] = minimum.clone();
+                }
+                if let Some(maximum) = exclusive_maximum {
+                    schema["exclusiveMaximum"] = maximum.clone();
+                }
+                if let Some(multiple_of) = multiple_of {
+                    schema["multipleOf"] = multiple_of.clone();
                 }
                 schema
             }
@@ -416,7 +438,14 @@ mod tests {
     }
 
     fn float(bits: u8) -> TypeRef {
-        TypeRef::Inline(InlineType::Float { bits })
+        TypeRef::Inline(InlineType::Float {
+            bits,
+            minimum: None,
+            maximum: None,
+            exclusive_minimum: None,
+            exclusive_maximum: None,
+            multiple_of: None,
+        })
     }
 
     fn formatted(format: FieldFormat) -> TypeRef {

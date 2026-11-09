@@ -10,7 +10,7 @@ func TestManifestDescribesTheSupportedSlice(t *testing.T) {
 	if manifest.Protocol != (versionRange{Min: "3.0", Max: "3.0"}) {
 		t.Fatalf("protocol = %#v", manifest.Protocol)
 	}
-	if manifest.IRVersion != (versionRange{Min: "0.2", Max: "0.2"}) {
+	if manifest.IRVersion != (versionRange{Min: "0.3", Max: "0.3"}) {
 		t.Fatalf("ir version = %#v", manifest.IRVersion)
 	}
 	if got := manifest.Capabilities.EnumReprs; len(got) != 1 || got[0] != "string" {

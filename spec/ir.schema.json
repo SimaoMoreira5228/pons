@@ -32,7 +32,7 @@
     },
     "ir_version": {
       "type": "string",
-      "pattern": "^0\\.2$"
+      "pattern": "^0\\.3$"
     },
     "operations": {
       "type": "array",
@@ -858,10 +858,15 @@
               "maximum": 255,
               "minimum": 0
             },
+            "exclusive_maximum": true,
+            "exclusive_minimum": true,
             "kind": {
               "type": "string",
               "const": "float"
-            }
+            },
+            "maximum": true,
+            "minimum": true,
+            "multiple_of": true
           },
           "additionalProperties": false,
           "required": [

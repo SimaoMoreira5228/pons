@@ -29,7 +29,7 @@ manifest = json.loads((work / "manifest.json").read_text())
 assert manifest["name"] == "go", manifest
 assert manifest["version"] == "0.1.0", manifest
 assert manifest["protocol"] == {"min": "3.0", "max": "3.0"}, manifest
-assert manifest["ir_version"] == {"min": "0.2", "max": "0.2"}, manifest
+assert manifest["ir_version"] == {"min": "0.3", "max": "0.3"}, manifest
 capabilities = manifest["capabilities"]
 assert capabilities["streaming"] == [], capabilities
 assert capabilities["pagination"] == ["pagination.cursor"], capabilities
@@ -42,7 +42,7 @@ assert manifest["option_schema"]["options"]["package"]["type"] == "string", mani
 
 request = {
     "protocol": 3,
-    "source_ir_version": "0.2",
+    "source_ir_version": "0.3",
     "mode": "strict",
     "ir": contract,
     "options": {"package": "fixture"},
@@ -80,7 +80,7 @@ assert coverage == {"exact": expected, "opaque": [], "lossy": [], "unsupported":
 offset = json.loads(offset_path.read_text())
 offset_request = {
     "protocol": 3,
-    "source_ir_version": "0.2",
+    "source_ir_version": "0.3",
     "mode": "lossy",
     "ir": offset,
     "options": {"package": "fixture"},

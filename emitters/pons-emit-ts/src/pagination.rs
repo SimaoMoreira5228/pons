@@ -58,7 +58,7 @@ pub(super) struct Plan {
 
 pub(super) enum Planning {
     Absent,
-    Emitted(Plan),
+    Emitted(Box<Plan>),
     Lossy { pointer: String, reason: String },
 }
 
@@ -91,7 +91,7 @@ pub(super) fn plan(document: &Document, operation: &Operation) -> Result<Plannin
         Ok(item) => item,
         Err(reason) => return Ok(Planning::Lossy { pointer, reason }),
     };
-    Ok(Planning::Emitted(Plan {
+    Ok(Planning::Emitted(Box::new(Plan {
         kind: match pagination.request {
             PaginationRequest::Cursor { .. } => RequestKind::Cursor,
             PaginationRequest::Offset { .. } => RequestKind::Offset,
@@ -107,7 +107,7 @@ pub(super) fn plan(document: &Document, operation: &Operation) -> Result<Plannin
         item,
         wrap_status,
         wrap_headers,
-    }))
+    })))
 }
 
 fn carrier(document: &Document, operation: &Operation, field: &str) -> Result<Carrier, EmitError> {

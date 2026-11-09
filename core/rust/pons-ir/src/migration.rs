@@ -1,5 +1,6 @@
 use serde_json::Value;
 
+use crate::IR_VERSION;
 use crate::document::DecodeError;
 
 pub trait Migration {
@@ -17,9 +18,34 @@ pub struct MigrationRegistry {
     migrations: Vec<Box<dyn Migration>>,
 }
 
+struct ZeroTwoToZeroThree;
+
+impl Migration for ZeroTwoToZeroThree {
+    fn name(&self) -> &'static str {
+        "ir-0.2-to-0.3"
+    }
+
+    fn source_version(&self) -> &'static str {
+        "0.2"
+    }
+
+    fn target_version(&self) -> &'static str {
+        IR_VERSION
+    }
+
+    fn apply(&self, mut document: Value) -> Result<Value, DecodeError> {
+        document["ir_version"] = Value::String(IR_VERSION.to_owned());
+        Ok(document)
+    }
+}
+
 impl MigrationRegistry {
     pub fn empty() -> Self {
         Self::default()
+    }
+
+    pub fn standard() -> Self {
+        Self::empty().with(ZeroTwoToZeroThree)
     }
 
     pub fn register(&mut self, migration: impl Migration + 'static) {

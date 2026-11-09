@@ -47,7 +47,7 @@ func buildManifest() manifest {
 		Name:      "go",
 		Version:   "0.1.0",
 		Protocol:  versionRange{Min: "3.0", Max: "3.0"},
-		IRVersion: versionRange{Min: "0.2", Max: "0.2"},
+		IRVersion: versionRange{Min: "0.3", Max: "0.3"},
 		Capabilities: capabilities{
 			Streaming:      []string{},
 			Pagination:     []string{"pagination.cursor"},
