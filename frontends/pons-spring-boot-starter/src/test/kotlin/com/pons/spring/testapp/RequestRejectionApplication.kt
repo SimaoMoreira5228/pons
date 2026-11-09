@@ -42,6 +42,9 @@ class RequestRejectionApplication {
 
     @Bean
     fun frameworkBodyController(): FrameworkBodyController = FrameworkBodyController()
+
+    @Bean
+    fun floatController(): FloatController = FloatController()
 }
 
 data class ItemRequest(
@@ -99,6 +102,31 @@ class DeclaredController {
     @PonsErrors(AlreadyRejected::class)
     fun declared(@RequestBody request: ItemRequest): Session =
         Session(token = request.name, expiresAt = Instant.EPOCH)
+}
+
+data class FloatBounds(
+    val ratio: Double,
+    val headroom: Double,
+    val step: Double,
+)
+
+@RestController
+@RequestMapping("/floats")
+class FloatController {
+    @PostMapping(
+        "/{scale}",
+        consumes = [MediaType.APPLICATION_JSON_VALUE],
+        produces = [MediaType.APPLICATION_JSON_VALUE],
+    )
+    fun floats(
+        @PathVariable scale: Double,
+        @RequestParam weight: Double,
+        @RequestHeader("X-Offset") offset: Double,
+        @RequestBody request: FloatBounds,
+    ): Session = Session(
+        token = "${request.ratio}:${request.headroom}:${request.step}:$scale:$weight:$offset",
+        expiresAt = Instant.EPOCH,
+    )
 }
 
 @RestController

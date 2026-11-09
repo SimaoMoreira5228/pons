@@ -1,5 +1,6 @@
 package com.pons.spring
 
+import com.fasterxml.jackson.databind.DeserializationFeature
 import com.fasterxml.jackson.databind.JsonNode
 import com.fasterxml.jackson.databind.ObjectMapper
 import com.pons.ir.ContentKind
@@ -25,8 +26,11 @@ import kotlinx.serialization.json.JsonPrimitive
 import java.math.BigDecimal
 
 internal class PonsRequestValidator(
-    private val mapper: ObjectMapper,
+    mapper: ObjectMapper,
 ) {
+    private val exact: ObjectMapper = mapper.copy()
+        .enable(DeserializationFeature.USE_BIG_DECIMAL_FOR_FLOATS)
+
     fun operation(document: Document, method: String, path: String): Operation? {
         val sent = Method.entries.firstOrNull { it.name.equals(method, ignoreCase = true) }
             ?: return null
@@ -182,7 +186,7 @@ internal class PonsRequestValidator(
             }
         }
         val parsed = try {
-            mapper.readTree(body)
+            exact.readTree(body)
         } catch (error: Exception) {
             return listOf(
                 Violation("", "expected a JSON document, found ${error.message ?: error.javaClass.name}"),
@@ -472,7 +476,7 @@ private fun JsonNode.toJsonElement(): JsonElement = when {
     isNumber -> if (isIntegralNumber) {
         JsonPrimitive(bigIntegerValue())
     } else {
-        JsonPrimitive(BigDecimal(asText()))
+        JsonPrimitive(decimalValue())
     }
     isTextual -> JsonPrimitive(textValue())
     isArray -> JsonArray(map { it.toJsonElement() })
