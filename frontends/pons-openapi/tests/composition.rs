@@ -26,6 +26,15 @@ fn structure(definition: &TypeKind) -> (&[Field], &ObjectOpenness) {
     }
 }
 
+fn inline_structure(ty: &TypeRef) -> (&[Field], &ObjectOpenness) {
+    match ty {
+        TypeRef::Inline(InlineType::Struct {
+            fields, openness, ..
+        }) => (fields, openness),
+        other => panic!("expected an inline struct, found {other:?}"),
+    }
+}
+
 fn field<'a>(fields: &'a [Field], wire: &str) -> &'a Field {
     fields
         .iter()
@@ -140,4 +149,66 @@ fn imports_merged_all_of_objects_and_discriminated_unions() {
     assert_eq!(wires(fields), ["expiry", "number"]);
     assert_eq!(field(fields, "number").presence, Presence::Required);
     assert_eq!(field(fields, "expiry").presence, Presence::Optional);
+}
+
+#[test]
+fn imports_inline_all_of_objects() {
+    let document = document();
+    document.validate().expect("the imported document is valid");
+
+    let profiles = operation(&document, "profiles.list");
+    let response = profiles
+        .responses
+        .first()
+        .expect("the list operation responds");
+    assert_eq!(
+        response.body,
+        Some(TypeRef::Named(NamedRef {
+            id: "openapi::Profile#output".into(),
+            variant: None,
+        }))
+    );
+
+    let profile = &document.types["openapi::Profile#output"];
+    let (fields, openness) = structure(&profile.definition);
+    assert_eq!(openness, &ObjectOpenness::Reject);
+    assert_eq!(wires(fields), ["members", "owner"]);
+
+    let (owner_fields, owner_openness) = inline_structure(&field(fields, "owner").ty);
+    assert_eq!(owner_openness, &ObjectOpenness::Reject);
+    assert_eq!(
+        wires(owner_fields),
+        ["display_name", "id", "nickname", "note"]
+    );
+    assert_eq!(field(owner_fields, "id").presence, Presence::Required);
+    assert_eq!(
+        field(owner_fields, "display_name").presence,
+        Presence::Required
+    );
+    assert_eq!(field(owner_fields, "note").presence, Presence::Optional);
+    assert_eq!(field(owner_fields, "nickname").presence, Presence::Optional);
+    assert_eq!(
+        field(owner_fields, "id").ty,
+        TypeRef::Inline(InlineType::String {
+            format: Some(FieldFormat::Uuid),
+            min_length: None,
+            max_length: None,
+            pattern: None,
+        })
+    );
+
+    let TypeRef::Inline(InlineType::Array { item, unique }) = &field(fields, "members").ty else {
+        panic!(
+            "expected an array of inline structs, found {:?}",
+            field(fields, "members").ty
+        );
+    };
+    assert_eq!(unique, &None);
+
+    let (member_fields, member_openness) = inline_structure(item);
+    assert_eq!(member_openness, &ObjectOpenness::Reject);
+    assert_eq!(wires(member_fields), ["id", "note", "role"]);
+    assert_eq!(field(member_fields, "id").presence, Presence::Required);
+    assert_eq!(field(member_fields, "role").presence, Presence::Required);
+    assert_eq!(field(member_fields, "note").presence, Presence::Optional);
 }

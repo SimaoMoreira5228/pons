@@ -31,6 +31,23 @@
           }
         }
       }
+    },
+    "/profiles": {
+      "get": {
+        "operationId": "profiles.list",
+        "responses": {
+          "200": {
+            "description": "The profiles.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Profile"
+                }
+              }
+            }
+          }
+        }
+      }
     }
   },
   "components": {
@@ -112,6 +129,71 @@
           "mapping": {
             "card": "#/components/schemas/Card",
             "bank_transfer": "#/components/schemas/Bank"
+          }
+        }
+      },
+      "Identity": {
+        "type": "object",
+        "required": [
+          "id"
+        ],
+        "additionalProperties": false,
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "note": {
+            "type": "string"
+          }
+        }
+      },
+      "Profile": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "owner": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/Identity"
+              },
+              {
+                "type": "object",
+                "required": [
+                  "display_name"
+                ],
+                "additionalProperties": false,
+                "properties": {
+                  "display_name": {
+                    "type": "string"
+                  },
+                  "nickname": {
+                    "type": "string"
+                  }
+                }
+              }
+            ]
+          },
+          "members": {
+            "type": "array",
+            "items": {
+              "allOf": [
+                {
+                  "$ref": "#/components/schemas/Identity"
+                },
+                {
+                  "type": "object",
+                  "required": [
+                    "role"
+                  ],
+                  "properties": {
+                    "role": {
+                      "type": "string"
+                    }
+                  }
+                }
+              ]
+            }
           }
         }
       }
