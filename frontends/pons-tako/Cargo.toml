@@ -11,6 +11,7 @@ categories = ["web-programming::http-server", "development-tools"]
 [features]
 default = []
 macros = ["dep:linkme", "dep:pons-tako-macros"]
+multipart = ["tako-rs/multipart"]
 sse = ["dep:futures-util", "tako-rs/sse"]
 typed-header = ["dep:headers", "tako-rs/typed-header"]
 

@@ -108,6 +108,47 @@ impl<T: Schema> DescribeRequest for tako::extractors::form::Form<T> {
     }
 }
 
+#[cfg(feature = "multipart")]
+impl<'a, T: Schema, F> DescribeRequest
+    for tako::extractors::multipart::TakoTypedMultipart<'a, T, F>
+{
+    fn describe(cx: &mut OperationCx) {
+        cx.request_body::<T>(ContentKind::Multipart);
+        cx.diagnostic(
+            "PONS-W101",
+            format!(
+                "the multipart file field type {} has no IR form, so every file part stays opaque",
+                std::any::type_name::<F>()
+            ),
+        );
+    }
+}
+
+#[cfg(feature = "multipart")]
+impl<'a> DescribeRequest for tako::extractors::multipart::TakoMultipart<'a> {
+    fn describe(cx: &mut OperationCx) {
+        cx.request_body::<UntypedMultipart>(ContentKind::Multipart);
+        cx.diagnostic(
+            "PONS-W101",
+            "multipart fields are opaque; use TakoTypedMultipart<T, F> for a typed multipart body",
+        );
+    }
+}
+
+#[cfg(feature = "multipart")]
+struct UntypedMultipart;
+
+#[cfg(feature = "multipart")]
+impl Schema for UntypedMultipart {
+    fn schema(_: &mut pons_core::TypeCx, _: pons_ir::Direction) -> TypeRef {
+        TypeRef::Inline(pons_ir::InlineType::Opaque {
+            codec: "tako.multipart".into(),
+            wire: pons_ir::OpaqueWire::Unknown,
+            ext: Default::default(),
+        })
+    }
+}
+
 impl<T> DescribeRequest for tako::extractors::state::State<T> {
     fn describe(_: &mut OperationCx) {}
 }

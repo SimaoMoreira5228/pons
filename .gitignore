@@ -5,3 +5,6 @@ node_modules/
 build/
 .gradle/
 .kotlin/
+
+# Go emitter build output
+/emitters/pons-emit-go/pons-emit-go
