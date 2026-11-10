@@ -104,7 +104,7 @@ function format(schema: Type.TSchema, name: string): Type.TSchema {
     ),
     (
         "binary32",
-        "function binary32(): Type.TSchema {\n  return Type.Refine(Type.Number(), (value) => Number.isFinite(value) && Number.isFinite(Math.fround(value)), () => \"number is outside the f32 range\");\n}\n",
+        "function binary32(schema: Type.TSchema = Type.Number()): Type.TSchema {\n  return Type.Refine(schema, (value) => Number.isFinite(value) && Number.isFinite(Math.fround(value)), () => \"number is outside the f32 range\");\n}\n",
     ),
     (
         "present",
@@ -257,8 +257,8 @@ mod schema {
     use pons_ir::{DecimalWire, FieldFormat, Presence};
 
     use super::super::backend::{
-        Backend, Capability, Declaration, IntCarrier, IntegerShape, Member, ObjectShape, Rendered,
-        StringCarrier, StringShape, integral_constraint,
+        Backend, Capability, Declaration, FloatShape, IntCarrier, IntegerShape, Member,
+        ObjectShape, Rendered, StringCarrier, StringShape, float_constraint, integral_constraint,
     };
     use super::{CANONICAL_INTEGER, CANONICAL_SIGNED_INTEGER, DECIMAL, PRELUDE, REFERENCE};
     use crate::EmitError;
@@ -419,13 +419,36 @@ mod schema {
             )))
         }
 
-        fn float(&mut self, bits: u8) -> Rendered {
-            if bits == 32 {
+        fn float(&mut self, shape: &FloatShape) -> Result<Rendered, EmitError> {
+            let mut options = Vec::new();
+            for (key, value) in [
+                ("minimum", shape.minimum),
+                ("maximum", shape.maximum),
+                ("exclusiveMinimum", shape.exclusive_minimum),
+                ("exclusiveMaximum", shape.exclusive_maximum),
+                ("multipleOf", shape.multiple_of),
+            ] {
+                if let Some(value) = value {
+                    options.push(format!("{key}: {}", float_constraint(value)?));
+                }
+            }
+            let schema = if options.is_empty() {
+                "Type.Number()".to_owned()
+            } else {
+                format!("Type.Number({{ {} }})", options.join(", "))
+            };
+            if shape.bits == 32 {
                 self.need.insert("binary32");
-                Rendered::exact("binary32()")
+                if options.is_empty() {
+                    Ok(Rendered::exact("binary32()"))
+                } else {
+                    Ok(Rendered::exact(format!("binary32({schema})")))
+                }
             } else {
                 self.need.insert("finite");
-                Rendered::exact("finite(Type.Number(), \"expected finite number\")")
+                Ok(Rendered::exact(format!(
+                    "finite({schema}, \"expected finite number\")"
+                )))
             }
         }
 

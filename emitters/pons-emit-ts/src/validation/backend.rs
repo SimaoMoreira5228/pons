@@ -47,6 +47,27 @@ pub(crate) struct IntegerShape<'a> {
     pub(crate) multiple_of: Option<&'a Value>,
 }
 
+pub(crate) struct FloatShape<'a> {
+    pub(crate) bits: u8,
+    pub(crate) minimum: Option<&'a Value>,
+    pub(crate) maximum: Option<&'a Value>,
+    pub(crate) exclusive_minimum: Option<&'a Value>,
+    pub(crate) exclusive_maximum: Option<&'a Value>,
+    pub(crate) multiple_of: Option<&'a Value>,
+}
+
+pub(crate) fn float_constraint(value: &Value) -> Result<String, EmitError> {
+    let Some(number) = value.as_number() else {
+        return Err(EmitError(format!(
+            "float constraint {value} is not a number"
+        )));
+    };
+    if !number.as_f64().is_some_and(f64::is_finite) {
+        return Err(EmitError(format!("float constraint {value} is not finite")));
+    }
+    Ok(value.to_string())
+}
+
 pub(crate) fn integral_constraint(value: &Value) -> Result<String, EmitError> {
     let Some(number) = value.as_number() else {
         return Err(EmitError(format!(
@@ -177,7 +198,7 @@ pub(crate) trait Backend {
     fn external(&mut self, wire: &str, payload: Option<&str>) -> Rendered;
     fn string(&mut self, shape: &StringShape) -> Rendered;
     fn integer(&mut self, shape: &IntegerShape) -> Result<Rendered, EmitError>;
-    fn float(&mut self, bits: u8) -> Rendered;
+    fn float(&mut self, shape: &FloatShape) -> Result<Rendered, EmitError>;
     fn decimal(&mut self, wire: DecimalWire) -> Rendered;
     fn bytes(&mut self) -> Rendered;
     fn boolean(&mut self) -> Rendered;

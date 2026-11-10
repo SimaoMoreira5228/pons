@@ -3,8 +3,8 @@ use std::collections::BTreeSet;
 use pons_ir::{DecimalWire, FieldFormat, Presence};
 
 use super::super::backend::{
-    Backend, Declaration, DeclarationKind, IntCarrier, IntegerShape, Member, ObjectShape, Rendered,
-    StringCarrier, StringShape, integral_constraint,
+    Backend, Declaration, DeclarationKind, FloatShape, IntCarrier, IntegerShape, Member,
+    ObjectShape, Rendered, StringCarrier, StringShape, float_constraint, integral_constraint,
 };
 use crate::EmitError;
 use crate::render::{jsdoc, string};
@@ -320,13 +320,25 @@ impl Backend for Generator {
         )))
     }
 
-    fn float(&mut self, bits: u8) -> Rendered {
-        if bits == 32 {
+    fn float(&mut self, shape: &FloatShape) -> Result<Rendered, EmitError> {
+        let mut schema = if shape.bits == 32 {
             self.need.insert("binary32");
-            Rendered::exact("binary32()")
+            "binary32()".to_owned()
         } else {
-            Rendered::exact("z.number()")
+            "z.number()".to_owned()
+        };
+        for (method, value) in [
+            ("min", shape.minimum),
+            ("max", shape.maximum),
+            ("gt", shape.exclusive_minimum),
+            ("lt", shape.exclusive_maximum),
+            ("multipleOf", shape.multiple_of),
+        ] {
+            if let Some(value) = value {
+                schema.push_str(&format!(".{method}({})", float_constraint(value)?));
+            }
         }
+        Ok(Rendered::exact(schema))
     }
 
     fn decimal(&mut self, wire: DecimalWire) -> Rendered {

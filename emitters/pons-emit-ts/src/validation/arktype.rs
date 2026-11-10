@@ -3,13 +3,16 @@ use std::collections::{BTreeMap, BTreeSet};
 use pons_ir::{DecimalWire, Document, FieldFormat, Presence, TypeRef, ValidationCoverage};
 
 use super::backend::{
-    Backend as ValidationBackend, Capability, Declaration, IntCarrier, IntegerShape, Member,
-    ObjectShape, Rendered, StringCarrier, StringShape, integral_constraint,
+    Backend as ValidationBackend, Capability, Declaration, FloatShape, IntCarrier, IntegerShape,
+    Member, ObjectShape, Rendered, StringCarrier, StringShape, float_constraint,
+    integral_constraint,
 };
 use super::walk::Walk;
 use super::{Capabilities, Generator as ValidationGenerator, Imports, Rendered as RenderedFile};
 use crate::render::{jsdoc, string};
 use crate::{EmitError, TsOptions};
+
+const FLOAT_BOUNDS: Capability = Capability::new("validation.float_bounds");
 
 const MISMATCH: &str = "function mismatch(schema: (value: unknown) => unknown): (value: unknown) => ValidationIssue | null {\n  return (value) => {\n    try {\n      const result = schema(value);\n      if (!(result instanceof ark.errors)) return null;\n      const error = result[0];\n      if (error === undefined) return { path: [], message: result.summary };\n      return { path: error.path.map((step) => typeof step === \"number\" ? step : String(step)), message: result.summary };\n    } catch (cause) {\n      return { path: [], message: cause instanceof Error ? cause.message : String(cause) };\n    }\n  };\n}\n";
 
@@ -412,13 +415,39 @@ impl ValidationBackend for Backend {
         }
     }
 
-    fn float(&mut self, bits: u8) -> Rendered {
-        if bits == 32 {
+    fn float(&mut self, shape: &FloatShape) -> Result<Rendered, EmitError> {
+        let mut expression = if shape.bits == 32 {
             self.need("binary32");
-            Rendered::exact("binary32()")
+            "binary32()".to_owned()
         } else {
             self.need("finite");
-            Rendered::exact("finite()")
+            "finite()".to_owned()
+        };
+        for (operator, value) in [
+            (">=", shape.minimum),
+            ("<=", shape.maximum),
+            (">", shape.exclusive_minimum),
+            ("<", shape.exclusive_maximum),
+        ] {
+            if let Some(value) = value {
+                let bound = format!("number {operator} {}", float_constraint(value)?);
+                expression = format!("[{expression}, \"&\", {}]", definition(&bound));
+            }
+        }
+        let mut widened = false;
+        if let Some(value) = shape.multiple_of {
+            match integral_constraint(value) {
+                Ok(divisor) => {
+                    let bound = format!("number % {divisor}");
+                    expression = format!("[{expression}, \"&\", {}]", definition(&bound));
+                }
+                Err(_) => widened = true,
+            }
+        }
+        if widened {
+            Ok(Rendered::Widened(expression, FLOAT_BOUNDS))
+        } else {
+            Ok(Rendered::exact(expression))
         }
     }
 

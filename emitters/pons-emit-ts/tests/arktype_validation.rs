@@ -607,3 +607,39 @@ refuses("an integer outside its range", validateUser, { small: 10, wide: 1n });
 "#;
     run_bun(&files, harness);
 }
+
+#[test]
+fn a_fractional_multiple_is_widened_instead_of_dropped() {
+    let mut raw = fixture();
+    raw["types"]["User"]["fields"] = json!([
+        {
+            "wire": "ratio",
+            "ident": ["ratio"],
+            "ty": {
+                "kind": "float",
+                "bits": 64,
+                "minimum": 0,
+                "multiple_of": 0.5
+            },
+            "presence": "required"
+        }
+    ]);
+    let document: Document = serde_json::from_value(raw).unwrap();
+    let output = emit_with_options(
+        &document,
+        TsOptions {
+            mode: EmitMode::Lossy,
+            validation: ValidationOptions::new(ValidationBackend::Arktype),
+            ..TsOptions::default()
+        },
+    )
+    .unwrap();
+    assert!(
+        output.validation_coverage.lossy.contains("types.User"),
+        "{:?}",
+        output.validation_coverage
+    );
+    let validators = file(&output.files, "validators.ts");
+    assert!(validators.contains("number >= 0"), "{validators}");
+    assert!(!validators.contains("% 0.5"), "{validators}");
+}

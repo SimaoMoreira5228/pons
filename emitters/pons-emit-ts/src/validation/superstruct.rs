@@ -3,8 +3,9 @@ use std::collections::{BTreeMap, BTreeSet};
 use pons_ir::{DecimalWire, Document, FieldFormat, Presence, TypeRef, ValidationCoverage};
 
 use super::backend::{
-    Backend as BackendTrait, Capability, Declaration, DeclarationKind, IntCarrier, IntegerShape,
-    Member, ObjectShape, Rendered, StringCarrier, StringShape, integral_constraint,
+    Backend as BackendTrait, Capability, Declaration, DeclarationKind, FloatShape, IntCarrier,
+    IntegerShape, Member, ObjectShape, Rendered, StringCarrier, StringShape, float_constraint,
+    integral_constraint,
 };
 use super::walk::Walk;
 use super::{Capabilities, Generator as ValidationGenerator, Imports, Rendered as RenderedFile};
@@ -106,6 +107,21 @@ function formatStruct(format: string): Struct<string, null> {
     (
         "binary32",
         r#"const binary32 = () => refine(number(), "binary32", (value) => Number.isFinite(Math.fround(value)) || "number is outside the f32 range");
+"#,
+    ),
+    (
+        "float-bounds",
+        r#"function withinFloatBounds(value: number, minimum?: number, maximum?: number, exclusiveMinimum?: number, exclusiveMaximum?: number, multipleOf?: number): boolean {
+  if (minimum !== undefined && value < minimum) return false;
+  if (maximum !== undefined && value > maximum) return false;
+  if (exclusiveMinimum !== undefined && value <= exclusiveMinimum) return false;
+  if (exclusiveMaximum !== undefined && value >= exclusiveMaximum) return false;
+  if (multipleOf !== undefined) {
+    const quotient = value / multipleOf;
+    if (Math.abs(quotient - Math.round(quotient)) > 1e-9 * Math.max(1, Math.abs(quotient))) return false;
+  }
+  return true;
+}
 "#,
     ),
     (
@@ -366,14 +382,36 @@ impl BackendTrait for Backend {
         )))
     }
 
-    fn float(&mut self, bits: u8) -> Rendered {
-        if bits == 32 {
+    fn float(&mut self, shape: &FloatShape) -> Result<Rendered, EmitError> {
+        let base = if shape.bits == 32 {
             self.need_prelude("binary32");
-            Rendered::exact("binary32()")
+            "binary32()"
         } else {
             self.need_prelude("finite");
-            Rendered::exact("finiteNumber()")
+            "finiteNumber()"
+        };
+        let mut arguments = Vec::new();
+        for value in [
+            shape.minimum,
+            shape.maximum,
+            shape.exclusive_minimum,
+            shape.exclusive_maximum,
+            shape.multiple_of,
+        ] {
+            arguments.push(match value {
+                Some(value) => float_constraint(value)?,
+                None => String::from("undefined"),
+            });
         }
+        if arguments.iter().all(|value| value == "undefined") {
+            return Ok(Rendered::exact(base));
+        }
+        self.need("float-bounds");
+        self.used("refine");
+        Ok(Rendered::exact(format!(
+            "refine({base}, \"floatBounds\", (value) => withinFloatBounds(value, {}) || \"number is outside the contract\")",
+            arguments.join(", ")
+        )))
     }
 
     fn decimal(&mut self, wire: DecimalWire) -> Rendered {

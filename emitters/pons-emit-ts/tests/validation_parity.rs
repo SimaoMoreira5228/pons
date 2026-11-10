@@ -31,6 +31,7 @@ fn document() -> Document {
                     {"wire": "count", "ident": ["count"], "ty": {"kind": "int", "bits": 32, "signed": true, "wire": "number"}, "presence": "required"},
                     {"wire": "wide", "ident": ["wide"], "ty": {"kind": "int", "bits": 64, "signed": true, "wire": "number"}, "presence": "required"},
                     {"wire": "ratio", "ident": ["ratio"], "ty": {"kind": "float", "bits": 64}, "presence": "required"},
+                    {"wire": "bounded", "ident": ["bounded"], "ty": {"kind": "float", "bits": 64, "minimum": 0, "exclusive_maximum": 6, "multiple_of": 2}, "presence": "required"},
                     {"wire": "money", "ident": ["money"], "ty": {"kind": "decimal", "wire": "string"}, "presence": "required"},
                     {"wire": "name", "ident": ["name"], "ty": {"kind": "string", "min_length": 2, "max_length": 4, "pattern": "^[a-z]+$"}, "presence": "required"},
                     {"wire": "id", "ident": ["id"], "ty": {"kind": "string", "format": "uuid"}, "presence": "required"},
@@ -104,6 +105,7 @@ fn base() -> BTreeMap<&'static str, String> {
         ("count", "7".into()),
         ("wide", "9007199254740993n".into()),
         ("ratio", "1.5".into()),
+        ("bounded", "2".into()),
         ("money", "\"12.34\"".into()),
         ("name", "\"abc\"".into()),
         ("id", "\"123e4567-e89b-12d3-a456-426614174000\"".into()),
@@ -179,6 +181,32 @@ fn cases() -> Vec<Case> {
         }),
         case("a float that is infinity", false, |fields| {
             fields.insert("ratio", "Infinity".into());
+        }),
+        case("a bounded float at its inclusive minimum", true, |fields| {
+            fields.insert("bounded", "0".into());
+        }),
+        case(
+            "a bounded float just inside its exclusive maximum",
+            true,
+            |fields| {
+                fields.insert("bounded", "4".into());
+            },
+        ),
+        case("a bounded float below its minimum", false, |fields| {
+            fields.insert("bounded", "-2".into());
+        }),
+        case(
+            "a bounded float on its exclusive maximum",
+            false,
+            |fields| {
+                fields.insert("bounded", "6".into());
+            },
+        ),
+        case("a bounded float above its maximum", false, |fields| {
+            fields.insert("bounded", "7".into());
+        }),
+        case("a bounded float off its multiple", false, |fields| {
+            fields.insert("bounded", "3".into());
         }),
         case("a decimal on the number wire", false, |fields| {
             fields.insert("money", "12.34".into());

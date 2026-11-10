@@ -3,8 +3,9 @@ use std::collections::{BTreeMap, BTreeSet};
 use pons_ir::{DecimalWire, Document, FieldFormat, Presence, TypeRef, ValidationCoverage};
 
 use super::backend::{
-    Backend as BackendTrait, Capability, Declaration, DeclarationKind, IntCarrier, IntegerShape,
-    Member, ObjectShape, Rendered, StringCarrier, StringShape, integral_constraint,
+    Backend as BackendTrait, Capability, Declaration, DeclarationKind, FloatShape, IntCarrier,
+    IntegerShape, Member, ObjectShape, Rendered, StringCarrier, StringShape, float_constraint,
+    integral_constraint,
 };
 use super::walk::Walk;
 use super::{Capabilities, Generator as ValidationGenerator, Imports, Rendered as RenderedFile};
@@ -452,15 +453,36 @@ impl BackendTrait for Backend {
         Ok(Rendered::exact(self.integer_schema(shape)?))
     }
 
-    fn float(&mut self, bits: u8) -> Rendered {
-        if bits == 32 {
+    fn float(&mut self, shape: &FloatShape) -> Result<Rendered, EmitError> {
+        let (base, mut actions) = if shape.bits == 32 {
             self.need(&["binary32"]);
-            Rendered::exact("binary32()")
+            ("binary32()", Vec::new())
         } else {
-            Rendered::exact(
-                "v.pipe(v.number(), v.check((value) => Number.isFinite(value), \"number is not finite\"))",
+            (
+                "v.number()",
+                vec![
+                    "v.check((value) => Number.isFinite(value), \"number is not finite\")"
+                        .to_owned(),
+                ],
             )
+        };
+        for (action, value) in [
+            ("v.minValue", shape.minimum),
+            ("v.maxValue", shape.maximum),
+            ("v.gtValue", shape.exclusive_minimum),
+            ("v.ltValue", shape.exclusive_maximum),
+            ("v.multipleOf", shape.multiple_of),
+        ] {
+            if let Some(value) = value {
+                actions.push(format!("{action}({})", float_constraint(value)?));
+            }
         }
+        let schema = if actions.is_empty() {
+            base.to_owned()
+        } else {
+            format!("v.pipe({base}, {})", actions.join(", "))
+        };
+        Ok(Rendered::exact(schema))
     }
 
     fn decimal(&mut self, wire: DecimalWire) -> Rendered {

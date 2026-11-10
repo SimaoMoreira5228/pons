@@ -7,8 +7,8 @@ use pons_ir::{
 };
 
 use super::backend::{
-    Backend, Binding, Capability, Declaration, DeclarationKind, IntCarrier, IntegerShape, Member,
-    ObjectShape, Rendered, StringCarrier, StringShape,
+    Backend, Binding, Capability, Declaration, DeclarationKind, FloatShape, IntCarrier,
+    IntegerShape, Member, ObjectShape, Rendered, StringCarrier, StringShape,
 };
 use crate::naming::{camel, pascal, unique_names};
 use crate::{DateMode, EmitError, EmitMode, FieldCase, Int64, TsOptions};
@@ -576,7 +576,21 @@ impl<'a> Walk<'a> {
                 maximum: maximum.as_ref(),
                 multiple_of: multiple_of.as_ref(),
             })?,
-            InlineType::Float { bits, .. } => backend.float(*bits),
+            InlineType::Float {
+                bits,
+                minimum,
+                maximum,
+                exclusive_minimum,
+                exclusive_maximum,
+                multiple_of,
+            } => backend.float(&FloatShape {
+                bits: *bits,
+                minimum: minimum.as_ref(),
+                maximum: maximum.as_ref(),
+                exclusive_minimum: exclusive_minimum.as_ref(),
+                exclusive_maximum: exclusive_maximum.as_ref(),
+                multiple_of: multiple_of.as_ref(),
+            })?,
             InlineType::Decimal { wire } => backend.decimal(*wire),
             InlineType::String {
                 format,

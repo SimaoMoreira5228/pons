@@ -5,8 +5,9 @@ use pons_ir::{
 };
 
 use super::backend::{
-    Backend as BackendTrait, Capability, Declaration, DeclarationKind, IntCarrier, IntegerShape,
-    Member, ObjectShape, Rendered, StringCarrier, StringShape, integral_constraint,
+    Backend as BackendTrait, Capability, Declaration, DeclarationKind, FloatShape, IntCarrier,
+    IntegerShape, Member, ObjectShape, Rendered, StringCarrier, StringShape, float_constraint,
+    integral_constraint,
 };
 use super::walk::{Walk, declaration_names};
 use super::{Capabilities, Generator as ValidationGenerator, Imports, Rendered as RenderedFile};
@@ -112,6 +113,10 @@ const day = () => yup.string().matches(DATE, "the date is not a full-date").test
     (
         "nullable",
         "const nullable = (schema: SchemaLike) => yup.lazy((value) => value === null ? yup.mixed().nullable() : schemaOf(schema, value));\n",
+    ),
+    (
+        "float-multiple",
+        "function isMultiple(value: number, divisor: number): boolean {\n  const quotient = value / divisor;\n  return Math.abs(quotient - Math.round(quotient)) <= 1e-9 * Math.max(1, Math.abs(quotient));\n}\n",
     ),
     (
         "integer",
@@ -489,16 +494,42 @@ impl BackendTrait for Backend {
         )))
     }
 
-    fn float(&mut self, bits: u8) -> Rendered {
-        if bits == 32 {
-            Rendered::exact(
-                "yup.number().test(\"f32\", \"number is outside the f32 range\", (value) => value === undefined || Number.isFinite(Math.fround(value as number)))",
-            )
+    fn float(&mut self, shape: &FloatShape) -> Result<Rendered, EmitError> {
+        let mut schema = if shape.bits == 32 {
+            "yup.number().test(\"f32\", \"number is outside the f32 range\", (value) => value === undefined || Number.isFinite(Math.fround(value as number)))".to_owned()
         } else {
-            Rendered::exact(
-                "yup.number().test(\"finite\", \"number is not finite\", (value) => value === undefined || Number.isFinite(value as number))",
-            )
+            "yup.number().test(\"finite\", \"number is not finite\", (value) => value === undefined || Number.isFinite(value as number))".to_owned()
+        };
+        for (method, value, message) in [
+            ("min", shape.minimum, "number is below its minimum"),
+            ("max", shape.maximum, "number is above its maximum"),
+            (
+                "moreThan",
+                shape.exclusive_minimum,
+                "number is not above its exclusive minimum",
+            ),
+            (
+                "lessThan",
+                shape.exclusive_maximum,
+                "number is not below its exclusive maximum",
+            ),
+        ] {
+            if let Some(value) = value {
+                schema.push_str(&format!(
+                    ".{method}({}, {})",
+                    float_constraint(value)?,
+                    string(message)
+                ));
+            }
         }
+        if let Some(value) = shape.multiple_of {
+            self.require("float-multiple");
+            schema.push_str(&format!(
+                ".test(\"multiple\", \"number does not match its multiple\", (value) => value === undefined || isMultiple(value as number, {}))",
+                float_constraint(value)?
+            ));
+        }
+        Ok(Rendered::exact(schema))
     }
 
     fn decimal(&mut self, wire: DecimalWire) -> Rendered {
