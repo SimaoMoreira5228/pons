@@ -2,14 +2,16 @@ use std::any::type_name;
 use std::collections::BTreeMap;
 
 use pons_core::Schema;
+#[cfg(feature = "sse")]
+use pons_ir::StreamMessage;
 use pons_ir::{
     Body, ContentKind, Diagnostic, DiagnosticSeverity, Direction, InlineType, NamedRef, Presence,
     Response, ResponseStatus, TypeDef, TypeKind, TypeRef,
 };
 #[cfg(feature = "typed-header")]
 use pons_ir::{HeaderParameter, OpaqueWire};
-#[cfg(feature = "sse")]
-use pons_ir::{StreamDescription, StreamKind, StreamMessage};
+#[cfg(any(feature = "sse", feature = "websocket"))]
+use pons_ir::{StreamDescription, StreamKind};
 
 use crate::describe::OperationCx;
 
@@ -115,6 +117,17 @@ impl OperationCx {
             headers: Vec::new(),
             ext: Default::default(),
         });
+    }
+
+    #[cfg(feature = "websocket")]
+    pub(crate) fn websocket<Client: Schema, Server: Schema>(&mut self) {
+        self.stream = Some(StreamDescription {
+            kind: StreamKind::Websocket {
+                client: Client::schema(&mut self.types, Direction::Input),
+                server: Server::schema(&mut self.types, Direction::Output),
+            },
+        });
+        self.empty_response(101);
     }
 
     pub(crate) fn diagnostic(&mut self, code: &str, message: impl Into<String>) {

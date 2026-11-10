@@ -10,6 +10,8 @@ mod operation_cx;
 mod router;
 #[cfg(feature = "sse")]
 mod sse;
+#[cfg(feature = "websocket")]
+mod websocket;
 
 pub use auth::{Auth, AuthSpec, SessionAuth};
 pub use describe::{DescribeRequest, DescribeResponse, OperationCx, WithStatus};
@@ -26,6 +28,8 @@ pub use pons_tako_macros::{delete, get, head, options, patch, post, put, route};
 pub use router::Router;
 #[cfg(feature = "sse")]
 pub use sse::PonsSse;
+#[cfg(feature = "websocket")]
+pub use websocket::{PonsWebSocket, TypedSocket, TypedSocketError};
 
 pub use tako::extractors;
 pub use tako::route::Route;

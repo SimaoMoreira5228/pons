@@ -14,6 +14,7 @@ macros = ["dep:linkme", "dep:pons-tako-macros"]
 multipart = ["tako-rs/multipart"]
 sse = ["dep:futures-util", "tako-rs/sse"]
 typed-header = ["dep:headers", "tako-rs/typed-header"]
+websocket = ["tako-rs/ws"]
 
 [dependencies]
 futures-util = { workspace = true, optional = true }

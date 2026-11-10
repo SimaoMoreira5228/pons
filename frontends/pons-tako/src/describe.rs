@@ -157,6 +157,10 @@ impl<T> DescribeRequest for tako::extractors::extension::Extension<T> {
     fn describe(_: &mut OperationCx) {}
 }
 
+impl DescribeRequest for tako::types::Request {
+    fn describe(_: &mut OperationCx) {}
+}
+
 impl DescribeRequest for tako::extractors::header_map::HeaderMap {
     fn describe(cx: &mut OperationCx) {
         cx.diagnostic(

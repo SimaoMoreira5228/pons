@@ -2486,6 +2486,7 @@ dependencies = [
  "anyhow",
  "arc-swap",
  "async-trait",
+ "base64 0.22.1",
  "bytes",
  "envy",
  "futures-util",
@@ -2502,10 +2503,12 @@ dependencies = [
  "scc",
  "serde",
  "serde_json",
+ "sha1 0.10.7",
  "smallvec",
  "thread_local",
  "tokio",
  "tracing",
+ "url",
 ]
 
 [[package]]
