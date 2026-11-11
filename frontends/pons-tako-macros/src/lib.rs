@@ -11,12 +11,17 @@ use crate::parse::{Method, RouteArgs, ShortcutArgs};
 /// ```ignore
 /// #[pons_tako::route(GET, "/users/{id}", name = "users.get")]
 /// async fn get_user() -> &'static str { "Ada" }
+///
+/// #[pons_tako::route(GET, "/users/{id}", response = Json<User>)]
+/// async fn get_opaque_user() -> impl Responder { Json(user) }
 /// ```
 #[proc_macro_attribute]
 pub fn route(attr: TokenStream, item: TokenStream) -> TokenStream {
     let args = parse_macro_input!(attr as RouteArgs);
     let function = parse_macro_input!(item as ItemFn);
-    expand::route(args, function).into()
+    expand::route(args, function)
+        .unwrap_or_else(|error| error.to_compile_error())
+        .into()
 }
 
 /// Registers a `GET` handler for `Router::mount_all`.
@@ -24,6 +29,9 @@ pub fn route(attr: TokenStream, item: TokenStream) -> TokenStream {
 /// ```ignore
 /// #[pons_tako::get("/users/{id}")]
 /// async fn get_user() -> &'static str { "Ada" }
+///
+/// #[pons_tako::get("/users/{id}", response = Json<User>)]
+/// async fn get_opaque_user() -> impl Responder { Json(user) }
 /// ```
 #[proc_macro_attribute]
 pub fn get(attr: TokenStream, item: TokenStream) -> TokenStream {
@@ -69,5 +77,7 @@ pub fn options(attr: TokenStream, item: TokenStream) -> TokenStream {
 fn shortcut(method: Method, attr: TokenStream, item: TokenStream) -> TokenStream {
     let args = parse_macro_input!(attr as ShortcutArgs);
     let function = parse_macro_input!(item as ItemFn);
-    expand::shortcut(method, args, function).into()
+    expand::shortcut(method, args, function)
+        .unwrap_or_else(|error| error.to_compile_error())
+        .into()
 }

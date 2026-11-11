@@ -80,6 +80,35 @@ impl Router {
         self.register(method, path, handler, Some(meta))
     }
 
+    pub fn route_described<H, T, D>(
+        &mut self,
+        method: http::Method,
+        path: &str,
+        handler: H,
+        describe: D,
+    ) -> Arc<Route>
+    where
+        H: Handler<T> + Clone + 'static,
+        D: FnOnce(&mut OperationCx),
+    {
+        self.register_described(method, path, handler, None, describe)
+    }
+
+    pub fn route_described_with<H, T, D>(
+        &mut self,
+        method: http::Method,
+        path: &str,
+        handler: H,
+        meta: OperationMeta,
+        describe: D,
+    ) -> Arc<Route>
+    where
+        H: Handler<T> + Clone + 'static,
+        D: FnOnce(&mut OperationCx),
+    {
+        self.register_described(method, path, handler, Some(meta), describe)
+    }
+
     fn register<H, T>(
         &mut self,
         method: http::Method,
@@ -90,8 +119,23 @@ impl Router {
     where
         H: Handler<T> + Clone + DescribeHandler<T> + 'static,
     {
+        self.register_described(method, path, handler, meta, |cx| H::describe(cx))
+    }
+
+    fn register_described<H, T, D>(
+        &mut self,
+        method: http::Method,
+        path: &str,
+        handler: H,
+        meta: Option<OperationMeta>,
+        describe: D,
+    ) -> Arc<Route>
+    where
+        H: Handler<T> + Clone + 'static,
+        D: FnOnce(&mut OperationCx),
+    {
         let mut cx = OperationCx::default();
-        H::describe(&mut cx);
+        describe(&mut cx);
         let full_path = join_prefix(&self.prefix, path);
         let route = self.inner.route(method.clone(), &full_path, handler);
         let description = RouteDescription {
@@ -217,7 +261,7 @@ impl DerefMut for Router {
 }
 
 macro_rules! route_methods {
-    ($method:ident, $method_with:ident, $http_method:expr) => {
+    ($method:ident, $method_with:ident, $method_described:ident, $method_described_with:ident, $http_method:expr) => {
         pub fn $method<H, T>(&mut self, path: &str, handler: H) -> Arc<Route>
         where
             H: Handler<T> + Clone + DescribeHandler<T> + 'static,
@@ -236,17 +280,86 @@ macro_rules! route_methods {
         {
             self.register($http_method, path, handler, Some(meta))
         }
+
+        pub fn $method_described<H, T, D>(
+            &mut self,
+            path: &str,
+            handler: H,
+            describe: D,
+        ) -> Arc<Route>
+        where
+            H: Handler<T> + Clone + 'static,
+            D: FnOnce(&mut OperationCx),
+        {
+            self.register_described($http_method, path, handler, None, describe)
+        }
+
+        pub fn $method_described_with<H, T, D>(
+            &mut self,
+            path: &str,
+            handler: H,
+            meta: OperationMeta,
+            describe: D,
+        ) -> Arc<Route>
+        where
+            H: Handler<T> + Clone + 'static,
+            D: FnOnce(&mut OperationCx),
+        {
+            self.register_described($http_method, path, handler, Some(meta), describe)
+        }
     };
 }
 
 impl Router {
-    route_methods!(get, get_with, http::Method::GET);
-    route_methods!(post, post_with, http::Method::POST);
-    route_methods!(put, put_with, http::Method::PUT);
-    route_methods!(delete, delete_with, http::Method::DELETE);
-    route_methods!(patch, patch_with, http::Method::PATCH);
-    route_methods!(head, head_with, http::Method::HEAD);
-    route_methods!(options, options_with, http::Method::OPTIONS);
+    route_methods!(
+        get,
+        get_with,
+        get_described,
+        get_described_with,
+        http::Method::GET
+    );
+    route_methods!(
+        post,
+        post_with,
+        post_described,
+        post_described_with,
+        http::Method::POST
+    );
+    route_methods!(
+        put,
+        put_with,
+        put_described,
+        put_described_with,
+        http::Method::PUT
+    );
+    route_methods!(
+        delete,
+        delete_with,
+        delete_described,
+        delete_described_with,
+        http::Method::DELETE
+    );
+    route_methods!(
+        patch,
+        patch_with,
+        patch_described,
+        patch_described_with,
+        http::Method::PATCH
+    );
+    route_methods!(
+        head,
+        head_with,
+        head_described,
+        head_described_with,
+        http::Method::HEAD
+    );
+    route_methods!(
+        options,
+        options_with,
+        options_described,
+        options_described_with,
+        http::Method::OPTIONS
+    );
 }
 
 pub(crate) fn join_prefix(prefix: &str, path: &str) -> String {
