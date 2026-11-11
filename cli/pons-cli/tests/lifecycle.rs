@@ -137,7 +137,7 @@ fn init_refuses_an_existing_file() {
 fn export_project(directory: &Path, script: &str) -> PathBuf {
     let root = directory.join("project");
     fs::create_dir(&root).unwrap();
-    executable(&root, "frontend.sh", script);
+    fs::write(root.join("frontend.sh"), script).unwrap();
     let mut contract: Value = serde_json::from_str(FIXTURE).unwrap();
     contract["operations"].as_array_mut().unwrap().reverse();
     fs::write(
@@ -147,7 +147,7 @@ fn export_project(directory: &Path, script: &str) -> PathBuf {
     .unwrap();
     fs::write(
         root.join("pons.toml"),
-        "[project]\nname = \"acme\"\nir = \"api/ir.json\"\n\n[frontend]\nkind = \"axum\"\ncommand = \"./frontend.sh\"\n",
+        "[project]\nname = \"acme\"\nir = \"api/ir.json\"\n\n[frontend]\nkind = \"axum\"\ncommand = \"sh frontend.sh\"\n",
     )
     .unwrap();
     root
