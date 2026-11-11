@@ -5,6 +5,8 @@ mod handler;
 mod metadata;
 #[cfg(feature = "macros")]
 mod mount;
+#[cfg(feature = "multipart")]
+mod multipart;
 mod operation;
 mod operation_cx;
 mod router;
@@ -22,6 +24,8 @@ pub use linkme;
 pub use metadata::OperationMeta;
 #[cfg(feature = "macros")]
 pub use mount::PONS_TAKO_ROUTES;
+#[cfg(feature = "multipart")]
+pub use multipart::PonsMultipart;
 pub use pons_ir::{Document, Info, ValidationError};
 #[cfg(feature = "macros")]
 pub use pons_tako_macros::{delete, get, head, options, patch, post, put, route};
