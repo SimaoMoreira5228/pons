@@ -37,3 +37,4 @@ pons-axum = { path = "../pons-axum" }
 pons-core = { path = "../../core/rust/pons-core", features = ["serde_json"] }
 pons-ir = { path = "../../core/rust/pons-ir" }
 serde.workspace = true
+tokio = { version = "1", features = ["macros", "rt-multi-thread"] }

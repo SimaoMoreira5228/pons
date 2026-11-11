@@ -1742,6 +1742,7 @@ dependencies = [
  "serde_json",
  "tako-rs",
  "tako-rs-core",
+ "tokio",
 ]
 
 [[package]]

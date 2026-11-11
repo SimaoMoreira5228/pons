@@ -21,6 +21,13 @@ pub struct OperationCx {
     pub(crate) errors: Vec<ErrorResponse>,
     pub(crate) auth: AuthRequirement,
     pub(crate) diagnostics: Vec<Diagnostic>,
+    pub(crate) validated: bool,
+}
+
+impl OperationCx {
+    pub fn mark_validated(&mut self) {
+        self.validated = true;
+    }
 }
 
 pub trait DescribeRequest {

@@ -6,11 +6,9 @@ use std::str::FromStr;
 use http::StatusCode;
 use pons_core::TypeCx;
 use pons_ir::{Direction, InlineType, Method, OpaqueWire, PathSegment, TypeRef};
-use pons_tako::{Info, OperationMeta};
+use pons_tako::{Info, Json as PonsJson, OperationMeta, Path as PonsPath, Query as PonsQuery};
 use serde::{Deserialize, Serialize};
 use tako::extractors::json::Json as TakoJson;
-use tako::extractors::path::Path as TakoPath;
-use tako::extractors::query::Query as TakoQuery;
 use tako::extractors::typed_header::TypedHeader;
 
 #[derive(Deserialize, pons_core::Schema)]
@@ -106,8 +104,8 @@ async fn axum_create_user(
 }
 
 async fn tako_get_user(
-    TakoPath(user): TakoPath<UserId>,
-    TakoQuery(query): TakoQuery<ListQuery>,
+    PonsPath(user): PonsPath<UserId>,
+    PonsQuery(query): PonsQuery<ListQuery>,
     TypedHeader(_user_agent): TypedHeader<headers::UserAgent>,
 ) -> TakoJson<User> {
     let _ = query.limit;
@@ -118,7 +116,7 @@ async fn tako_get_user(
 }
 
 async fn tako_create_user(
-    TakoJson(input): TakoJson<CreateUser>,
+    PonsJson(input): PonsJson<CreateUser>,
 ) -> Result<pons_tako::WithStatus<201, TakoJson<User>>, ApiError> {
     Ok(pons_tako::WithStatus::new(TakoJson(User {
         id: 1,
@@ -182,9 +180,9 @@ fn tako_router() -> pons_tako::Router {
     router
 }
 
-fn declares_request_rejection(document: &pons_ir::Document) -> bool {
-    document.operations.iter().any(|operation| {
-        operation.errors.iter().any(|error| {
+fn request_rejection(document: &pons_ir::Document) -> Option<&pons_ir::ErrorResponse> {
+    document.operations.iter().find_map(|operation| {
+        operation.errors.iter().find(|error| {
             error.status == pons_ir::ErrorStatus::Exact(422)
                 && error
                     .name
@@ -229,16 +227,17 @@ fn tako_and_axum_describe_the_same_document() {
         Some(&PathSegment::Literal { lit: "v1".into() })
     );
 
-    assert!(
-        declares_request_rejection(&axum),
-        "the Axum request extractors publish the rejection they serve"
-    );
-    assert!(
-        !declares_request_rejection(&tako),
-        "Tako does not validate requests, so its document declares no rejection"
-    );
+    let axum_rejection =
+        request_rejection(&axum).expect("the Axum extractors publish the rejection they serve");
+    let tako_rejection =
+        request_rejection(&tako).expect("the Tako wrappers publish the rejection they serve");
+    assert_eq!(tako_rejection.status, axum_rejection.status);
+    assert_eq!(tako_rejection.name, axum_rejection.name);
+    assert_eq!(tako_rejection.content, axum_rejection.content);
+    assert_eq!(tako_rejection.retryable, axum_rejection.retryable);
+    assert_eq!(tako_rejection.doc, axum_rejection.doc);
 
-    pons_ir::equivalent_ignoring_request_rejections(&axum, &tako).unwrap_or_else(|differences| {
+    pons_ir::equivalent(&axum, &tako).unwrap_or_else(|differences| {
         panic!(
             "the documents differ:\n{}",
             differences
