@@ -3,11 +3,14 @@ mod describe;
 mod document;
 mod error;
 mod handler;
+mod media;
 mod metadata;
 #[cfg(feature = "macros")]
 mod mount;
 #[cfg(feature = "multipart")]
 mod multipart;
+#[cfg(feature = "ndjson")]
+mod ndjson;
 mod operation;
 mod operation_cx;
 mod request;
@@ -25,11 +28,14 @@ pub use handler::DescribeHandler;
 #[cfg(feature = "macros")]
 #[doc(hidden)]
 pub use linkme;
+pub use media::{MediaType, WithMedia};
 pub use metadata::OperationMeta;
 #[cfg(feature = "macros")]
 pub use mount::PONS_TAKO_ROUTES;
 #[cfg(feature = "multipart")]
 pub use multipart::PonsMultipart;
+#[cfg(feature = "ndjson")]
+pub use ndjson::PonsNdjson;
 pub use pons_ir::{Document, Info, ValidationError};
 #[cfg(feature = "macros")]
 pub use pons_tako_macros::{delete, get, head, options, patch, post, put, route};

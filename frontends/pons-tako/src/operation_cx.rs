@@ -10,7 +10,7 @@ use pons_ir::{
 };
 #[cfg(feature = "typed-header")]
 use pons_ir::{HeaderParameter, OpaqueWire};
-#[cfg(any(feature = "sse", feature = "websocket"))]
+#[cfg(any(feature = "ndjson", feature = "sse", feature = "websocket"))]
 use pons_ir::{StreamDescription, StreamKind};
 
 use crate::describe::OperationCx;
@@ -107,6 +107,23 @@ impl OperationCx {
                     event: event.to_owned(),
                     data: T::schema(&mut self.types, Direction::Output),
                 }],
+            },
+        });
+        self.responses.push(Response {
+            status: ResponseStatus::Exact(200),
+            content: ContentKind::Stream,
+            media: None,
+            body: None,
+            headers: Vec::new(),
+            ext: Default::default(),
+        });
+    }
+
+    #[cfg(feature = "ndjson")]
+    pub(crate) fn ndjson<T: Schema>(&mut self) {
+        self.stream = Some(StreamDescription {
+            kind: StreamKind::Ndjson {
+                item: T::schema(&mut self.types, Direction::Output),
             },
         });
         self.responses.push(Response {
