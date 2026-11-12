@@ -9,7 +9,7 @@ use pons_ir::{
     Response, ResponseStatus, TypeDef, TypeKind, TypeRef,
 };
 #[cfg(feature = "typed-header")]
-use pons_ir::{HeaderParameter, OpaqueWire};
+use pons_ir::{HeaderParameter, OpaqueWire, ResponseHeader};
 #[cfg(any(feature = "ndjson", feature = "sse", feature = "websocket"))]
 use pons_ir::{StreamDescription, StreamKind};
 
@@ -33,18 +33,27 @@ impl OperationCx {
     }
 
     #[cfg(feature = "typed-header")]
-    pub(crate) fn request_opaque_header(&mut self, wire: &str, codec: &'static str) {
+    pub(crate) fn request_opaque_header(&mut self, wire: &str) {
         self.headers.push(HeaderParameter {
             wire: wire.to_owned(),
             ident: header_ident(wire),
-            ty: TypeRef::Inline(InlineType::Opaque {
-                codec: codec.into(),
-                wire: OpaqueWire::Text,
-                ext: Default::default(),
-            }),
+            ty: opaque_header_type(),
             presence: Presence::Required,
             ext: Default::default(),
         });
+    }
+
+    #[cfg(feature = "typed-header")]
+    pub(crate) fn response_header(&mut self, start: usize, wire: &str, presence: Presence) {
+        let header = ResponseHeader {
+            wire: wire.to_owned(),
+            ty: opaque_header_type(),
+            presence,
+            ext: Default::default(),
+        };
+        self.responses[start..]
+            .iter_mut()
+            .for_each(|response| response.headers.push(header.clone()));
     }
 
     pub(crate) fn query_type<T: Schema>(&mut self) {
@@ -150,6 +159,15 @@ impl OperationCx {
     pub(crate) fn diagnostic(&mut self, code: &str, message: impl Into<String>) {
         push_diagnostic(&mut self.diagnostics, code, message);
     }
+}
+
+#[cfg(feature = "typed-header")]
+pub(crate) fn opaque_header_type() -> TypeRef {
+    TypeRef::Inline(InlineType::Opaque {
+        codec: "tako.typed-header".into(),
+        wire: OpaqueWire::Text,
+        ext: Default::default(),
+    })
 }
 
 #[cfg(feature = "typed-header")]

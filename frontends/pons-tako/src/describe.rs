@@ -142,7 +142,7 @@ where
     H: headers::Header,
 {
     fn describe(cx: &mut OperationCx) {
-        cx.request_opaque_header(H::name().as_str(), "tako.typed-header");
+        cx.request_opaque_header(H::name().as_str());
     }
 }
 

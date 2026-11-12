@@ -14,6 +14,8 @@ mod ndjson;
 mod operation;
 mod operation_cx;
 mod request;
+#[cfg(feature = "typed-header")]
+mod response_header;
 mod router;
 #[cfg(feature = "sse")]
 mod sse;
@@ -40,6 +42,10 @@ pub use pons_ir::{Document, Info, ValidationError};
 #[cfg(feature = "macros")]
 pub use pons_tako_macros::{delete, get, head, options, patch, post, put, route};
 pub use request::{Form, Json, Path, Query};
+#[cfg(feature = "typed-header")]
+pub use response_header::{
+    WithErrorHeader, WithHeader, WithOptionalErrorHeader, WithOptionalHeader,
+};
 pub use router::Router;
 #[cfg(feature = "sse")]
 pub use sse::PonsSse;
