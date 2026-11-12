@@ -45,9 +45,9 @@ pub(crate) fn build(path: &str, description: RouteDescription) -> BuiltOperation
     let path_types = path_types(&types, &cx.path_types);
     let segments = parse_path(path, &path_types, &mut diagnostics);
     diagnostics.extend(type_diagnostics);
-    let (id, doc) = match meta {
-        Some(meta) => (meta.id, Some(meta.doc)),
-        None => (inferred_id, None),
+    let (id, doc, provides, pagination) = match meta {
+        Some(meta) => (meta.id, Some(meta.doc), meta.provides, meta.pagination),
+        None => (inferred_id, None, None, None),
     };
     let operation = Operation {
         id,
@@ -61,14 +61,14 @@ pub(crate) fn build(path: &str, description: RouteDescription) -> BuiltOperation
         errors_inherit: true,
         stream: cx.stream,
         auth: cx.auth,
-        provides: None,
+        provides,
         semantics: OperationSemantics {
             safe: matches!(method, Method::Get | Method::Head | Method::Options),
             idempotent: matches!(
                 method,
                 Method::Get | Method::Put | Method::Delete | Method::Head | Method::Options
             ),
-            pagination: None,
+            pagination,
         },
         doc,
         origin: None,

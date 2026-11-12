@@ -1,8 +1,11 @@
-use pons_ir::{Doc, Name};
+use pons_ir::{CredentialLocator, CredentialProvision, Doc, Name, Pagination};
 
 pub struct OperationMeta {
     pub(crate) id: Vec<Name>,
     pub(crate) doc: Doc,
+    pub(crate) provides: Option<CredentialProvision>,
+    pub(crate) expires_at: Option<CredentialLocator>,
+    pub(crate) pagination: Option<Pagination>,
 }
 
 impl OperationMeta {
@@ -28,6 +31,9 @@ impl OperationMeta {
                 deprecated: None,
                 tags: Vec::new(),
             },
+            provides: None,
+            expires_at: None,
+            pagination: None,
         }
     }
 
@@ -48,6 +54,30 @@ impl OperationMeta {
 
     pub fn deprecated(mut self, deprecated: bool) -> Self {
         self.doc.deprecated = Some(deprecated);
+        self
+    }
+
+    pub fn provides(mut self, scheme: impl Into<String>, locator: CredentialLocator) -> Self {
+        self.provides = Some(CredentialProvision {
+            scheme: scheme.into(),
+            value: locator,
+            expires_at: self.expires_at.take(),
+            ext: Default::default(),
+        });
+        self
+    }
+
+    pub fn expires_at(mut self, locator: CredentialLocator) -> Self {
+        if let Some(provision) = self.provides.as_mut() {
+            provision.expires_at = Some(locator);
+        } else {
+            self.expires_at = Some(locator);
+        }
+        self
+    }
+
+    pub fn pagination(mut self, pagination: Pagination) -> Self {
+        self.pagination = Some(pagination);
         self
     }
 }

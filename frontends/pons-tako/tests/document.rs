@@ -2,7 +2,9 @@ use std::collections::BTreeMap;
 
 use pons_core::Schema;
 use pons_ir::{
-    ContentKind, InlineType, Method, PathSegment, Presence, ResponseStatus, TypeKind, TypeRef,
+    AuthScheme, ContentKind, CredentialLocator, InlineType, JsonPointer, Method, PageSize,
+    Pagination, PaginationRequest, PathSegment, Presence, ResponseStatus, TypeKind, TypeRef,
+    ValidationError,
 };
 use pons_tako::{Info, OperationMeta, Router, WithStatus};
 use serde::{Deserialize, Serialize};
@@ -20,6 +22,15 @@ struct UserId {
 #[derive(Deserialize, Schema)]
 #[serde(deny_unknown_fields)]
 struct ListQuery {
+    limit: Option<u16>,
+}
+
+#[derive(Deserialize, Schema)]
+#[serde(deny_unknown_fields)]
+struct PageQuery {
+    #[serde(default)]
+    cursor: Option<String>,
+    #[serde(default)]
     limit: Option<u16>,
 }
 
@@ -71,6 +82,11 @@ async fn create_user(Json(input): Json<CreateUser>) -> WithStatus<201, Json<User
         id: 1,
         name: input.name,
     }))
+}
+
+async fn list_page(Query(query): Query<PageQuery>) -> Json<Vec<User>> {
+    let _ = (query.cursor, query.limit);
+    Json(Vec::new())
 }
 
 async fn remove_user(Path(user): Path<UserId>) {
@@ -198,4 +214,121 @@ fn into_router_serves_the_described_paths() {
     assert_eq!(paths.len(), 3);
     assert!(paths.iter().any(|path| path == "/users/{id}"));
     assert!(paths.iter().any(|path| path == "/users"));
+}
+
+#[test]
+fn operation_meta_publishes_the_provision_and_its_locators() {
+    let mut router = Router::new(info());
+    router.auth_scheme("session", AuthScheme::Bearer { format: None });
+    router.post_with(
+        "/login",
+        create_user,
+        OperationMeta::new("auth.login")
+            .summary("Create a session")
+            .provides(
+                "session",
+                CredentialLocator::Body {
+                    pointer: "/token".into(),
+                },
+            )
+            .expires_at(CredentialLocator::Body {
+                pointer: "/expires".into(),
+            }),
+    );
+
+    let document = router.into_document().expect("the document validates");
+    let login = operation(&document, Method::Post);
+    let provides = login.provides.as_ref().expect("the operation provides");
+    assert_eq!(provides.scheme, "session");
+    assert_eq!(
+        provides.value,
+        CredentialLocator::Body {
+            pointer: "/token".into(),
+        }
+    );
+    assert_eq!(
+        provides.expires_at,
+        Some(CredentialLocator::Body {
+            pointer: "/expires".into(),
+        })
+    );
+    assert_eq!(
+        login.doc.as_ref().and_then(|doc| doc.summary.as_deref()),
+        Some("Create a session")
+    );
+}
+
+#[test]
+fn operation_meta_publishes_the_pagination_it_declares() {
+    let mut router = Router::new(info());
+    router.get_with(
+        "/page",
+        list_page,
+        OperationMeta::new("users.page").pagination(Pagination {
+            request: PaginationRequest::Cursor {
+                field: "cursor".into(),
+            },
+            items: JsonPointer::new("/items"),
+            next: Some(JsonPointer::new("/next")),
+            page_size: Some(PageSize {
+                field: "limit".into(),
+                default: Some(20),
+                maximum: Some(100),
+            }),
+            ext: Default::default(),
+        }),
+    );
+
+    let document = router.into_document().expect("the document validates");
+    let page = operation(&document, Method::Get);
+    let published = page
+        .semantics
+        .pagination
+        .as_ref()
+        .expect("the operation declares its pagination");
+    assert_eq!(
+        published.request,
+        PaginationRequest::Cursor {
+            field: "cursor".into(),
+        }
+    );
+    assert_eq!(published.items.as_str(), "/items");
+    assert_eq!(
+        published.next.as_ref().map(JsonPointer::as_str),
+        Some("/next")
+    );
+    assert_eq!(
+        published.page_size,
+        Some(PageSize {
+            field: "limit".into(),
+            default: Some(20),
+            maximum: Some(100),
+        })
+    );
+}
+
+#[test]
+fn a_provision_without_a_registered_scheme_is_refused() {
+    let mut router = Router::new(info());
+    router.post_with(
+        "/login",
+        create_user,
+        OperationMeta::new("auth.login").provides(
+            "session",
+            CredentialLocator::Body {
+                pointer: "/token".into(),
+            },
+        ),
+    );
+
+    let errors = router
+        .into_document()
+        .expect_err("an unregistered scheme is refused");
+    assert!(
+        errors.iter().any(|error| matches!(
+            error,
+            ValidationError::UnknownAuthScheme { scheme, .. } if scheme == "session"
+        )),
+        "{errors:?}"
+    );
 }
