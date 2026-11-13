@@ -1,0 +1,14 @@
+[package]
+name = "tako-reference"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+http = "1"
+pons-core = { path = "../../core/rust/pons-core" }
+pons-ir = { path = "../../core/rust/pons-ir" }
+pons-tako = { path = "../../frontends/pons-tako" }
+reference-api = { path = "../reference-api" }
+tako-rs = "2.7"

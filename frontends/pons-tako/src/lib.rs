@@ -3,6 +3,7 @@ mod describe;
 mod document;
 mod error;
 mod handler;
+mod header;
 mod media;
 mod metadata;
 #[cfg(feature = "macros")]
@@ -27,6 +28,7 @@ pub use auth::{Auth, AuthSpec, SessionAuth};
 pub use describe::{DescribeRequest, DescribeResponse, OperationCx, WithStatus};
 pub use error::{Violation, ViolationReport};
 pub use handler::DescribeHandler;
+pub use header::{Header, HeaderRejection, HeaderSpec, OptionalHeader};
 #[cfg(feature = "macros")]
 #[doc(hidden)]
 pub use linkme;

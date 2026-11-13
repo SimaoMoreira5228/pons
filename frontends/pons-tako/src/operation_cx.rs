@@ -2,14 +2,15 @@ use std::any::type_name;
 use std::collections::BTreeMap;
 
 use pons_core::Schema;
+#[cfg(feature = "typed-header")]
+use pons_ir::ResponseHeader;
 #[cfg(feature = "sse")]
 use pons_ir::StreamMessage;
 use pons_ir::{
-    Body, ContentKind, Diagnostic, DiagnosticSeverity, Direction, InlineType, NamedRef, Presence,
-    Response, ResponseStatus, TypeDef, TypeKind, TypeRef,
+    Body, ContentKind, Diagnostic, DiagnosticSeverity, Direction, HeaderParameter, InlineType,
+    IntegerWire, NamedRef, OpaqueWire, Presence, Response, ResponseStatus, TypeDef, TypeKind,
+    TypeRef,
 };
-#[cfg(feature = "typed-header")]
-use pons_ir::{HeaderParameter, OpaqueWire, ResponseHeader};
 #[cfg(any(feature = "ndjson", feature = "sse", feature = "websocket"))]
 use pons_ir::{StreamDescription, StreamKind};
 
@@ -30,6 +31,16 @@ impl OperationCx {
         self.flat_carriers.push((ty.clone(), role));
         self.carriers.push(ty.clone());
         ty
+    }
+
+    pub(crate) fn request_header<T: Schema>(&mut self, wire: &str, presence: Presence) {
+        self.headers.push(HeaderParameter {
+            wire: wire.to_owned(),
+            ident: header_ident(wire),
+            ty: header_schema::<T>(&mut self.types, Direction::Input, wire),
+            presence,
+            ext: Default::default(),
+        });
     }
 
     #[cfg(feature = "typed-header")]
@@ -170,7 +181,47 @@ pub(crate) fn opaque_header_type() -> TypeRef {
     })
 }
 
-#[cfg(feature = "typed-header")]
+pub(crate) fn header_schema<T: Schema>(
+    cx: &mut pons_core::TypeCx,
+    direction: Direction,
+    wire: &str,
+) -> TypeRef {
+    let ty = T::schema(cx, direction);
+    match ty {
+        TypeRef::Inline(InlineType::Int {
+            bits,
+            signed,
+            minimum,
+            maximum,
+            multiple_of,
+            ..
+        }) => TypeRef::Inline(InlineType::Int {
+            bits,
+            signed,
+            wire: IntegerWire::String,
+            minimum,
+            maximum,
+            multiple_of,
+        }),
+        TypeRef::Inline(
+            InlineType::Array { .. } | InlineType::Map { .. } | InlineType::Tuple { .. },
+        ) => {
+            cx.push_error(
+                "PONS-E102",
+                format!(
+                    "header {wire} carries a JSON value; a header value is a text token, so it is described as opaque text"
+                ),
+            );
+            TypeRef::Inline(InlineType::Opaque {
+                codec: "tako.header".into(),
+                wire: OpaqueWire::Text,
+                ext: Default::default(),
+            })
+        }
+        ty => ty,
+    }
+}
+
 fn header_ident(wire: &str) -> Vec<String> {
     let base = if wire.len() >= 2
         && matches!(

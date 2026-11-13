@@ -2,7 +2,8 @@ use std::marker::PhantomData;
 
 use http::request::Parts;
 use pons_ir::AuthRequirement;
-use tako_rs_core::extractors::FromRequestParts;
+use tako_rs_core::extractors::{FromRequest, FromRequestParts};
+use tako_rs_core::types::Request;
 
 use crate::describe::{DescribeRequest, OperationCx};
 
@@ -110,6 +111,19 @@ where
 
     async fn from_request_parts(parts: &'a mut Parts) -> Result<Self, Self::Error> {
         T::from_request_parts(parts).await.map(Self::new)
+    }
+}
+
+impl<'a, T, P> FromRequest<'a> for Auth<T, P>
+where
+    T: FromRequest<'a> + Send + 'a,
+    P: 'a,
+{
+    type Error = T::Error;
+    const ENTRIES: tako_rs_core::extractors::Entries = T::ENTRIES;
+
+    async fn from_request(request: &'a mut Request) -> Result<Self, Self::Error> {
+        T::from_request(request).await.map(Self::new)
     }
 }
 

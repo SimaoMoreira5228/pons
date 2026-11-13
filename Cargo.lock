@@ -2464,6 +2464,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "tako-reference"
+version = "0.1.0"
+dependencies = [
+ "http 1.5.0",
+ "pons-core",
+ "pons-ir",
+ "pons-tako",
+ "reference-api",
+ "tako-rs",
+]
+
+[[package]]
 name = "tako-rs"
 version = "2.7.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"

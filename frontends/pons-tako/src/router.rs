@@ -2,8 +2,10 @@ use std::collections::BTreeMap;
 use std::ops::{Deref, DerefMut};
 use std::sync::Arc;
 
+use pons_core::{ErrorSpec, TypeCx};
 use pons_ir::{
-    AuthScheme, Diagnostic, Document, Info, Operation, TypeDef, TypeRef, ValidationError,
+    AuthScheme, Diagnostic, Document, ErrorResponse, Info, Operation, TypeDef, TypeRef,
+    ValidationError,
 };
 use tako::route::Route;
 use tako_rs_core::handler::Handler;
@@ -23,6 +25,7 @@ pub struct Router {
     types: BTreeMap<String, TypeDef>,
     carriers: Vec<TypeRef>,
     auth_schemes: BTreeMap<String, AuthScheme>,
+    common_errors: Vec<ErrorResponse>,
     diagnostics: Vec<Diagnostic>,
 }
 
@@ -36,12 +39,22 @@ impl Router {
             types: BTreeMap::new(),
             carriers: Vec::new(),
             auth_schemes: BTreeMap::new(),
+            common_errors: Vec::new(),
             diagnostics: Vec::new(),
         }
     }
 
     pub fn auth_scheme(&mut self, id: impl Into<String>, scheme: AuthScheme) -> &mut Self {
         self.insert_auth_scheme(id.into(), scheme);
+        self
+    }
+
+    pub fn common_error<E: ErrorSpec>(&mut self) -> &mut Self {
+        let mut types = TypeCx::new();
+        self.common_errors.extend(E::errors(&mut types));
+        let (definitions, diagnostics) = types.into_parts();
+        self.types.extend(definitions);
+        self.diagnostics.extend(diagnostics);
         self
     }
 
@@ -179,6 +192,7 @@ impl Router {
             types,
             carriers,
             auth_schemes,
+            common_errors,
             diagnostics,
             ..
         } = other;
@@ -191,6 +205,7 @@ impl Router {
         for (id, scheme) in auth_schemes {
             self.insert_auth_scheme(id, scheme);
         }
+        self.common_errors.extend(common_errors);
         self.diagnostics.extend(diagnostics);
         self.operations.extend(operations);
         self
@@ -205,6 +220,7 @@ impl Router {
             self.info.clone(),
             self.types.clone(),
             self.carriers.clone(),
+            self.common_errors.clone(),
             self.auth_schemes.clone(),
             self.operations.clone(),
             self.diagnostics.clone(),
@@ -239,6 +255,7 @@ impl Router {
             self.info,
             self.types,
             self.carriers,
+            self.common_errors,
             self.auth_schemes,
             self.operations,
             self.diagnostics,
