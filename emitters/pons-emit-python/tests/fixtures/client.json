@@ -1,0 +1,1679 @@
+{
+  "ir_version": "0.3",
+  "info": {
+    "title": "Example",
+    "version": "1",
+    "servers": [
+      "https://api.example.test"
+    ]
+  },
+  "types": {
+    "Status": {
+      "kind": "enum",
+      "name": [
+        "status"
+      ],
+      "direction": "both",
+      "repr": {
+        "kind": "string"
+      },
+      "variants": [
+        {
+          "wire": "active",
+          "ident": [
+            "active"
+          ],
+          "payload": {
+            "kind": "unit"
+          }
+        },
+        {
+          "wire": "suspended",
+          "ident": [
+            "suspended"
+          ],
+          "payload": {
+            "kind": "unit"
+          }
+        }
+      ]
+    },
+    "UserHandle": {
+      "kind": "newtype",
+      "name": [
+        "user",
+        "handle"
+      ],
+      "direction": "both",
+      "inner": {
+        "kind": "string"
+      }
+    },
+    "LoginRequest": {
+      "kind": "struct",
+      "name": [
+        "login",
+        "request"
+      ],
+      "direction": "input",
+      "openness": "reject",
+      "fields": [
+        {
+          "wire": "email",
+          "ident": [
+            "email"
+          ],
+          "ty": {
+            "kind": "string",
+            "format": "email"
+          },
+          "presence": "required"
+        },
+        {
+          "wire": "password",
+          "ident": [
+            "password"
+          ],
+          "ty": {
+            "kind": "string"
+          },
+          "presence": "required"
+        },
+        {
+          "wire": "remember",
+          "ident": [
+            "remember"
+          ],
+          "ty": {
+            "kind": "bool"
+          },
+          "presence": "optional"
+        }
+      ]
+    },
+    "LoginQuery": {
+      "kind": "struct",
+      "name": [
+        "login",
+        "query"
+      ],
+      "direction": "input",
+      "openness": "reject",
+      "fields": [
+        {
+          "wire": "limit",
+          "ident": [
+            "limit"
+          ],
+          "ty": {
+            "kind": "int",
+            "bits": 16,
+            "signed": false,
+            "wire": "number"
+          },
+          "presence": "optional"
+        },
+        {
+          "wire": "active",
+          "ident": [
+            "active"
+          ],
+          "ty": {
+            "kind": "bool"
+          },
+          "presence": "optional"
+        }
+      ]
+    },
+    "Session": {
+      "kind": "struct",
+      "name": [
+        "session"
+      ],
+      "direction": "output",
+      "openness": "reject",
+      "fields": [
+        {
+          "wire": "token",
+          "ident": [
+            "token"
+          ],
+          "ty": {
+            "kind": "string"
+          },
+          "presence": "required"
+        },
+        {
+          "wire": "expires_at",
+          "ident": [
+            "expires",
+            "at"
+          ],
+          "ty": {
+            "kind": "string",
+            "format": "date-time"
+          },
+          "presence": "required"
+        }
+      ]
+    },
+    "User": {
+      "kind": "struct",
+      "name": [
+        "user"
+      ],
+      "direction": "output",
+      "openness": "reject",
+      "fields": [
+        {
+          "wire": "id",
+          "ident": [
+            "id"
+          ],
+          "ty": {
+            "kind": "int",
+            "bits": 64,
+            "signed": false,
+            "wire": "string"
+          },
+          "presence": "required"
+        },
+        {
+          "wire": "big",
+          "ident": [
+            "big"
+          ],
+          "ty": {
+            "kind": "int",
+            "bits": 128,
+            "signed": false,
+            "wire": "number"
+          },
+          "presence": "required"
+        },
+        {
+          "wire": "negative",
+          "ident": [
+            "negative"
+          ],
+          "ty": {
+            "kind": "int",
+            "bits": 128,
+            "signed": true,
+            "wire": "number"
+          },
+          "presence": "required"
+        },
+        {
+          "wire": "nickname",
+          "ident": [
+            "nickname"
+          ],
+          "ty": {
+            "kind": "string"
+          },
+          "presence": "optional"
+        },
+        {
+          "wire": "email",
+          "ident": [
+            "email"
+          ],
+          "ty": {
+            "kind": "nullable",
+            "inner": {
+              "kind": "string"
+            }
+          },
+          "presence": "required"
+        },
+        {
+          "wire": "status",
+          "ident": [
+            "status"
+          ],
+          "ty": {
+            "ref": "Status"
+          },
+          "presence": "required"
+        },
+        {
+          "wire": "handle",
+          "ident": [
+            "handle"
+          ],
+          "ty": {
+            "ref": "UserHandle"
+          },
+          "presence": "required"
+        },
+        {
+          "wire": "blob",
+          "ident": [
+            "blob"
+          ],
+          "ty": {
+            "kind": "bytes",
+            "encoding": "base64"
+          },
+          "presence": "required"
+        },
+        {
+          "wire": "url_blob",
+          "ident": [
+            "url",
+            "blob"
+          ],
+          "ty": {
+            "kind": "bytes",
+            "encoding": "base64url"
+          },
+          "presence": "required"
+        },
+        {
+          "wire": "hex_blob",
+          "ident": [
+            "hex",
+            "blob"
+          ],
+          "ty": {
+            "kind": "bytes",
+            "encoding": "hex"
+          },
+          "presence": "required"
+        },
+        {
+          "wire": "array_blob",
+          "ident": [
+            "array",
+            "blob"
+          ],
+          "ty": {
+            "kind": "bytes",
+            "encoding": "array"
+          },
+          "presence": "required"
+        },
+        {
+          "wire": "tags",
+          "ident": [
+            "tags"
+          ],
+          "ty": {
+            "kind": "array",
+            "item": {
+              "kind": "string"
+            }
+          },
+          "presence": "required"
+        },
+        {
+          "wire": "labels",
+          "ident": [
+            "labels"
+          ],
+          "ty": {
+            "kind": "map",
+            "key": {
+              "kind": "string"
+            },
+            "value": {
+              "kind": "string"
+            }
+          },
+          "presence": "required"
+        },
+        {
+          "wire": "pair",
+          "ident": [
+            "pair"
+          ],
+          "ty": {
+            "kind": "tuple",
+            "items": [
+              {
+                "kind": "string"
+              },
+              {
+                "kind": "int",
+                "bits": 32,
+                "signed": true,
+                "wire": "number"
+              }
+            ]
+          },
+          "presence": "required"
+        },
+        {
+          "wire": "ratio",
+          "ident": [
+            "ratio"
+          ],
+          "ty": {
+            "kind": "float",
+            "bits": 64
+          },
+          "presence": "required"
+        },
+        {
+          "wire": "amount",
+          "ident": [
+            "amount"
+          ],
+          "ty": {
+            "kind": "decimal",
+            "wire": "string"
+          },
+          "presence": "required"
+        },
+        {
+          "wire": "extra",
+          "ident": [
+            "extra"
+          ],
+          "ty": {
+            "kind": "any"
+          },
+          "presence": "required"
+        }
+      ]
+    },
+    "ErrorBody": {
+      "kind": "struct",
+      "name": [
+        "error",
+        "body"
+      ],
+      "direction": "output",
+      "openness": "reject",
+      "fields": [
+        {
+          "wire": "message",
+          "ident": [
+            "message"
+          ],
+          "ty": {
+            "kind": "string"
+          },
+          "presence": "required"
+        },
+        {
+          "wire": "code",
+          "ident": [
+            "code"
+          ],
+          "ty": {
+            "kind": "string"
+          },
+          "presence": "optional"
+        }
+      ]
+    },
+    "NotFound": {
+      "kind": "struct",
+      "name": [
+        "not",
+        "found"
+      ],
+      "direction": "output",
+      "openness": "reject",
+      "fields": [
+        {
+          "wire": "message",
+          "ident": [
+            "message"
+          ],
+          "ty": {
+            "kind": "string"
+          },
+          "presence": "required"
+        }
+      ]
+    },
+    "Payload": {
+      "kind": "struct",
+      "name": [
+        "payload"
+      ],
+      "direction": "both",
+      "openness": "reject",
+      "fields": [
+        {
+          "wire": "note",
+          "ident": [
+            "note"
+          ],
+          "ty": {
+            "kind": "string"
+          },
+          "presence": "required"
+        },
+        {
+          "wire": "flag",
+          "ident": [
+            "flag"
+          ],
+          "ty": {
+            "kind": "bool"
+          },
+          "presence": "optional"
+        }
+      ]
+    },
+    "Choice": {
+      "kind": "enum",
+      "name": [
+        "choice"
+      ],
+      "direction": "both",
+      "repr": {
+        "kind": "external"
+      },
+      "variants": [
+        {
+          "wire": "none",
+          "ident": [
+            "none"
+          ],
+          "payload": {
+            "kind": "unit"
+          }
+        },
+        {
+          "wire": "count",
+          "ident": [
+            "count"
+          ],
+          "payload": {
+            "kind": "newtype",
+            "ty": {
+              "kind": "int",
+              "bits": 16,
+              "signed": false,
+              "wire": "number"
+            }
+          }
+        },
+        {
+          "wire": "pair",
+          "ident": [
+            "pair"
+          ],
+          "payload": {
+            "kind": "tuple",
+            "items": [
+              {
+                "kind": "string"
+              },
+              {
+                "kind": "bool"
+              }
+            ]
+          }
+        },
+        {
+          "wire": "record",
+          "ident": [
+            "record"
+          ],
+          "payload": {
+            "kind": "struct",
+            "fields": [
+              {
+                "wire": "note",
+                "ident": [
+                  "note"
+                ],
+                "ty": {
+                  "kind": "string"
+                },
+                "presence": "required"
+              }
+            ]
+          }
+        }
+      ]
+    },
+    "Marked": {
+      "kind": "enum",
+      "name": [
+        "marked"
+      ],
+      "direction": "both",
+      "repr": {
+        "kind": "internal",
+        "tag": "kind"
+      },
+      "variants": [
+        {
+          "wire": "empty",
+          "ident": [
+            "empty"
+          ],
+          "payload": {
+            "kind": "unit"
+          }
+        },
+        {
+          "wire": "meta",
+          "ident": [
+            "meta"
+          ],
+          "payload": {
+            "kind": "struct",
+            "fields": [
+              {
+                "wire": "label",
+                "ident": [
+                  "label"
+                ],
+                "ty": {
+                  "kind": "string"
+                },
+                "presence": "required"
+              }
+            ]
+          }
+        },
+        {
+          "wire": "payload",
+          "ident": [
+            "payload"
+          ],
+          "payload": {
+            "kind": "newtype",
+            "ty": {
+              "ref": "Payload"
+            }
+          }
+        }
+      ]
+    },
+    "Beside": {
+      "kind": "enum",
+      "name": [
+        "beside"
+      ],
+      "direction": "both",
+      "repr": {
+        "kind": "adjacent",
+        "tag": "kind",
+        "content": "detail"
+      },
+      "variants": [
+        {
+          "wire": "off",
+          "ident": [
+            "off"
+          ],
+          "payload": {
+            "kind": "unit"
+          }
+        },
+        {
+          "wire": "text",
+          "ident": [
+            "text"
+          ],
+          "payload": {
+            "kind": "newtype",
+            "ty": {
+              "kind": "string"
+            }
+          }
+        },
+        {
+          "wire": "pair",
+          "ident": [
+            "pair"
+          ],
+          "payload": {
+            "kind": "tuple",
+            "items": [
+              {
+                "kind": "int",
+                "bits": 32,
+                "signed": true,
+                "wire": "number"
+              },
+              {
+                "kind": "string"
+              }
+            ]
+          }
+        },
+        {
+          "wire": "record",
+          "ident": [
+            "record"
+          ],
+          "payload": {
+            "kind": "struct",
+            "fields": [
+              {
+                "wire": "note",
+                "ident": [
+                  "note"
+                ],
+                "ty": {
+                  "kind": "string"
+                },
+                "presence": "required"
+              }
+            ]
+          }
+        }
+      ]
+    },
+    "Failure": {
+      "kind": "enum",
+      "name": [
+        "failure"
+      ],
+      "direction": "output",
+      "repr": {
+        "kind": "internal",
+        "tag": "code"
+      },
+      "variants": [
+        {
+          "wire": "invalid",
+          "ident": [
+            "invalid"
+          ],
+          "payload": {
+            "kind": "unit"
+          }
+        },
+        {
+          "wire": "locked",
+          "ident": [
+            "locked"
+          ],
+          "payload": {
+            "kind": "struct",
+            "fields": [
+              {
+                "wire": "retry_after",
+                "ident": [
+                  "retry",
+                  "after"
+                ],
+                "ty": {
+                  "kind": "int",
+                  "bits": 32,
+                  "signed": false,
+                  "wire": "number"
+                },
+                "presence": "required"
+              }
+            ]
+          }
+        }
+      ]
+    },
+    "Profile": {
+      "kind": "struct",
+      "name": [
+        "profile"
+      ],
+      "direction": "both",
+      "openness": "reject",
+      "fields": [
+        {
+          "wire": "choice",
+          "ident": [
+            "choice"
+          ],
+          "ty": {
+            "ref": "Choice"
+          },
+          "presence": "required"
+        },
+        {
+          "wire": "marked",
+          "ident": [
+            "marked"
+          ],
+          "ty": {
+            "ref": "Marked"
+          },
+          "presence": "required"
+        },
+        {
+          "wire": "beside",
+          "ident": [
+            "beside"
+          ],
+          "ty": {
+            "ref": "Beside"
+          },
+          "presence": "required"
+        },
+        {
+          "wire": "alias",
+          "ident": [
+            "alias"
+          ],
+          "ty": {
+            "kind": "nullable",
+            "inner": {
+              "kind": "string"
+            }
+          },
+          "presence": "optional"
+        }
+      ]
+    }
+  },
+  "auth_schemes": {
+    "session": {
+      "kind": "bearer",
+      "format": "jwt"
+    },
+    "tenant": {
+      "kind": "api_key",
+      "in": "header",
+      "name": "X-Tenant"
+    },
+    "query_key": {
+      "kind": "api_key",
+      "in": "query",
+      "name": "api_key"
+    },
+    "cookie_key": {
+      "kind": "api_key",
+      "in": "cookie",
+      "name": "sid"
+    },
+    "basic": {
+      "kind": "basic"
+    },
+    "oauth": {
+      "kind": "o_auth2",
+      "flows": [
+        {
+          "kind": "client_credentials",
+          "token_url": "https://api.test/token",
+          "scopes": {}
+        }
+      ]
+    },
+    "cookie_session": {
+      "kind": "cookie_session",
+      "cookie": "session"
+    }
+  },
+  "common_errors": [
+    {
+      "status": 429,
+      "name": [
+        "rate",
+        "limited"
+      ],
+      "content": "json",
+      "body": {
+        "ref": "ErrorBody"
+      },
+      "headers": [
+        {
+          "wire": "Retry-After",
+          "ty": {
+            "kind": "string"
+          },
+          "presence": "optional"
+        }
+      ],
+      "retryable": true
+    }
+  ],
+  "operations": [
+    {
+      "id": [
+        [
+          "auth"
+        ],
+        [
+          "login"
+        ]
+      ],
+      "method": "POST",
+      "path": [
+        {
+          "lit": "auth"
+        },
+        {
+          "param": "tenant",
+          "ty": {
+            "kind": "string"
+          }
+        },
+        {
+          "lit": "login"
+        }
+      ],
+      "query": {
+        "ref": "LoginQuery"
+      },
+      "headers": [
+        {
+          "wire": "X-Request-ID",
+          "ident": [
+            "request",
+            "id"
+          ],
+          "ty": {
+            "kind": "string"
+          },
+          "presence": "optional"
+        }
+      ],
+      "body": {
+        "ty": {
+          "ref": "LoginRequest"
+        },
+        "content": "json",
+        "required": true,
+        "media": {
+          "type": "application",
+          "subtype": "vnd.example+json"
+        }
+      },
+      "responses": [
+        {
+          "status": 200,
+          "content": "json",
+          "body": {
+            "ref": "Session"
+          },
+          "headers": [
+            {
+              "wire": "X-Trace-ID",
+              "ty": {
+                "kind": "string"
+              },
+              "presence": "required"
+            }
+          ]
+        }
+      ],
+      "errors": [
+        {
+          "status": 401,
+          "name": [
+            "invalid",
+            "credentials"
+          ],
+          "content": "json",
+          "body": {
+            "ref": "ErrorBody"
+          },
+          "headers": [
+            {
+              "wire": "WWW-Authenticate",
+              "ty": {
+                "kind": "string"
+              },
+              "presence": "optional"
+            }
+          ]
+        },
+        {
+          "status": "4xx",
+          "name": [
+            "client",
+            "error"
+          ],
+          "content": "json",
+          "body": {
+            "ref": "ErrorBody"
+          }
+        },
+        {
+          "status": "default",
+          "name": [
+            "server",
+            "error"
+          ],
+          "content": "json",
+          "body": {
+            "ref": "ErrorBody"
+          }
+        }
+      ],
+      "auth": {
+        "alternatives": [],
+        "optional": false
+      },
+      "provides": {
+        "scheme": "session",
+        "value": {
+          "from": "body",
+          "pointer": "/token"
+        },
+        "expires_at": {
+          "from": "body",
+          "pointer": "/expires_at"
+        }
+      },
+      "semantics": {
+        "safe": false,
+        "idempotent": false
+      },
+      "doc": {
+        "summary": "Exchange credentials for a session token."
+      }
+    },
+    {
+      "id": [
+        [
+          "users"
+        ],
+        [
+          "get"
+        ]
+      ],
+      "method": "GET",
+      "path": [
+        {
+          "lit": "users"
+        },
+        {
+          "param": "id",
+          "ty": {
+            "kind": "string"
+          }
+        }
+      ],
+      "auth": {
+        "alternatives": [
+          [
+            "session"
+          ]
+        ],
+        "optional": false
+      },
+      "responses": [
+        {
+          "status": 200,
+          "content": "json",
+          "body": {
+            "ref": "User"
+          },
+          "media": {
+            "type": "application",
+            "subtype": "vnd.example+json"
+          }
+        }
+      ],
+      "errors": [
+        {
+          "status": 404,
+          "name": [
+            "not",
+            "found"
+          ],
+          "content": "json",
+          "body": {
+            "ref": "NotFound"
+          }
+        }
+      ],
+      "semantics": {
+        "safe": true,
+        "idempotent": true
+      }
+    },
+    {
+      "id": [
+        [
+          "users"
+        ],
+        [
+          "me"
+        ]
+      ],
+      "method": "GET",
+      "path": [
+        {
+          "lit": "me"
+        }
+      ],
+      "auth": {
+        "alternatives": [
+          [
+            "tenant"
+          ],
+          [
+            "session"
+          ]
+        ],
+        "optional": false
+      },
+      "responses": [
+        {
+          "status": 200,
+          "content": "json",
+          "body": {
+            "ref": "Session"
+          }
+        }
+      ],
+      "semantics": {
+        "safe": true,
+        "idempotent": true
+      }
+    },
+    {
+      "id": [
+        [
+          "keys"
+        ],
+        [
+          "header"
+        ]
+      ],
+      "method": "GET",
+      "path": [
+        {
+          "lit": "keys"
+        },
+        {
+          "lit": "header"
+        }
+      ],
+      "auth": {
+        "alternatives": [
+          [
+            "tenant"
+          ]
+        ],
+        "optional": false
+      },
+      "responses": [
+        {
+          "status": 200,
+          "content": "json",
+          "body": {
+            "ref": "Session"
+          }
+        }
+      ],
+      "semantics": {
+        "safe": true,
+        "idempotent": true
+      }
+    },
+    {
+      "id": [
+        [
+          "keys"
+        ],
+        [
+          "query"
+        ]
+      ],
+      "method": "GET",
+      "path": [
+        {
+          "lit": "keys"
+        },
+        {
+          "lit": "query"
+        }
+      ],
+      "auth": {
+        "alternatives": [
+          [
+            "query_key"
+          ]
+        ],
+        "optional": false
+      },
+      "responses": [
+        {
+          "status": 200,
+          "content": "json",
+          "body": {
+            "ref": "Session"
+          }
+        }
+      ],
+      "semantics": {
+        "safe": true,
+        "idempotent": true
+      }
+    },
+    {
+      "id": [
+        [
+          "keys"
+        ],
+        [
+          "cookie"
+        ]
+      ],
+      "method": "GET",
+      "path": [
+        {
+          "lit": "keys"
+        },
+        {
+          "lit": "cookie"
+        }
+      ],
+      "auth": {
+        "alternatives": [
+          [
+            "cookie_key"
+          ]
+        ],
+        "optional": false
+      },
+      "responses": [
+        {
+          "status": 200,
+          "content": "json",
+          "body": {
+            "ref": "Session"
+          }
+        }
+      ],
+      "semantics": {
+        "safe": true,
+        "idempotent": true
+      }
+    },
+    {
+      "id": [
+        [
+          "auth"
+        ],
+        [
+          "basic"
+        ]
+      ],
+      "method": "GET",
+      "path": [
+        {
+          "lit": "basic"
+        }
+      ],
+      "auth": {
+        "alternatives": [
+          [
+            "basic"
+          ]
+        ],
+        "optional": false
+      },
+      "responses": [
+        {
+          "status": 200,
+          "content": "json",
+          "body": {
+            "ref": "Session"
+          }
+        }
+      ],
+      "semantics": {
+        "safe": true,
+        "idempotent": true
+      }
+    },
+    {
+      "id": [
+        [
+          "auth"
+        ],
+        [
+          "oauth"
+        ]
+      ],
+      "method": "GET",
+      "path": [
+        {
+          "lit": "oauth"
+        }
+      ],
+      "auth": {
+        "alternatives": [
+          [
+            "oauth"
+          ]
+        ],
+        "optional": false
+      },
+      "responses": [
+        {
+          "status": 200,
+          "content": "json",
+          "body": {
+            "ref": "Session"
+          }
+        }
+      ],
+      "semantics": {
+        "safe": true,
+        "idempotent": true
+      }
+    },
+    {
+      "id": [
+        [
+          "auth"
+        ],
+        [
+          "cookie"
+        ]
+      ],
+      "method": "GET",
+      "path": [
+        {
+          "lit": "cookie"
+        }
+      ],
+      "auth": {
+        "alternatives": [
+          [
+            "cookie_session"
+          ]
+        ],
+        "optional": false
+      },
+      "responses": [
+        {
+          "status": 200,
+          "content": "json",
+          "body": {
+            "ref": "Session"
+          }
+        }
+      ],
+      "semantics": {
+        "safe": true,
+        "idempotent": true
+      }
+    },
+    {
+      "id": [
+        [
+          "public"
+        ],
+        [
+          "optional"
+        ]
+      ],
+      "method": "GET",
+      "path": [
+        {
+          "lit": "public"
+        }
+      ],
+      "auth": {
+        "alternatives": [
+          [
+            "session"
+          ]
+        ],
+        "optional": true
+      },
+      "responses": [
+        {
+          "status": 200,
+          "content": "json",
+          "body": {
+            "ref": "Session"
+          }
+        }
+      ],
+      "semantics": {
+        "safe": true,
+        "idempotent": true
+      }
+    },
+    {
+      "id": [
+        [
+          "public"
+        ],
+        [
+          "open"
+        ]
+      ],
+      "method": "GET",
+      "path": [
+        {
+          "lit": "open"
+        }
+      ],
+      "auth": {
+        "alternatives": [],
+        "optional": false
+      },
+      "responses": [
+        {
+          "status": 200,
+          "content": "json",
+          "body": {
+            "ref": "Session"
+          }
+        }
+      ],
+      "errors_inherit": false,
+      "semantics": {
+        "safe": true,
+        "idempotent": true
+      }
+    },
+    {
+      "id": [
+        [
+          "users"
+        ],
+        [
+          "decode"
+        ]
+      ],
+      "method": "GET",
+      "path": [
+        {
+          "lit": "decode"
+        }
+      ],
+      "auth": {
+        "alternatives": [],
+        "optional": false
+      },
+      "responses": [
+        {
+          "status": 200,
+          "content": "json",
+          "body": {
+            "ref": "User"
+          }
+        }
+      ],
+      "errors_inherit": false,
+      "semantics": {
+        "safe": true,
+        "idempotent": true
+      }
+    },
+    {
+      "id": [
+        [
+          "errors"
+        ],
+        [
+          "class"
+        ]
+      ],
+      "method": "GET",
+      "path": [
+        {
+          "lit": "class"
+        }
+      ],
+      "auth": {
+        "alternatives": [],
+        "optional": false
+      },
+      "responses": [
+        {
+          "status": 200,
+          "content": "json",
+          "body": {
+            "ref": "Session"
+          }
+        }
+      ],
+      "errors": [
+        {
+          "status": "4xx",
+          "name": [
+            "client",
+            "error"
+          ],
+          "content": "json",
+          "body": {
+            "ref": "ErrorBody"
+          }
+        }
+      ],
+      "semantics": {
+        "safe": true,
+        "idempotent": true
+      }
+    },
+    {
+      "id": [
+        [
+          "errors"
+        ],
+        [
+          "default"
+        ]
+      ],
+      "method": "GET",
+      "path": [
+        {
+          "lit": "default"
+        }
+      ],
+      "auth": {
+        "alternatives": [],
+        "optional": false
+      },
+      "responses": [
+        {
+          "status": 200,
+          "content": "json",
+          "body": {
+            "ref": "Session"
+          }
+        }
+      ],
+      "errors": [
+        {
+          "status": "default",
+          "name": [
+            "server",
+            "error"
+          ],
+          "content": "json",
+          "body": {
+            "ref": "ErrorBody"
+          }
+        }
+      ],
+      "semantics": {
+        "safe": true,
+        "idempotent": true
+      }
+    },
+    {
+      "id": [
+        [
+          "profiles"
+        ],
+        [
+          "get"
+        ]
+      ],
+      "method": "GET",
+      "path": [
+        {
+          "lit": "profiles"
+        }
+      ],
+      "auth": {
+        "alternatives": [],
+        "optional": false
+      },
+      "responses": [
+        {
+          "status": 200,
+          "content": "json",
+          "body": {
+            "ref": "Profile"
+          }
+        }
+      ],
+      "errors": [
+        {
+          "status": 400,
+          "name": [
+            "profile",
+            "failure"
+          ],
+          "content": "json",
+          "body": {
+            "ref": "Failure",
+            "variant": "locked"
+          }
+        }
+      ],
+      "semantics": {
+        "safe": true,
+        "idempotent": true
+      }
+    },
+    {
+      "id": [
+        [
+          "profiles"
+        ],
+        [
+          "echo"
+        ]
+      ],
+      "method": "POST",
+      "path": [
+        {
+          "lit": "profiles"
+        }
+      ],
+      "auth": {
+        "alternatives": [],
+        "optional": false
+      },
+      "body": {
+        "ty": {
+          "ref": "Profile"
+        },
+        "content": "json",
+        "required": true,
+        "media": {
+          "type": "application",
+          "subtype": "vnd.example+json"
+        }
+      },
+      "responses": [
+        {
+          "status": 201,
+          "content": "json",
+          "media": {
+            "type": "application",
+            "subtype": "vnd.example+json"
+          },
+          "body": {
+            "ref": "Profile"
+          }
+        }
+      ],
+      "semantics": {
+        "safe": false,
+        "idempotent": false
+      }
+    },
+    {
+      "id": [
+        [
+          "tokens"
+        ],
+        [
+          "header"
+        ]
+      ],
+      "method": "GET",
+      "path": [
+        {
+          "lit": "tokens"
+        },
+        {
+          "lit": "header"
+        }
+      ],
+      "responses": [
+        {
+          "status": 200,
+          "content": "json",
+          "body": {
+            "ref": "Session"
+          }
+        }
+      ],
+      "errors": [],
+      "auth": {
+        "alternatives": [],
+        "optional": false
+      },
+      "provides": {
+        "scheme": "session",
+        "value": {
+          "from": "header",
+          "name": "X-Token"
+        }
+      },
+      "semantics": {
+        "safe": true,
+        "idempotent": true
+      }
+    },
+    {
+      "id": [
+        [
+          "tokens"
+        ],
+        [
+          "cookie"
+        ]
+      ],
+      "method": "GET",
+      "path": [
+        {
+          "lit": "tokens"
+        },
+        {
+          "lit": "cookie"
+        }
+      ],
+      "responses": [
+        {
+          "status": 200,
+          "content": "json",
+          "body": {
+            "ref": "Session"
+          }
+        }
+      ],
+      "errors": [],
+      "auth": {
+        "alternatives": [],
+        "optional": false
+      },
+      "provides": {
+        "scheme": "cookie_key",
+        "value": {
+          "from": "set_cookie",
+          "name": "cookie_key"
+        }
+      },
+      "semantics": {
+        "safe": true,
+        "idempotent": true
+      }
+    }
+  ]
+}
