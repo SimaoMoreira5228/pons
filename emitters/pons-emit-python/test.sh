@@ -29,7 +29,10 @@ assert manifest["capabilities"]["enum_reprs"] == [
     "internal",
     "adjacent",
 ], manifest
-assert manifest["capabilities"]["pagination"] == [], manifest
+assert manifest["capabilities"]["pagination"] == [
+    "pagination.cursor",
+    "pagination.offset",
+], manifest
 assert manifest["capabilities"]["validation"]["backends"] == [], manifest
 PY
 
@@ -42,6 +45,10 @@ grep -q "test.example.source/v1" "$work/exact.err"
 
 "$pons" emit --target python "$root/tests/fixtures/client.json" "$work/client"
 test -f "$work/client/pons_client/client.py"
+
+"$pons" emit --target python "$root/../../spec/fixtures/paginated.json" "$work/paginated"
+test -f "$work/paginated/pons_client/client.py"
+grep -q "def list_all(" "$work/paginated/pons_client/client.py"
 
 if "$pons" emit --target python "$root/../../spec/fixtures/login.json" "$work/login" --lossy > "$work/login.out" 2> "$work/login.err"; then
     echo "login.json must be refused" >&2

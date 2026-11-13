@@ -16,7 +16,7 @@ def build_manifest() -> dict:
         "ir_version": {"min": "0.3", "max": "0.3"},
         "capabilities": {
             "streaming": [],
-            "pagination": [],
+            "pagination": ["pagination.cursor", "pagination.offset"],
             "enum_reprs": ["string", "external", "internal", "adjacent"],
             "direction_split": True,
             "provides": True,

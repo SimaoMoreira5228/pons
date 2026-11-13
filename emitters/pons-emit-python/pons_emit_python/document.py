@@ -41,6 +41,12 @@ def _flag(value: object, path: str, *, default: bool = False) -> bool:
     return value
 
 
+def _integer(value: object, path: str) -> int:
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise IrError(f"{path} must be an integer", path)
+    return value
+
+
 def _name(value: object, path: str) -> list[str]:
     items = _sequence(value, path)
     result: list[str] = []
@@ -176,6 +182,27 @@ class AuthScheme:
 
 
 @dataclass(slots=True)
+class PaginationRequest:
+    kind: str
+    field: str
+
+
+@dataclass(slots=True)
+class PageSize:
+    field: str
+    default: int | None
+    maximum: int | None
+
+
+@dataclass(slots=True)
+class Pagination:
+    request: PaginationRequest
+    items: str
+    next: str | None
+    page_size: PageSize | None
+
+
+@dataclass(slots=True)
 class Operation:
     id: list[list[str]]
     method: str
@@ -189,7 +216,7 @@ class Operation:
     stream: bool
     auth: AuthRequirement
     provides: Provides | None
-    pagination: bool
+    pagination: Pagination | None
     doc: dict[str, Any] | None
 
 
@@ -399,6 +426,37 @@ def _decode_provides(value: object, path: str) -> Provides:
     )
 
 
+def _decode_page_size(value: object, path: str) -> PageSize:
+    data = _mapping(value, path)
+    default = data.get("default")
+    maximum = data.get("maximum")
+    return PageSize(
+        field=_text(data.get("field"), f"{path}.field"),
+        default=None if default is None else _integer(default, f"{path}.default"),
+        maximum=None if maximum is None else _integer(maximum, f"{path}.maximum"),
+    )
+
+
+def _decode_pagination(value: object, path: str) -> Pagination:
+    data = _mapping(value, path)
+    request = _mapping(data.get("request"), f"{path}.request")
+    kind = _text(request.get("kind"), f"{path}.request.kind")
+    if kind not in {"cursor", "offset"}:
+        raise IrError(f"{path}.request.kind is {kind!r}", f"{path}.request.kind")
+    page_size = data.get("page_size")
+    return Pagination(
+        request=PaginationRequest(
+            kind=kind,
+            field=_text(request.get("field"), f"{path}.request.field"),
+        ),
+        items=_text(data.get("items"), f"{path}.items"),
+        next=None if data.get("next") is None else _text(data["next"], f"{path}.next"),
+        page_size=None
+        if page_size is None
+        else _decode_page_size(page_size, f"{path}.page_size"),
+    )
+
+
 def _decode_operation(value: object, path: str) -> Operation:
     data = _mapping(value, path)
     segments: list[list[str]] = []
@@ -465,7 +523,9 @@ def _decode_operation(value: object, path: str) -> Operation:
         provides=None
         if data.get("provides") is None
         else _decode_provides(data["provides"], f"{path}.provides"),
-        pagination=semantics.get("pagination") is not None,
+        pagination=None
+        if semantics.get("pagination") is None
+        else _decode_pagination(semantics["pagination"], f"{path}.semantics.pagination"),
         doc=_mapping(doc, f"{path}.doc") if doc is not None else None,
     )
 

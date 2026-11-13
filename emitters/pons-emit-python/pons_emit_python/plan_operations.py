@@ -6,7 +6,7 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
 from . import naming
-from .codes import DOCUMENT, UNSUPPORTED
+from .codes import DOCUMENT, NAMING, UNSUPPORTED
 from .document import (
     ErrorDef,
     Media,
@@ -16,6 +16,7 @@ from .document import (
     decode_type_ref,
 )
 from .plan_auth import CredentialPlanner
+from .plan_pagination import PaginationPlan, build_pagination
 from .plan_types import TypePlan, is_nullable
 
 if TYPE_CHECKING:
@@ -93,6 +94,7 @@ class OperationPlan:
     alternatives: list[list[str]]
     required_auth: bool
     provides: Provides | None
+    pagination: PaginationPlan | None
     doc: dict[str, Any] | None
     namespace_path: list[str] = field(default_factory=list)
     method_name: str = ""
@@ -206,6 +208,7 @@ class OperationPlanner:
             alternatives=[],
             required_auth=False,
             provides=operation.provides,
+            pagination=None,
             doc=operation.doc,
         )
         if operation.method not in {
@@ -228,12 +231,6 @@ class OperationPlanner:
                 subject,
                 "the operation streams responses, which this emitter does not support",
             )
-        if operation.pagination:
-            self.analysis.add(
-                UNSUPPORTED,
-                subject,
-                "the operation declares pagination, which this emitter does not support",
-            )
         params = naming.NameRegistry(naming.parameter_reserved())
         self.build_path(plan, operation, params, subject)
         self.build_query(plan, operation, params, subject)
@@ -244,6 +241,7 @@ class OperationPlanner:
             plan.success = success
         else:
             plan.success = SuccessPlan(0, TypeRef(kind="any"), "application/json", [])
+        plan.pagination = build_pagination(self.analysis, plan, operation, subject)
         self.build_errors(plan, operation, subject)
         self.credentials.build_auth(plan, operation, subject)
         self.credentials.build_provides(plan, operation, subject)
@@ -656,3 +654,27 @@ class OperationPlanner:
             method_registry = registry_for(path)
             method_name = naming.snake([plan.raw_method], naming.field_reserved())
             plan.method_name = method_registry.claim(method_name)
+        self.name_iterators(namespace_names)
+
+    def name_iterators(
+        self, namespace_names: dict[tuple[tuple[str, ...], ...], str]
+    ) -> None:
+        members: dict[tuple[tuple[str, ...], ...], set[str]] = {}
+        for plan in self.operations:
+            path = tuple(plan.raw_namespace)
+            members.setdefault(path, set()).add(plan.method_name)
+        for key, name in namespace_names.items():
+            members.setdefault(key[:-1], set()).add(name)
+        for plan in self.operations:
+            if plan.pagination is None:
+                continue
+            path = tuple(plan.raw_namespace)
+            all_name = plan.method_name + "_all"
+            if all_name in members.get(path, set()):
+                self.analysis.add(
+                    NAMING,
+                    f"operations.{plan.id}",
+                    f"the iterator method {all_name} collides with another member generated in the same namespace",
+                )
+                continue
+            plan.pagination.all_name = all_name

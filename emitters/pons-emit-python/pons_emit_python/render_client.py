@@ -10,6 +10,7 @@ from .analysis import Analysis
 from .plan_operations import ErrorPlan, OperationPlan
 from .document import TypeRef, decode_type_ref
 from .render import literal, start
+from .render_pagination import render_iterator
 
 
 @dataclass
@@ -50,22 +51,30 @@ def render_client(analysis: Analysis) -> str:
 def render_imports(analysis: Analysis) -> list[str]:
     errors = ["ConfigurationError", "DecodeError", "PonsError", "TransportError", "UnexpectedStatusError"]
     errors.extend(analysis.errors[key].name for key in analysis.error_order)
+    paginated = any(plan.pagination is not None for plan in analysis.operations)
+    collection_names = "Callable, Iterator, Mapping" if paginated else "Callable, Mapping"
     lines = [
         "from __future__ import annotations",
         "",
         "import base64",
-        "import json",
-        "import urllib.error",
-        "import urllib.parse",
-        "import urllib.request",
-        "from collections.abc import Callable, Mapping",
-        "from dataclasses import dataclass",
-        "from typing import Any, Generic, TypeVar",
-        "",
-        "from . import _wire",
-        "from . import types as _types",
-        "from .errors import (",
     ]
+    if paginated:
+        lines.append("import dataclasses")
+    lines.extend(
+        [
+            "import json",
+            "import urllib.error",
+            "import urllib.parse",
+            "import urllib.request",
+            f"from collections.abc import {collection_names}",
+            "from dataclasses import dataclass",
+            "from typing import Any, Generic, TypeVar",
+            "",
+            "from . import _wire",
+            "from . import types as _types",
+            "from .errors import (",
+        ]
+    )
     for name in errors:
         lines.append(f"    {name},")
     lines.append(")")
@@ -490,7 +499,8 @@ def render_operation(
     receiver: str,
     provides: dict[str, str],
 ) -> list[str]:
-    lines = [f"    def {plan.method_name}({signature(analysis, plan)}) -> {return_hint(analysis, plan)}:"]
+    parameters = signature(analysis, plan)
+    lines = [f"    def {plan.method_name}({parameters}) -> {return_hint(analysis, plan)}:"]
     summary = operation_summary(plan)
     if summary:
         lines.append(f"        {literal(summary)}")
@@ -499,6 +509,9 @@ def render_operation(
     lines.append("")
     lines.extend(render_success(analysis, plan, provides))
     lines.extend(render_errors(analysis, plan))
+    if plan.pagination is not None:
+        lines.append("")
+        lines.extend(render_iterator(analysis, plan, parameters))
     return lines
 
 

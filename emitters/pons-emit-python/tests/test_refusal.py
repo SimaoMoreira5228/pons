@@ -137,7 +137,7 @@ def test_required_nullable_field_is_supported():
     assert response["coverage"]["unsupported"] == []
 
 
-def test_pagination_is_refused():
+def test_pagination_without_a_query_field_is_refused():
     def change(value):
         value["operations"][0]["semantics"]["pagination"] = {
             "request": {"kind": "cursor", "field": "cursor"},
@@ -145,7 +145,7 @@ def test_pagination_is_refused():
             "next": "/next",
         }
 
-    assert_refused(document_with(change), marker="pagination")
+    assert_refused(document_with(change), marker="not declared on the operation query")
 
 
 def test_non_json_media_is_refused():

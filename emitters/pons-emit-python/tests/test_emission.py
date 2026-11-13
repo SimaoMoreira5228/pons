@@ -58,6 +58,29 @@ def test_exact_fixture_emits(tmp_path):
     assert "if self.nickname is not _wire.MISSING:" in types
 
 
+def test_paginated_fixture_emits(tmp_path):
+    document = support.load_spec("paginated.json")
+    response = emit_package(document)
+    assert response["coverage"] == {
+        "exact": [
+            "operations.users.list",
+            "types.Page",
+            "types.PageQuery",
+            "types.User",
+        ],
+        "opaque": [],
+        "lossy": [],
+        "unsupported": [],
+    }
+    files = support.write_files(response, tmp_path)
+    assert {file.relative_to(tmp_path).as_posix() for file in files} == EXPECTED_FILES
+    compiled(tmp_path)
+    client = (tmp_path / "pons_client" / "client.py").read_text()
+    assert "def list_all(" in client
+    assert "Iterator[_types.User]" in client
+    assert "dataclasses.replace" in client
+
+
 def test_comprehensive_fixture_emits(tmp_path):
     document = support.load("client.json")
     response = emit_package(document)

@@ -18,7 +18,10 @@ def test_manifest_declares_the_python_target():
 def test_manifest_declares_the_supported_subset():
     capabilities = build_manifest()["capabilities"]
     assert capabilities["streaming"] == []
-    assert capabilities["pagination"] == []
+    assert capabilities["pagination"] == [
+        "pagination.cursor",
+        "pagination.offset",
+    ]
     assert capabilities["enum_reprs"] == [
         "string",
         "external",
