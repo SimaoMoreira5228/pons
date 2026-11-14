@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 use pons_plugin::PluginPin;
 
 use crate::CliError;
-use crate::options;
+use crate::target_options;
 
 pub(crate) const FILE_NAME: &str = "pons.toml";
 pub(crate) const DOCUMENT_TABLE: &str = "project";
@@ -444,7 +444,7 @@ fn targets(
             ));
         }
         let table = table(file, &named, value)?;
-        if let Some(allowed) = options::vocabulary(name) {
+        if let Some(allowed) = target_options::vocabulary(name) {
             let mut allowed: Vec<&str> = allowed.iter().map(|(key, _)| *key).collect();
             allowed.push(OUT_DIR);
             check_keys(file, &named, table, &allowed)?;
@@ -456,7 +456,7 @@ fn targets(
             *value = toml::Value::String(under(directory, path).to_string_lossy().into_owned());
         }
         let target = Target::with_values(Some(file), name, values.clone());
-        options::check_values(&target)?;
+        target_options::check_values(&target)?;
         targets.insert(name.clone(), values);
     }
     Ok(targets)
