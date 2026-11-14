@@ -6,11 +6,17 @@ use serde_json::Value;
 use crate::operation::{AuthScheme, ErrorResponse, Operation};
 use crate::types::{Diagnostic, TypeDef};
 
+mod auth;
 mod constraints;
 mod decode;
+mod errors;
 mod headers;
 mod invariants;
+mod media;
+mod operations;
 mod references;
+mod responses;
+mod status;
 mod types;
 mod validation;
 
