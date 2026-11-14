@@ -55,6 +55,6 @@ if "$pons" emit --target python "$root/../../spec/fixtures/login.json" "$work/lo
     exit 1
 fi
 test ! -d "$work/login" || test -z "$(ls -A "$work/login")"
-grep -Eq "streams|closed objects" "$work/login.err" "$work/login.out"
+grep -q "streams" "$work/login.err" "$work/login.out"
 
 echo "python emitter ok"

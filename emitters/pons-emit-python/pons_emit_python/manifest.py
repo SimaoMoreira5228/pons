@@ -24,7 +24,7 @@ def build_manifest() -> dict:
             "flattened": False,
             "wide_integers": True,
             "opaque": False,
-            "object_openness": ["reject"],
+            "object_openness": ["reject", "preserve_typed", "preserve_opaque"],
             "extensions": {},
             "validation": {"backends": [], "capabilities": {}},
         },

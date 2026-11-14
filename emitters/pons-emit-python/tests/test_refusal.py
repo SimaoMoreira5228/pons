@@ -80,15 +80,18 @@ def test_opaque_value_is_refused():
     assert_refused(document_with(change), marker="opaque")
 
 
-@pytest.mark.parametrize(
-    "openness",
-    ["preserve_opaque", {"preserve_typed": {"value": {"kind": "string"}}}],
-)
-def test_preserved_openness_is_refused(openness):
+def test_invalid_openness_is_refused():
     def change(value):
-        value["types"]["Thing"]["openness"] = openness
+        value["types"]["Thing"]["openness"] = "allow"
 
-    assert_refused(document_with(change), marker="closed objects")
+    assert_refused(document_with(change), marker="invalid object openness")
+
+
+def test_preserve_typed_without_a_value_is_refused():
+    def change(value):
+        value["types"]["Thing"]["openness"] = {"preserve_typed": {}}
+
+    assert_refused(document_with(change), marker="without a value type")
 
 
 def test_flattened_member_is_refused():

@@ -161,7 +161,10 @@ class Analysis:
         return references
 
     def _ref(self, value: object) -> TypeRef:
-        return decode_type_ref(value, "type reference")
+        try:
+            return decode_type_ref(value, "type reference")
+        except Exception:
+            return TypeRef()
 
     def _field(self, value: object, label: str) -> Field | None:
         try:

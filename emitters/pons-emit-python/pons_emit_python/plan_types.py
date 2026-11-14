@@ -46,6 +46,9 @@ class TypePlan:
     repr_kind: str = ""
     tag: str = ""
     content: str = ""
+    openness: str = "reject"
+    extra: TypeRef | None = None
+    extra_name: str = ""
 
     def export_names(self) -> list[str]:
         if self.kind == "enum":
@@ -142,13 +145,16 @@ class TypePlanner:
                 f"the struct {plan.id} uses flattened members, which this emitter does not support",
             )
         openness = self.openness(definition.openness)
-        if openness != "reject":
+        if openness == "invalid":
             self.analysis.add(
                 UNSUPPORTED,
                 subject,
-                f"the struct {plan.id} uses object openness {openness!r}; this emitter only generates closed objects",
+                f"the struct {plan.id} uses the invalid object openness {definition.openness!r}",
             )
-        names = naming.NameRegistry(naming.field_reserved())
+        reserved = set(naming.field_reserved())
+        if openness != "reject":
+            reserved.add("field")
+        names = naming.NameRegistry(reserved)
         wires: set[str] = set()
         for field in definition.fields:
             field_plan = self.build_field(
@@ -161,6 +167,38 @@ class TypePlanner:
             )
             if field_plan is not None:
                 plan.fields.append(field_plan)
+        if openness == "preserve_opaque":
+            plan.openness = openness
+            plan.extra_name = names.claim("extra")
+        elif openness == "preserve_typed":
+            plan.openness = openness
+            plan.extra = self.preserve_value(
+                definition.openness, subject, f"the struct {plan.id}"
+            )
+            if plan.extra is not None and not self.validate_ref(
+                plan.extra, subject, f"the struct {plan.id} extra value"
+            ):
+                plan.extra = None
+            plan.extra_name = names.claim("extra")
+
+    def preserve_value(
+        self, raw: object, subject: str, label: str
+    ) -> TypeRef | None:
+        preserve = raw.get("preserve_typed") if isinstance(raw, dict) else None
+        if not isinstance(preserve, dict) or preserve.get("value") is None:
+            self.analysis.add(
+                DOCUMENT,
+                subject,
+                f"{label} has a preserve_typed openness without a value type",
+            )
+            return None
+        try:
+            return decode_type_ref(
+                preserve["value"], f"{label}.openness.preserve_typed.value"
+            )
+        except Exception as error:
+            self.analysis.add(DOCUMENT, subject, str(error))
+            return None
 
     def build_field(
         self,
@@ -465,7 +503,7 @@ class TypePlanner:
                 self.analysis.add(
                     UNSUPPORTED,
                     subject,
-                    f"{label} uses object openness {openness!r}; this emitter only generates closed objects",
+                    f"{label} uses object openness {openness!r}; inline structs must be closed",
                 )
                 return False
             names = naming.NameRegistry()

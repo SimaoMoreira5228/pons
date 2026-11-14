@@ -10,6 +10,7 @@ _SPLIT = re.compile(r"[^A-Za-z0-9]+")
 
 _TYPE_RESERVED = frozenset(
     {
+        "Any",
         "Decimal",
         "Enum",
         "dataclass",

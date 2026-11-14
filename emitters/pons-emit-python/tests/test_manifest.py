@@ -34,7 +34,11 @@ def test_manifest_declares_the_supported_subset():
     assert capabilities["flattened"] is False
     assert capabilities["wide_integers"] is True
     assert capabilities["opaque"] is False
-    assert capabilities["object_openness"] == ["reject"]
+    assert capabilities["object_openness"] == [
+        "reject",
+        "preserve_typed",
+        "preserve_opaque",
+    ]
     assert capabilities["extensions"] == {}
     assert capabilities["validation"] == {"backends": [], "capabilities": {}}
 

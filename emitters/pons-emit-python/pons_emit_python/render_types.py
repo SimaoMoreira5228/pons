@@ -11,9 +11,12 @@ def render_types(analysis: Analysis) -> str:
     lines = [start(f"Models and wire codecs for {analysis.document.title}.")]
     lines.append("from __future__ import annotations")
     lines.append("")
-    lines.append("from dataclasses import dataclass")
+    dataclass_names = "dataclass, field" if uses_field(analysis) else "dataclass"
+    lines.append(f"from dataclasses import {dataclass_names}")
     if analysis.uses_decimal:
         lines.append("from decimal import Decimal")
+    if uses_any(analysis):
+        lines.append("from typing import Any")
     lines.append("")
     lines.append("from . import _wire")
     lines.append("")
@@ -23,6 +26,14 @@ def render_types(analysis: Analysis) -> str:
         lines.append("")
         lines.append("")
     return "\n".join(lines).rstrip() + "\n"
+
+
+def uses_field(analysis: Analysis) -> bool:
+    return any(plan.openness != "reject" for plan in analysis.types)
+
+
+def uses_any(analysis: Analysis) -> bool:
+    return any(plan.openness == "preserve_opaque" for plan in analysis.types)
 
 
 def render_type(analysis: Analysis, plan: TypePlan) -> list[str]:
@@ -52,32 +63,81 @@ def field_hint(analysis: Analysis, field: FieldPlan) -> str:
 
 def render_struct(analysis: Analysis, plan: TypePlan) -> list[str]:
     lines = ["@dataclass(slots=True)", f"class {plan.name}:"]
-    if not plan.fields:
+    if not plan.fields and plan.openness == "reject":
         lines.append("    pass")
     for field in ordered_fields(plan.fields):
         lines.append(f"    {field.name}: {field_hint(analysis, field)}")
+    if plan.openness != "reject":
+        lines.append(
+            f"    {plan.extra_name}: {extra_hint(analysis, plan)} = field(default_factory=dict)"
+        )
     lines.append("")
     lines.append("    @classmethod")
     lines.append(
         f'    def from_wire(cls, value: object, path: str = "") -> {plan.name}:'
     )
-    if not plan.fields:
+    if not plan.fields and plan.openness == "reject":
         lines.append("        _wire.obj(value, path)")
         lines.append("        return cls()")
     else:
         lines.append("        data = _wire.obj(value, path)")
         lines.append("        model = cls.__new__(cls)")
         lines.extend(decode_fields(analysis, plan.fields, "model", "data", "path"))
+        if plan.openness != "reject":
+            lines.extend(decode_extra(analysis, plan))
         lines.append("        return model")
     lines.append("")
     lines.append("    def to_wire(self) -> object:")
-    if not plan.fields:
+    if not plan.fields and plan.openness == "reject":
         lines.append("        return {}")
         return lines
     lines.append("        out: dict[str, object] = {}")
     lines.extend(encode_fields(analysis, plan.fields, "self", "out"))
+    if plan.openness != "reject":
+        lines.extend(encode_extra(analysis, plan))
     lines.append("        return out")
     return lines
+
+
+def extra_hint(analysis: Analysis, plan: TypePlan) -> str:
+    if plan.openness == "preserve_opaque":
+        return "dict[str, Any]"
+    assert plan.extra is not None
+    return f"dict[str, {analysis.wire.type_hint(plan.extra)}]"
+
+
+def decode_extra(analysis: Analysis, plan: TypePlan) -> list[str]:
+    declared = [field.wire for field in plan.fields]
+    names = ", ".join(literal(wire) for wire in declared)
+    if len(declared) == 1:
+        names += ","
+    if plan.openness == "preserve_opaque":
+        item = "item"
+    else:
+        assert plan.extra is not None
+        item = analysis.wire.decode_expr(
+            plan.extra, "item", "_wire.child(path, key)"
+        )
+    return [
+        f"        model.{plan.extra_name} = {{",
+        f"            key: {item}",
+        "            for key, item in data.items()",
+        f"            if key not in ({names})",
+        "        }",
+    ]
+
+
+def encode_extra(analysis: Analysis, plan: TypePlan) -> list[str]:
+    if plan.openness == "preserve_opaque":
+        item = "item"
+    else:
+        assert plan.extra is not None
+        item = analysis.wire.encode_expr(plan.extra, "item")
+    return [
+        f"        for key, item in self.{plan.extra_name}.items():",
+        "            if key not in out:",
+        f"                out[key] = {item}",
+    ]
 
 
 def decode_fields(

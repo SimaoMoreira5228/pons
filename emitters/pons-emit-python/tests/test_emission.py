@@ -2,8 +2,6 @@ import json
 import subprocess
 import sys
 
-import pytest
-
 import support
 
 EXPECTED_FILES = {
@@ -143,13 +141,13 @@ def test_package_option_changes_the_import_name(tmp_path):
     assert "'FailureLocked'" in init
 
 
-def test_login_fixture_is_refused_for_streams_and_openness():
+def test_login_fixture_is_refused_for_streams():
     response = support.emit(support.load_spec("login.json"))
     assert response["files"] == []
     assert response["error"]
     messages = " ".join(item["message"] for item in response["diagnostics"])
     assert "streams" in messages
-    assert "closed objects" in messages
+    assert "closed objects" not in messages
     assert set(support.coverage_subjects(response)) == support.subjects(
         support.load_spec("login.json")
     )
@@ -194,16 +192,12 @@ def test_empty_and_one_variant_enums_emit(tmp_path):
     assert "def decode_Only(" in types
 
 
-@pytest.mark.parametrize(
-    "openness",
-    ["preserve_opaque", {"preserve_typed": {"value": {"kind": "string"}}}],
-)
-def test_preserved_openness_is_still_refused(openness):
+def test_invalid_openness_is_still_refused():
     document = support.base_document()
-    document["types"]["Thing"]["openness"] = openness
+    document["types"]["Thing"]["openness"] = "allow"
     response = support.emit(document)
     assert response["files"] == []
-    assert "closed objects" in response["error"]
+    assert "invalid object openness" in response["error"]
 
 
 def test_untagged_is_still_refused():
