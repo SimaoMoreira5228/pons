@@ -9,7 +9,8 @@ use super::backend::{
     IntegerShape, Member, ObjectShape, Rendered, StringCarrier, StringShape, float_constraint,
     integral_constraint,
 };
-use super::walk::{Walk, declaration_names};
+use super::naming::declaration_names;
+use super::walk::Walk;
 use super::{Capabilities, Generator as ValidationGenerator, Imports, Rendered as RenderedFile};
 use crate::render::{jsdoc, string};
 use crate::{EmitError, TsOptions};

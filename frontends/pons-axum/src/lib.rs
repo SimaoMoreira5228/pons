@@ -5,7 +5,6 @@ mod error;
 pub mod extract;
 mod handler;
 mod layer;
-mod matching;
 mod metadata;
 mod ndjson;
 mod operation;
@@ -15,10 +14,8 @@ mod request;
 mod response;
 pub mod routing;
 mod sse;
-mod urlencoded;
 mod validate;
 mod websocket;
-mod wire_value;
 
 use std::collections::BTreeMap;
 use std::sync::Arc;

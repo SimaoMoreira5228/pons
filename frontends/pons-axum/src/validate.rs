@@ -3,11 +3,13 @@ use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex, OnceLock};
 
 use pons_core::{Schema, TypeCx};
-use pons_ir::{Direction, Document, TypeRef, Violation, validate_value};
+use pons_ir::{
+    DecimalWire, Direction, Document, InlineType, IntegerWire, TypeKind, TypeRef, Violation,
+    validate_value,
+};
 use serde_json::Value;
 
 use crate::ViolationReport;
-use crate::wire_value::object_value;
 
 const INPUT: &str = "input";
 
@@ -46,6 +48,74 @@ fn request_type<T: Schema>(carrier: &str) -> TypeRef {
         .clone()
 }
 
+pub(crate) fn declared_media_type(
+    document: &Document,
+    request: &axum::extract::Request,
+    default: &str,
+) -> String {
+    let Some(method) = method(request.method()) else {
+        return default.to_owned();
+    };
+    document
+        .operations
+        .iter()
+        .filter(|operation| {
+            operation.method == method && path_matches(&operation.path, request.uri().path())
+        })
+        .max_by_key(|operation| specificity(&operation.path))
+        .and_then(|operation| operation.body.as_ref()?.media.as_ref())
+        .map(ToString::to_string)
+        .unwrap_or_else(|| default.to_owned())
+}
+
+fn specificity(segments: &[pons_ir::PathSegment]) -> (usize, Vec<u8>) {
+    (
+        segments.len(),
+        segments
+            .iter()
+            .map(|segment| match segment {
+                pons_ir::PathSegment::Literal { .. } => 1,
+                pons_ir::PathSegment::Param { .. } => 0,
+            })
+            .collect(),
+    )
+}
+
+fn method(method: &axum::http::Method) -> Option<pons_ir::Method> {
+    Some(match *method {
+        axum::http::Method::GET => pons_ir::Method::Get,
+        axum::http::Method::POST => pons_ir::Method::Post,
+        axum::http::Method::PUT => pons_ir::Method::Put,
+        axum::http::Method::PATCH => pons_ir::Method::Patch,
+        axum::http::Method::DELETE => pons_ir::Method::Delete,
+        axum::http::Method::HEAD => pons_ir::Method::Head,
+        axum::http::Method::OPTIONS => pons_ir::Method::Options,
+        _ => return None,
+    })
+}
+
+fn path_matches(segments: &[pons_ir::PathSegment], path: &str) -> bool {
+    let mut parts = path_segments(path).into_iter();
+    segments
+        .iter()
+        .enumerate()
+        .all(|(index, segment)| match (segment, parts.next()) {
+            (pons_ir::PathSegment::Param { .. }, Some(part)) => {
+                index + 1 < segments.len() || !part.is_empty()
+            }
+            (pons_ir::PathSegment::Literal { lit }, Some(part)) => lit == part,
+            _ => false,
+        })
+        && parts.next().is_none()
+}
+
+fn path_segments(path: &str) -> Vec<&str> {
+    match path.strip_prefix('/').unwrap_or(path) {
+        "" => Vec::new(),
+        rest => rest.split('/').collect(),
+    }
+}
+
 pub(crate) fn check(
     document: &Document,
     ty: &TypeRef,
@@ -78,11 +148,272 @@ pub(crate) fn violated(expected: &str, found: String) -> ViolationReport {
     }])
 }
 
+pub(crate) fn decode_pairs(text: &str) -> Vec<(String, String)> {
+    text.split('&')
+        .filter(|pair| !pair.is_empty())
+        .map(|pair| {
+            let (name, value) = pair.split_once('=').unwrap_or((pair, ""));
+            (decode(name), decode(value))
+        })
+        .collect()
+}
+
+pub(crate) fn object_value(
+    document: &Document,
+    ty: &TypeRef,
+    pairs: Vec<(String, String)>,
+) -> (Value, Vec<Violation>) {
+    let mut declared = Vec::new();
+    members(document, ty, &mut declared, &mut Vec::new());
+    let mut entries = serde_json::Map::new();
+    let mut violations = Vec::new();
+    for (wire, texts) in grouped(pairs) {
+        let field = declared
+            .iter()
+            .find(|(name, _)| name == &wire)
+            .map(|(_, field)| *field);
+        let value = match field.map(|field| (field, array_item(document, field))) {
+            Some((field, Some(_))) => array_value(document, field, &texts),
+            Some((field, _)) if texts.len() > 1 => {
+                violations.push(Violation::Type {
+                    path: pointer(&wire),
+                    expected: "one value for a field that is not an array".to_owned(),
+                    found: format!("{} values", texts.len()),
+                });
+                token_value(document, field, &texts[texts.len() - 1])
+            }
+            Some((field, _)) => token_value(document, field, &texts[0]),
+            None => Value::String(texts[texts.len() - 1].clone()),
+        };
+        entries.insert(wire, value);
+    }
+    (Value::Object(entries), violations)
+}
+
+fn array_value(document: &Document, field: &TypeRef, texts: &[String]) -> Value {
+    let item = array_item(document, field).expect("an array field spells its item");
+    Value::Array(
+        texts
+            .iter()
+            .flat_map(|text| match spells_array(text) {
+                Some(items) => items,
+                None => vec![item_value(document, item, text)],
+            })
+            .collect(),
+    )
+}
+
+fn item_value(document: &Document, item: &TypeRef, text: &str) -> Value {
+    if carries_json(document, item) {
+        return serde_json::from_str(text).unwrap_or_else(|_| Value::String(text.to_owned()));
+    }
+    token_value(document, item, text)
+}
+
+fn spells_array(text: &str) -> Option<Vec<Value>> {
+    match serde_json::from_str::<Value>(text) {
+        Ok(Value::Array(items)) => Some(items),
+        _ => None,
+    }
+}
+
+fn carries_json(document: &Document, ty: &TypeRef) -> bool {
+    match ty {
+        TypeRef::Inline(InlineType::Any | InlineType::Map { .. } | InlineType::Tuple { .. }) => {
+            true
+        }
+        TypeRef::Inline(InlineType::Nullable { inner }) => carries_json(document, inner),
+        TypeRef::Named(named) => match document.types.get(&named.id).map(|found| &found.definition)
+        {
+            Some(TypeKind::Struct { .. }) => true,
+            Some(TypeKind::Newtype { inner }) => carries_json(document, inner),
+            _ => false,
+        },
+        _ => false,
+    }
+}
+
+fn grouped(pairs: Vec<(String, String)>) -> Vec<(String, Vec<String>)> {
+    let mut groups: Vec<(String, Vec<String>)> = Vec::new();
+    for (wire, text) in pairs {
+        match groups.iter_mut().find(|(name, _)| name == &wire) {
+            Some((_, texts)) => texts.push(text),
+            None => groups.push((wire, vec![text])),
+        }
+    }
+    groups
+}
+
+pub(crate) fn path_value(document: &Document, ty: &TypeRef, pairs: Vec<(String, String)>) -> Value {
+    match shape(document, ty) {
+        Shape::Struct => object_value(document, ty, pairs).0,
+        Shape::Tuple(items) => Value::Array(
+            pairs
+                .iter()
+                .enumerate()
+                .map(|(index, (_, text))| match items.get(index) {
+                    Some(item) => token_value(document, item, text),
+                    None => Value::String(text.clone()),
+                })
+                .collect(),
+        ),
+        Shape::Single => match pairs.first() {
+            Some((_, text)) => token_value(document, ty, text),
+            None => Value::Null,
+        },
+    }
+}
+
+enum Shape<'a> {
+    Struct,
+    Tuple(&'a [TypeRef]),
+    Single,
+}
+
+fn shape<'a>(document: &'a Document, ty: &'a TypeRef) -> Shape<'a> {
+    match ty {
+        TypeRef::Inline(InlineType::Tuple { items }) => Shape::Tuple(items),
+        TypeRef::Named(named) => match document.types.get(&named.id).map(|found| &found.definition)
+        {
+            Some(TypeKind::Newtype { inner }) => shape(document, inner),
+            Some(TypeKind::Struct { .. }) => Shape::Struct,
+            _ => Shape::Single,
+        },
+        _ => Shape::Single,
+    }
+}
+
+fn members<'a>(
+    document: &'a Document,
+    ty: &'a TypeRef,
+    found: &mut Vec<(String, &'a TypeRef)>,
+    seen: &mut Vec<String>,
+) {
+    let TypeRef::Named(named) = ty else {
+        return;
+    };
+    if seen.contains(&named.id) {
+        return;
+    }
+    let Some(definition) = document.types.get(&named.id).map(|found| &found.definition) else {
+        return;
+    };
+    seen.push(named.id.clone());
+    match definition {
+        TypeKind::Newtype { inner } => members(document, inner, found, seen),
+        TypeKind::Struct {
+            fields, flattened, ..
+        } => {
+            found.extend(fields.iter().map(|field| (field.wire.clone(), &field.ty)));
+            flattened
+                .iter()
+                .for_each(|ty| members(document, ty, found, seen));
+        }
+        TypeKind::Enum { .. } => {}
+    }
+    seen.pop();
+}
+
+pub(crate) fn token_value(document: &Document, ty: &TypeRef, text: &str) -> Value {
+    if let Some(item) = array_item(document, ty) {
+        return Value::Array(match serde_json::from_str::<Value>(text) {
+            Ok(Value::Array(items)) => items,
+            _ => vec![token_value(document, item, text)],
+        });
+    }
+    match ty {
+        TypeRef::Named(named) => {
+            match document.types.get(&named.id).map(|found| &found.definition) {
+                Some(TypeKind::Newtype { inner }) => token_value(document, inner, text),
+                _ => Value::String(text.to_owned()),
+            }
+        }
+        TypeRef::Inline(InlineType::Nullable { inner }) => token_value(document, inner, text),
+        TypeRef::Inline(InlineType::Bool) => match text {
+            "true" => Value::Bool(true),
+            "false" => Value::Bool(false),
+            _ => Value::String(text.to_owned()),
+        },
+        TypeRef::Inline(
+            InlineType::Int {
+                wire: IntegerWire::Number,
+                ..
+            }
+            | InlineType::Float { .. }
+            | InlineType::Decimal {
+                wire: DecimalWire::Number,
+            },
+        ) => match serde_json::from_str::<Value>(text) {
+            Ok(number @ Value::Number(_)) => number,
+            _ => Value::String(text.to_owned()),
+        },
+        _ => Value::String(text.to_owned()),
+    }
+}
+
+fn array_item<'a>(document: &'a Document, ty: &'a TypeRef) -> Option<&'a TypeRef> {
+    match ty {
+        TypeRef::Named(named) => match document.types.get(&named.id).map(|found| &found.definition)
+        {
+            Some(TypeKind::Newtype { inner }) => array_item(document, inner),
+            _ => None,
+        },
+        TypeRef::Inline(InlineType::Nullable { inner }) => array_item(document, inner),
+        TypeRef::Inline(InlineType::Array { item, .. }) => Some(item),
+        _ => None,
+    }
+}
+
+fn pointer(wire: &str) -> String {
+    format!("/{}", wire.replace('~', "~0").replace('/', "~1"))
+}
+
+fn decode(text: &str) -> String {
+    let bytes = text.as_bytes();
+    if !bytes.contains(&b'%') && !bytes.contains(&b'+') {
+        return text.to_owned();
+    }
+    let mut decoded = Vec::with_capacity(bytes.len());
+    let mut index = 0;
+    while index < bytes.len() {
+        match bytes[index] {
+            b'+' => {
+                decoded.push(b' ');
+                index += 1;
+            }
+            b'%' if index + 2 < bytes.len() => {
+                match (nibble(bytes[index + 1]), nibble(bytes[index + 2])) {
+                    (Some(high), Some(low)) => {
+                        decoded.push(high << 4 | low);
+                        index += 3;
+                    }
+                    _ => {
+                        decoded.push(b'%');
+                        index += 1;
+                    }
+                }
+            }
+            byte => {
+                decoded.push(byte);
+                index += 1;
+            }
+        }
+    }
+    String::from_utf8_lossy(&decoded).into_owned()
+}
+
+fn nibble(byte: u8) -> Option<u8> {
+    match byte {
+        b'0'..=b'9' => Some(byte - b'0'),
+        b'a'..=b'f' => Some(byte - b'a' + 10),
+        b'A'..=b'F' => Some(byte - b'A' + 10),
+        _ => None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::wire_value::token_value;
-    use pons_ir::{InlineType, IntegerWire};
     use serde_json::json;
 
     fn contract() -> Document {
@@ -235,6 +566,104 @@ mod tests {
             .unwrap_or_default()
     }
 
+    fn segments(path: &str) -> Vec<pons_ir::PathSegment> {
+        path.split('/')
+            .map(|segment| match segment.strip_prefix('{') {
+                Some(param) => pons_ir::PathSegment::Param {
+                    param: param.trim_end_matches('}').to_owned(),
+                    ty: TypeRef::Inline(InlineType::String {
+                        format: None,
+                        min_length: None,
+                        max_length: None,
+                        pattern: None,
+                    }),
+                },
+                None => pons_ir::PathSegment::Literal {
+                    lit: segment.to_owned(),
+                },
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_path_parameter_matches_one_segment_and_no_more() {
+        let assets = segments("assets/{id}");
+        assert!(path_matches(&assets, "/assets/1"));
+        assert!(
+            !path_matches(&assets, "/assets/"),
+            "matchit ends the search when the path runs out, so a trailing parameter never binds the empty segment axum leaves after a slash"
+        );
+        assert!(
+            !path_matches(&assets, "/assets//"),
+            "the empty segment axum leaves after a slash is a segment of its own"
+        );
+        assert!(
+            !path_matches(&assets, "/assets/1/"),
+            "an empty segment is a segment axum serves, so /assets/1/ is another route"
+        );
+        assert!(
+            !path_matches(&assets, "/assets/1/raw"),
+            "a parameter covers one segment, so a deeper path is another operation's"
+        );
+        assert!(!path_matches(&assets, "/assets"));
+        assert!(!path_matches(&assets, "/other/1"));
+        assert!(
+            path_matches(&[], "/"),
+            "the root operation matches only the root"
+        );
+
+        let raw = segments("assets/{id}/raw");
+        assert!(path_matches(&raw, "/assets/1/raw"));
+        assert!(!path_matches(&raw, "/assets/1"));
+        assert!(
+            path_matches(&raw, "/assets//raw"),
+            "an interior parameter binds the empty segment between two slashes, which is a segment axum serves"
+        );
+
+        let directory = segments("assets/");
+        assert!(path_matches(&directory, "/assets/"));
+        assert!(
+            !path_matches(&directory, "/assets"),
+            "/assets and /assets/ are two routes, and this one is the second"
+        );
+    }
+
+    #[test]
+    fn the_most_specific_match_wins_the_resolution() {
+        let parameter = segments("files/{id}");
+        let trailing = segments("files/{id}/");
+        assert!(
+            specificity(&trailing) > specificity(&parameter),
+            "the longer path is the one a client reaches by naming the trailing segment"
+        );
+        assert!(
+            specificity(&segments("files/raw")) > specificity(&parameter),
+            "a literal segment is more specific than a parameter, which is the rule matchit applies"
+        );
+        assert!(
+            specificity(&segments("files/raw")) > specificity(&segments("{a}/raw")),
+            "the first segment that differs decides, so a literal earlier in the path wins"
+        );
+    }
+
+    #[test]
+    fn urlencoded_pairs_are_decoded_like_a_form_submission() {
+        assert_eq!(
+            decode_pairs("name=Ada+Lovelace&tag=a%2Fb&flag&empty="),
+            [
+                ("name".to_owned(), "Ada Lovelace".to_owned()),
+                ("tag".to_owned(), "a/b".to_owned()),
+                ("flag".to_owned(), String::new()),
+                ("empty".to_owned(), String::new()),
+            ]
+        );
+        assert_eq!(decode_pairs(""), Vec::<(String, String)>::new());
+        assert_eq!(
+            decode_pairs("bad=%zz"),
+            [("bad".to_owned(), "%zz".to_owned())]
+        );
+    }
+
     #[test]
     fn text_tokens_are_read_in_the_wire_form_the_contract_publishes() {
         let contract = contract();
@@ -340,6 +769,33 @@ mod tests {
             reported(&contract, &named("Paged#input"), &[("cursor", "seven")]),
             Err("/cursor: expected a number, found a string".to_owned())
         );
+    }
+
+    #[test]
+    fn every_published_method_is_read_and_no_other_is_folded_onto_one() {
+        for (sent, expected) in [
+            ("GET", pons_ir::Method::Get),
+            ("POST", pons_ir::Method::Post),
+            ("PUT", pons_ir::Method::Put),
+            ("PATCH", pons_ir::Method::Patch),
+            ("DELETE", pons_ir::Method::Delete),
+            ("HEAD", pons_ir::Method::Head),
+            ("OPTIONS", pons_ir::Method::Options),
+        ] {
+            let sent = axum::http::Method::from_bytes(sent.as_bytes()).unwrap();
+            assert_eq!(method(&sent), Some(expected), "{sent} is published");
+        }
+        for sent in [
+            axum::http::Method::CONNECT,
+            axum::http::Method::TRACE,
+            axum::http::Method::from_bytes(b"PROPFIND").unwrap(),
+        ] {
+            assert_eq!(
+                method(&sent),
+                None,
+                "{sent} is routable but no operation can publish it, so it reads no operation's body"
+            );
+        }
     }
 
     #[test]

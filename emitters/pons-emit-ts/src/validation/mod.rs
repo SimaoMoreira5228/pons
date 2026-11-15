@@ -2,6 +2,7 @@ mod arktype;
 mod backend;
 mod builtin;
 mod coverage;
+mod naming;
 mod superstruct;
 mod typebox;
 mod valibot;

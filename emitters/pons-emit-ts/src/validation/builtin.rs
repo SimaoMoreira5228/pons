@@ -2,7 +2,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use pons_ir::{Direction, Document, NamedRef, TypeKind, TypeRef, ValidationCoverage};
 
-use super::walk::{declaration_names, validator_names};
+use super::naming::{declaration_names, validator_names};
 use super::{Capabilities, Generator as ValidationGenerator, Imports, Rendered};
 use crate::render::jsdoc;
 use crate::{EmitError, TsOptions};
