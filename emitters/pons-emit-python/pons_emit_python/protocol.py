@@ -4,10 +4,17 @@ from __future__ import annotations
 
 import json
 import keyword
+from dataclasses import dataclass
 from typing import Any
 
 from .analysis import Analysis, Problem
 from .manifest import PROTOCOL_VERSION, TARGET
+
+
+@dataclass(frozen=True, slots=True)
+class EmitterOptions:
+    package: str
+    validation: str | None
 
 
 def coverage_block(analysis: Analysis | None) -> dict[str, list[str]]:
@@ -34,13 +41,16 @@ def failure(
     problems: list[Problem], analysis: Analysis | None = None
 ) -> dict[str, Any]:
     messages = [problem.message for problem in problems]
-    return {
+    response: dict[str, Any] = {
         "protocol": PROTOCOL_VERSION,
         "files": [],
         "coverage": coverage_block(analysis),
         "diagnostics": diagnostics(problems),
         "error": "; ".join(messages) or "emission failed",
     }
+    if analysis is not None and analysis.validation_plan is not None:
+        response["validation_coverage"] = analysis.validation_plan.coverage()
+    return response
 
 
 def request_failure(message: str, code: str = "PY-E001") -> dict[str, Any]:
@@ -48,7 +58,7 @@ def request_failure(message: str, code: str = "PY-E001") -> dict[str, Any]:
 
 
 def success(files: list[tuple[str, str]], analysis: Analysis) -> dict[str, Any]:
-    return {
+    response: dict[str, Any] = {
         "protocol": PROTOCOL_VERSION,
         "files": [
             {"path": path, "content": content, "encoding": "utf8"}
@@ -57,25 +67,62 @@ def success(files: list[tuple[str, str]], analysis: Analysis) -> dict[str, Any]:
         "coverage": analysis.coverage(),
         "diagnostics": [],
     }
+    if analysis.validation_plan is not None:
+        response["validation_coverage"] = analysis.validation_plan.coverage()
+    return response
 
 
-def package_option(options: object) -> str:
-    name = "pons_client"
+def read_options(options: object) -> EmitterOptions:
     if options is None:
         options = {}
     if not isinstance(options, dict):
         raise ValueError("options must be an object")
+    name = "pons_client"
+    validation: str | None = None
     for key in sorted(options):
-        if key != "package":
+        if key == "package":
+            value = options[key]
+            if not isinstance(value, str):
+                raise ValueError('option "package" is not a string')
+            name = value
+        elif key == "validation":
+            validation = validation_option(options[key])
+        else:
             raise ValueError(
-                f"option {key!r} is not one of the options this emitter declares: package"
+                f"option {key!r} is not one of the options this emitter declares: package, validation"
             )
-        value = options[key]
-        if not isinstance(value, str):
-            raise ValueError('option "package" is not a string')
-        name = value
     validate_package(name)
-    return name
+    return EmitterOptions(name, validation)
+
+
+def validation_option(value: object) -> str | None:
+    if value is None or value is False:
+        return None
+    if value is True:
+        return "builtin"
+    if isinstance(value, str):
+        raise ValueError(
+            'option "validation" is a string; it is a table with a backend, for example { backend = "builtin" }'
+        )
+    if not isinstance(value, dict):
+        raise ValueError(
+            'option "validation" is not a table with a backend, for example { backend = "builtin" }'
+        )
+    for key in sorted(value):
+        if key != "backend":
+            raise ValueError(
+                f'option "validation" has no key {key!r}; it is backend'
+            )
+    backend = value.get("backend", "builtin")
+    if not isinstance(backend, str):
+        raise ValueError('option "validation.backend" is not a string')
+    if backend == "none":
+        return None
+    if backend != "builtin":
+        raise ValueError(
+            f'option "validation.backend" is {backend!r}; it is builtin or none'
+        )
+    return backend
 
 
 def validate_package(name: str) -> None:

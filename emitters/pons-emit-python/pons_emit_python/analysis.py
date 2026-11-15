@@ -3,11 +3,16 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import TYPE_CHECKING
 
 from .document import Document, Field, TypeDef, TypeRef, _decode_field, decode_type_ref
 from .plan_operations import OperationPlan, OperationPlanner
 from .plan_types import TypePlan, TypePlanner
+from .plan_validation import ValidationPlan, ValidationPlanner
 from .wire_syntax import WireSyntax
+
+if TYPE_CHECKING:
+    from .protocol import EmitterOptions
 
 
 @dataclass(slots=True)
@@ -19,9 +24,11 @@ class Problem:
 
 
 class Analysis:
-    def __init__(self, document: Document, package: str) -> None:
+    def __init__(
+        self, document: Document, options: EmitterOptions, mode: str
+    ) -> None:
         self.document = document
-        self.package = package
+        self.package = options.package
         self.problems: list[Problem] = []
         self.unsupported: set[str] = set()
         self.uses_decimal = False
@@ -38,6 +45,13 @@ class Analysis:
         self.query_types = self.operation_planner.query_types
         self.query_functions = self.operation_planner.query_functions
         self.wire = WireSyntax(self)
+        self.validation_plan: ValidationPlan | None = None
+        if options.validation is not None:
+            self.validation_plan = ValidationPlanner(
+                self, options.validation
+            ).build()
+            if mode == "strict":
+                self.problems.extend(self.validation_plan.problems())
 
     def subject_types(self, type_id: str) -> str:
         return f"types.{type_id}"
@@ -155,9 +169,13 @@ class Analysis:
             references.append(plan.body.ty)
         if plan.success.status:
             references.append(plan.success.body)
+            for header in plan.success.headers:
+                references.append(header.ty)
         for error in plan.errors:
             if error.body is not None:
                 references.append(error.body)
+            for header in error.headers:
+                references.append(header.ty)
         return references
 
     def _ref(self, value: object) -> TypeRef:

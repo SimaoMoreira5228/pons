@@ -566,6 +566,49 @@ def test_transport_failures_are_wrapped(client):
         api.Client("https://api.test", transport=broken).public.open()
 
 
+def test_required_error_headers_are_checked_without_validation(tmp_path):
+    document = support.load_spec("exact.json")
+    document["operations"][0]["errors"][0]["headers"] = [
+        {
+            "wire": "X-Reason",
+            "ty": {"kind": "string"},
+            "presence": "required",
+        }
+    ]
+    generated = Generated(tmp_path, document, "error_header_api", mode="lossy")
+    try:
+        api = generated.api
+
+        def without_header(request):
+            return (
+                400,
+                {"Content-Type": "application/json"},
+                json_bytes({"code": "invalid"}),
+            )
+
+        with pytest.raises(api.DecodeError) as caught:
+            api.Client(
+                "https://api.test", transport=without_header
+            ).auth.login(body=api.LoginRequest(email="a@example.test"))
+        assert caught.value.path == "headers.X-Reason"
+        assert caught.value.status == 400
+
+        def with_header(request):
+            return (
+                400,
+                {"Content-Type": "application/json", "X-Reason": "expired"},
+                json_bytes({"code": "invalid"}),
+            )
+
+        with pytest.raises(api.LoginErrorException) as raised:
+            api.Client(
+                "https://api.test", transport=with_header
+            ).auth.login(body=api.LoginRequest(email="a@example.test"))
+        assert raised.value.headers["X-Reason"] == "expired"
+    finally:
+        generated.close()
+
+
 def test_exact_fixture_optional_nullable_and_internal_enum(exact):
     api = exact.api
 

@@ -11,7 +11,10 @@ def test_manifest_declares_the_python_target():
     assert manifest["protocol"] == {"min": "3.0", "max": "3.0"}
     assert manifest["ir_version"] == {"min": "0.3", "max": "0.3"}
     assert manifest["option_schema"] == {
-        "options": {"package": {"type": "string", "required": False}}
+        "options": {
+            "package": {"type": "string", "required": False},
+            "validation": {"type": "object", "required": False},
+        }
     }
 
 
@@ -40,7 +43,11 @@ def test_manifest_declares_the_supported_subset():
         "preserve_opaque",
     ]
     assert capabilities["extensions"] == {}
-    assert capabilities["validation"] == {"backends": [], "capabilities": {}}
+    validation = capabilities["validation"]
+    assert validation["backends"] == ["builtin"]
+    assert validation["capabilities"]["validation.scalars"] == "exact"
+    assert validation["capabilities"]["validation.formats"] == "exact"
+    assert "validation.stream" not in validation["capabilities"]
 
 
 def test_default_package_option_is_used():

@@ -76,6 +76,7 @@ class ErrorPlan:
     body: TypeRef | None
     media: str
     message: str
+    headers: list[ResponseHeaderPlan]
 
 
 @dataclass(slots=True)
@@ -96,6 +97,7 @@ class OperationPlan:
     provides: Provides | None
     pagination: PaginationPlan | None
     doc: dict[str, Any] | None
+    stream: bool
     namespace_path: list[str] = field(default_factory=list)
     method_name: str = ""
 
@@ -210,6 +212,7 @@ class OperationPlanner:
             provides=operation.provides,
             pagination=None,
             doc=operation.doc,
+            stream=operation.stream,
         )
         if operation.method not in {
             "GET",
@@ -558,6 +561,7 @@ class OperationPlanner:
             )
             return None
         planner = self.analysis.type_planner
+        headers: list[ResponseHeaderPlan] = []
         for header in error.headers:
             if is_nullable(header.ty) or not planner.is_scalar(header.ty):
                 self.analysis.add(
@@ -565,6 +569,14 @@ class OperationPlanner:
                     subject,
                     f"the error header {header.wire} is not a scalar",
                 )
+                continue
+            if not planner.validate_ref(
+                header.ty, subject, f"the error header {header.wire}"
+            ):
+                continue
+            headers.append(
+                ResponseHeaderPlan(header.wire, header.ty, header.presence == "optional")
+            )
         key = (
             status_key(status)
             + "|"
@@ -584,6 +596,7 @@ class OperationPlanner:
                 body=body,
                 media=media_text(error.media),
                 message=self.error_message(error),
+                headers=headers,
             )
             self.error_order.append(key)
         return self.errors[key]

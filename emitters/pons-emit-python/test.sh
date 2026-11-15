@@ -33,7 +33,7 @@ assert manifest["capabilities"]["pagination"] == [
     "pagination.cursor",
     "pagination.offset",
 ], manifest
-assert manifest["capabilities"]["validation"]["backends"] == [], manifest
+assert manifest["capabilities"]["validation"]["backends"] == ["builtin"], manifest
 PY
 
 cargo build -q --manifest-path "$root/../../Cargo.toml" -p pons-cli
@@ -49,6 +49,32 @@ test -f "$work/client/pons_client/client.py"
 "$pons" emit --target python "$root/../../spec/fixtures/paginated.json" "$work/paginated"
 test -f "$work/paginated/pons_client/client.py"
 grep -q "def list_all(" "$work/paginated/pons_client/client.py"
+
+cat > "$work/pons.toml" <<EOF
+[project]
+name = "validated"
+ir = "$root/../../spec/fixtures/exact.json"
+
+[emit.python]
+out_dir = "$work/validated"
+validation = { backend = "builtin" }
+EOF
+(
+    cd "$work"
+    "$pons" emit --target python --lossy --coverage coverage.json
+)
+test -f "$work/validated/pons_client/validators.py"
+python3 - "$work/validated/coverage.json" <<'PY'
+import json
+import sys
+
+report = json.loads(open(sys.argv[1], encoding="utf-8").read())
+coverage = report["validation_coverage"]
+assert coverage["lossy"] == [], coverage
+assert coverage["unsupported"] == [], coverage
+assert "types.User" in coverage["exact"], coverage
+assert "operations.events.watch" in coverage["exact"], coverage
+PY
 
 if "$pons" emit --target python "$root/../../spec/fixtures/login.json" "$work/login" --lossy > "$work/login.out" 2> "$work/login.err"; then
     echo "login.json must be refused" >&2

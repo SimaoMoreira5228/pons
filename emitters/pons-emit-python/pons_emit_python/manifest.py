@@ -7,6 +7,33 @@ IR_VERSION = "0.3"
 TARGET = "python"
 EMITTER_VERSION = "0.1.0"
 
+VALIDATION_CAPABILITIES = {
+    "validation.scalars": "exact",
+    "validation.any": "exact",
+    "validation.integer": "exact",
+    "validation.float_bounds": "exact",
+    "validation.wide_integer": "exact",
+    "validation.decimal": "exact",
+    "validation.formats": "exact",
+    "validation.string_constraints": "exact",
+    "validation.bytes": "exact",
+    "validation.nullable": "exact",
+    "validation.array": "exact",
+    "validation.unique_array": "exact",
+    "validation.map": "exact",
+    "validation.tuple": "exact",
+    "validation.object": "exact",
+    "validation.openness.preserve_typed": "exact",
+    "validation.openness.preserve_opaque": "exact",
+    "validation.enum.string": "exact",
+    "validation.enum.external": "exact",
+    "validation.enum.internal": "exact",
+    "validation.enum.adjacent": "exact",
+    "validation.recursion": "exact",
+    "validation.variant_narrowing": "exact",
+    "validation.headers": "exact",
+}
+
 
 def build_manifest() -> dict:
     return {
@@ -26,9 +53,15 @@ def build_manifest() -> dict:
             "opaque": False,
             "object_openness": ["reject", "preserve_typed", "preserve_opaque"],
             "extensions": {},
-            "validation": {"backends": [], "capabilities": {}},
+            "validation": {
+                "backends": ["builtin"],
+                "capabilities": dict(VALIDATION_CAPABILITIES),
+            },
         },
         "option_schema": {
-            "options": {"package": {"type": "string", "required": False}}
+            "options": {
+                "package": {"type": "string", "required": False},
+                "validation": {"type": "object", "required": False},
+            }
         },
     }

@@ -9,7 +9,7 @@ from .analysis import Analysis, Problem
 from .codes import RENDER
 from .protocol import (
     failure,
-    package_option,
+    read_options,
     read_request,
     request_failure,
     success,
@@ -19,6 +19,7 @@ from .render import literal, start
 from .render_client import render_client
 from .render_errors import render_errors
 from .render_types import render_types
+from .render_validation import render_validators
 from .render_wire import render_wire
 
 
@@ -28,8 +29,8 @@ def emit(raw_request: bytes) -> dict[str, Any]:
     except ValueError as error:
         return request_failure(str(error), "PY-E001")
     try:
-        validate_request(request)
-        package = package_option(request.get("options", {}))
+        mode = validate_request(request)
+        options = read_options(request.get("options", {}))
     except ValueError as error:
         return request_failure(str(error), "PY-E002")
     try:
@@ -38,7 +39,7 @@ def emit(raw_request: bytes) -> dict[str, Any]:
         return request_failure(str(error), "PY-E010")
     except Exception as error:
         return request_failure(f"cannot read the IR document: {error}", "PY-E010")
-    analysis = Analysis(document, package)
+    analysis = Analysis(document, options, mode)
     if analysis.problems:
         return failure(analysis.problems, analysis)
     try:
@@ -63,6 +64,10 @@ def generated_files(analysis: Analysis) -> list[tuple[str, str]]:
         (f"{package}/client.py", render_client(analysis)),
         (f"{package}/_wire.py", render_wire()),
     ]
+    if analysis.validation_plan is not None:
+        files.append(
+            (f"{package}/validators.py", render_validators(analysis))
+        )
     for path, _ in files:
         if path.startswith("/") or ".." in path.split("/"):
             raise ValueError(f"unsafe output path {path!r}")
