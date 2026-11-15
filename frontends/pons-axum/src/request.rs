@@ -8,9 +8,10 @@ use serde_json::Value;
 
 use crate::ViolationReport;
 use crate::describe::{DescribeRequest, OperationCx};
-use crate::validate::{
-    check, declared_media_type, decode_pairs, path_value, read_pairs, request_contract, violated,
-};
+use crate::matching::declared_media_type;
+use crate::urlencoded::decode_pairs;
+use crate::validate::{check, read_pairs, request_contract, violated};
+use crate::wire_value::path_value;
 
 const JSON_MEDIA_TYPE: &str = "application/json";
 const FORM_MEDIA_TYPE: &str = "application/x-www-form-urlencoded";

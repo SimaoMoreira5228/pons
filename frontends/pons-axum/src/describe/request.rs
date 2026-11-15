@@ -85,7 +85,7 @@ fn header_value<T: HeaderSpec>(
     let (document, _) = crate::validate::request_contract::<T::Value>(&parts.extensions, "input")
         .map_err(HeaderRejection::Contract)?;
     let ty = header_schema::<T::Value>(&mut TypeCx::new(), Direction::Input, T::NAME);
-    let value = crate::validate::token_value(&document, &ty, &text);
+    let value = crate::wire_value::token_value(&document, &ty, &text);
     if let Err(report) = crate::validate::check(&document, &ty, &value) {
         return Err(HeaderRejection::Contract(report));
     }
