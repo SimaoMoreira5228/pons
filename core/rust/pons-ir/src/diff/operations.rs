@@ -1,4 +1,9 @@
-use super::*;
+use std::collections::{BTreeMap, BTreeSet};
+
+use crate::{Body, Document, ErrorResponse, Operation, Presence, Response};
+
+use super::annotations::{add_doc_change, diff_diagnostics};
+use super::{ChangeLevel, Diff, add};
 
 pub(super) fn diff_operations(
     diff: &mut Diff,

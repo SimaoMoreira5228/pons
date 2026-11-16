@@ -1,4 +1,9 @@
-use super::*;
+use std::collections::BTreeMap;
+
+use crate::{
+    AuthScheme, Change, ChangeLevel, Diagnostic, DiagnosticSeverity, Diff, Direction, Doc,
+    Document, InlineType, OAuthFlow, Presence, TypeKind, TypeRef,
+};
 
 mod classification;
 mod diagnostics;
