@@ -179,6 +179,8 @@ class AuthScheme:
     kind: str
     location: str = ""
     name: str = ""
+    description: str = ""
+    adapter: str = ""
 
 
 @dataclass(slots=True)
@@ -544,6 +546,14 @@ def _decode_scheme(value: object, path: str) -> AuthScheme:
             kind=kind,
             location="cookie",
             name=_text(data.get("cookie"), f"{path}.cookie"),
+        )
+    if kind == "custom":
+        return AuthScheme(
+            kind=kind,
+            description=_text(
+                data.get("description"), f"{path}.description", default=""
+            ),
+            adapter=_text(data.get("adapter"), f"{path}.adapter", default=""),
         )
     return AuthScheme(kind=kind)
 

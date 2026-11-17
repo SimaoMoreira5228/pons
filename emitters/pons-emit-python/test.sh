@@ -35,6 +35,7 @@ assert manifest["capabilities"]["pagination"] == [
     "pagination.offset",
 ], manifest
 assert manifest["capabilities"]["opaque"] is True, manifest
+assert manifest["capabilities"]["custom_auth"] is True, manifest
 assert manifest["capabilities"]["validation"]["backends"] == ["builtin"], manifest
 assert (
     manifest["capabilities"]["validation"]["capabilities"]["validation.enum.untagged"]

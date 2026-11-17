@@ -55,7 +55,7 @@ def build_manifest() -> dict:
             ],
             "direction_split": True,
             "provides": True,
-            "custom_auth": False,
+            "custom_auth": True,
             "flattened": False,
             "wide_integers": True,
             "opaque": True,

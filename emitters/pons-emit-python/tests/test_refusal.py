@@ -177,18 +177,25 @@ def test_media_codec_is_refused():
     assert_refused(document_with(change), marker="application/json")
 
 
-def test_custom_auth_is_refused():
+def test_custom_auth_is_supported():
     def change(value):
         value["auth_schemes"]["custom"] = {
             "kind": "custom",
             "description": "handshake",
+            "adapter": "handshake",
         }
         value["operations"][0]["auth"] = {
             "alternatives": [["custom"]],
             "optional": False,
         }
 
-    assert_refused(document_with(change), marker="custom")
+    response = support.emit(document_with(change))
+    assert response.get("error") is None
+    assert response["coverage"]["unsupported"] == []
+    assert response["coverage"]["exact"] == [
+        "operations.things.get",
+        "types.Thing",
+    ]
 
 
 def test_decimal_number_wire_is_refused():

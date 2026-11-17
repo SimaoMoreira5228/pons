@@ -68,6 +68,8 @@ class CredentialPlanner:
                     f"the cookie session scheme {scheme_id} has no cookie name",
                 )
             return
+        if scheme.kind == "custom":
+            return
         self.analysis.add(
             UNSUPPORTED,
             subject,

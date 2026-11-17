@@ -77,6 +77,7 @@ def generated_files(analysis: Analysis) -> list[tuple[str, str]]:
 def render_init(analysis: Analysis) -> str:
     lines = [start(f"Generated Python client for {analysis.document.title}.")]
     lines.append("from .client import Client, Request, Response")
+    lines.append("from .client import AuthAdapter, AuthAttachment, AuthContext")
     lines.append("from ._wire import MISSING, Missing")
     error_names = [analysis.errors[key].name for key in analysis.error_order]
     lines.append("from .errors import (")
@@ -101,6 +102,9 @@ def render_init(analysis: Analysis) -> str:
     lines.append("")
     exported = [
         "ApiError",
+        "AuthAdapter",
+        "AuthAttachment",
+        "AuthContext",
         "Client",
         "ConfigurationError",
         "DecodeError",

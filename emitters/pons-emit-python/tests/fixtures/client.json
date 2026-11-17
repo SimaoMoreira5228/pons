@@ -802,6 +802,20 @@
     "cookie_session": {
       "kind": "cookie_session",
       "cookie": "session"
+    },
+    "handshake": {
+      "kind": "custom",
+      "description": "Signs requests with a shared secret.",
+      "adapter": "handshake"
+    },
+    "unbound": {
+      "kind": "custom",
+      "description": "A custom scheme without an adapter id."
+    },
+    "soft": {
+      "kind": "custom",
+      "description": "An optional custom scheme.",
+      "adapter": "soft"
     }
   },
   "common_errors": [
@@ -1668,6 +1682,170 @@
         "value": {
           "from": "set_cookie",
           "name": "cookie_key"
+        }
+      },
+      "semantics": {
+        "safe": true,
+        "idempotent": true
+      }
+    },
+    {
+      "id": [
+        [
+          "custom"
+        ],
+        [
+          "required"
+        ]
+      ],
+      "method": "GET",
+      "path": [
+        {
+          "lit": "custom"
+        },
+        {
+          "lit": "required"
+        }
+      ],
+      "auth": {
+        "alternatives": [
+          [
+            "handshake"
+          ]
+        ],
+        "optional": false
+      },
+      "responses": [
+        {
+          "status": 200,
+          "content": "json",
+          "body": {
+            "ref": "Session"
+          }
+        }
+      ],
+      "semantics": {
+        "safe": true,
+        "idempotent": true
+      }
+    },
+    {
+      "id": [
+        [
+          "custom"
+        ],
+        [
+          "unbound"
+        ]
+      ],
+      "method": "GET",
+      "path": [
+        {
+          "lit": "custom"
+        },
+        {
+          "lit": "unbound"
+        }
+      ],
+      "auth": {
+        "alternatives": [
+          [
+            "unbound"
+          ]
+        ],
+        "optional": false
+      },
+      "responses": [
+        {
+          "status": 200,
+          "content": "json",
+          "body": {
+            "ref": "Session"
+          }
+        }
+      ],
+      "semantics": {
+        "safe": true,
+        "idempotent": true
+      }
+    },
+    {
+      "id": [
+        [
+          "custom"
+        ],
+        [
+          "optional"
+        ]
+      ],
+      "method": "GET",
+      "path": [
+        {
+          "lit": "custom"
+        },
+        {
+          "lit": "optional"
+        }
+      ],
+      "auth": {
+        "alternatives": [
+          [
+            "soft"
+          ]
+        ],
+        "optional": true
+      },
+      "responses": [
+        {
+          "status": 200,
+          "content": "json",
+          "body": {
+            "ref": "Session"
+          }
+        }
+      ],
+      "semantics": {
+        "safe": true,
+        "idempotent": true
+      }
+    },
+    {
+      "id": [
+        [
+          "tokens"
+        ],
+        [
+          "custom"
+        ]
+      ],
+      "method": "GET",
+      "path": [
+        {
+          "lit": "tokens"
+        },
+        {
+          "lit": "custom"
+        }
+      ],
+      "responses": [
+        {
+          "status": 200,
+          "content": "json",
+          "body": {
+            "ref": "Session"
+          }
+        }
+      ],
+      "errors": [],
+      "auth": {
+        "alternatives": [],
+        "optional": false
+      },
+      "provides": {
+        "scheme": "handshake",
+        "value": {
+          "from": "header",
+          "name": "X-Custom-Token"
         }
       },
       "semantics": {

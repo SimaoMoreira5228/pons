@@ -74,7 +74,7 @@ def render_imports(analysis: Analysis) -> list[str]:
             "import urllib.parse",
             "import urllib.request",
             f"from collections.abc import {collection_names}",
-            "from dataclasses import dataclass",
+            "from dataclasses import dataclass, field",
             "from typing import Any, Generic, TypeVar",
             "",
             "from . import _wire",
@@ -142,7 +142,17 @@ def build_tree(analysis: Analysis) -> NamespaceNode:
 
 
 def assign_class_names(root: NamespaceNode) -> None:
-    registry = naming.NameRegistry({"Client", "Request", "Response", "Transport"})
+    registry = naming.NameRegistry(
+        {
+            "AuthAdapter",
+            "AuthAttachment",
+            "AuthContext",
+            "Client",
+            "Request",
+            "Response",
+            "Transport",
+        }
+    )
     for node in walk_namespaces(root):
         base = "".join(naming.pascal([[name]]) for name in node.names) + "Namespace"
         node.class_name = registry.claim(base, separator="")
@@ -164,6 +174,7 @@ def render_client_class(
     lines.extend(
         [
             "        auth: Mapping[str, object] | None = None,",
+            "        auth_adapters: Mapping[str, AuthAdapter] | None = None,",
             "        credentials: dict[str, object] | None = None,",
             "        headers: Mapping[str, str] | None = None,",
             "        timeout: float = 10.0,",
@@ -175,6 +186,7 @@ def render_client_class(
             "        self.timeout = timeout",
             "        self.transport = transport or _urllib_transport",
             "        self._auth = dict(auth or {})",
+            "        self._auth_adapters = dict(auth_adapters or {})",
             "        self._expirations: dict[str, object] = {}",
         ]
     )
