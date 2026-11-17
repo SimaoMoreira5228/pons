@@ -185,8 +185,6 @@ class ValidationPlanner:
                     return capability
             return self.openness_capability(definition.openness)
         if definition.kind == "enum":
-            if definition.repr_kind == "untagged":
-                return "validation.enum.untagged"
             for variant in definition.variants:
                 if variant.payload_ty is not None:
                     capability = self.ref_capability(variant.payload_ty)
@@ -225,8 +223,6 @@ class ValidationPlanner:
             return None
         kind = ref.kind
         raw = ref.raw
-        if kind == "opaque":
-            return "validation.opaque"
         if kind == "nullable":
             inner = raw.get("inner")
             return (

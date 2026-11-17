@@ -187,6 +187,20 @@ def variant_shape(enum: str, expected: str, path: str) -> DecodeError:
     return DecodeError(f"{enum} expects {expected}", path=path)
 
 
+def no_untagged_variant(enum: str, path: str) -> DecodeError:
+    return DecodeError(f"the value matches no variant of {enum}", path=path)
+
+
+def ambiguous_untagged_variant(
+    enum: str, variants: list[str], path: str
+) -> DecodeError:
+    names = ", ".join(variants)
+    return DecodeError(
+        f"the value is ambiguous for {enum}; it matches the {names} variants",
+        path=path,
+    )
+
+
 def nullable(
     value: object, path: str, decode: Callable[[object, str], Any]
 ) -> Any:

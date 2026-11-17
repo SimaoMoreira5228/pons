@@ -54,22 +54,22 @@ def test_non_json_success_content_is_refused():
     assert_refused(document_with(change), marker="empty")
 
 
-def test_untagged_enum_is_refused():
+def test_invalid_enum_representation_is_refused():
     def change(value):
         value["types"]["Broken"] = {
             "kind": "enum",
             "name": ["broken"],
             "direction": "output",
-            "repr": {"kind": "untagged"},
+            "repr": {"kind": "mystery"},
             "variants": [
                 {"wire": "a", "ident": ["a"], "payload": {"kind": "unit"}}
             ],
         }
 
-    assert_refused(document_with(change), marker="untagged")
+    assert_refused(document_with(change), marker="mystery")
 
 
-def test_opaque_value_is_refused():
+def test_opaque_value_is_supported():
     def change(value):
         value["types"]["Thing"]["fields"][0]["ty"] = {
             "kind": "opaque",
@@ -77,7 +77,12 @@ def test_opaque_value_is_refused():
             "wire": "json",
         }
 
-    assert_refused(document_with(change), marker="opaque")
+    response = support.emit(document_with(change))
+    assert response.get("error") is None
+    assert response["coverage"]["opaque"] == [
+        "operations.things.get",
+        "types.Thing",
+    ]
 
 
 def test_invalid_openness_is_refused():

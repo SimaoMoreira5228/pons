@@ -33,7 +33,9 @@ def uses_field(analysis: Analysis) -> bool:
 
 
 def uses_any(analysis: Analysis) -> bool:
-    return any(plan.openness == "preserve_opaque" for plan in analysis.types)
+    return analysis.uses_opaque or any(
+        plan.openness == "preserve_opaque" for plan in analysis.types
+    )
 
 
 def render_type(analysis: Analysis, plan: TypePlan) -> list[str]:
@@ -259,6 +261,14 @@ def variant_decode(
     content = literal(plan.content)
     payload = variant.payload_kind != "unit"
     lines: list[str] = []
+    if plan.repr_kind == "untagged":
+        if not payload:
+            lines.append("        if value is not None:")
+            lines.append(
+                f"            raise _wire.variant_mismatch({literal(plan.name)}, {wire}, value, path)"
+            )
+            return lines + ["        return cls()"]
+        return payload_decode(analysis, variant, "value", "path")
     if plan.repr_kind == "string":
         lines.append("        text = _wire.str_of(value, path)")
         lines.append(f"        if text != {wire}:")
@@ -355,6 +365,16 @@ def variant_encode(
     tag = literal(plan.tag)
     content = literal(plan.content)
     payload = variant.payload_kind != "unit"
+    if plan.repr_kind == "untagged":
+        if not payload:
+            return ["        return None"]
+        if variant.payload_kind == "struct":
+            return [
+                "        payload: dict[str, object] = {}",
+                *encode_fields(analysis, variant.fields, "self", "payload"),
+                "        return payload",
+            ]
+        return [f"        return {payload_encode(analysis, variant)}"]
     if plan.repr_kind == "string":
         return [f"        return {wire}"]
     if plan.repr_kind == "external":
@@ -412,6 +432,28 @@ def render_enum_decoder(plan: TypePlan) -> list[str]:
     lines = [
         f"def decode_{plan.name}(value: object, path: str = \"\") -> {plan.name}:"
     ]
+    if plan.repr_kind == "untagged":
+        lines.append("    matches: list[tuple[str, object]] = []")
+        lines.append("    for wire, decode in [")
+        for variant in plan.variants:
+            lines.append(
+                f"        ({literal(variant.wire)}, {variant.name}.from_wire),"
+            )
+        lines.append("    ]:")
+        lines.append("        try:")
+        lines.append("            matches.append((wire, decode(value, path)))")
+        lines.append("        except _wire.DecodeError:")
+        lines.append("            pass")
+        lines.append("    if not matches:")
+        lines.append(
+            f"        raise _wire.no_untagged_variant({literal(plan.name)}, path)"
+        )
+        lines.append("    if len(matches) > 1:")
+        lines.append(
+            f"        raise _wire.ambiguous_untagged_variant({literal(plan.name)}, [wire for wire, _ in matches], path)"
+        )
+        lines.append("    return matches[0][1]")
+        return lines
     if plan.repr_kind == "string":
         lines.append("    text = _wire.str_of(value, path)")
         for variant in plan.variants:

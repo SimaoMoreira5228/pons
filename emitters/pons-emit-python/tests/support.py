@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import copy
+import importlib
 import json
+import sys
 from pathlib import Path
 from typing import Any
 
@@ -74,6 +76,39 @@ def write_files(response: dict[str, Any], directory: Path) -> list[Path]:
         destination.write_text(file["content"], encoding="utf-8")
         written.append(destination)
     return written
+
+
+class Generated:
+    def __init__(
+        self,
+        directory: Path,
+        document: dict[str, Any],
+        package: str,
+        *,
+        options: dict[str, Any] | None = None,
+        mode: str = "strict",
+    ) -> None:
+        merged = {"package": package}
+        if options is not None:
+            merged.update(options)
+        self.response = emit(document, mode=mode, options=merged)
+        assert self.response.get("error") is None, self.response.get("error")
+        write_files(self.response, directory)
+        self.package = package
+        self.directory = directory
+        sys.path.insert(0, str(directory))
+        importlib.invalidate_caches()
+        self.api = importlib.import_module(package)
+        self.types = importlib.import_module(package + ".types")
+        self.errors = importlib.import_module(package + ".errors")
+        self.wire = importlib.import_module(package + "._wire")
+
+    def close(self) -> None:
+        sys.path.remove(str(self.directory))
+        for name in list(sys.modules):
+            if name == self.package or name.startswith(self.package + "."):
+                del sys.modules[name]
+        importlib.invalidate_caches()
 
 
 def subjects(document: dict[str, Any]) -> set[str]:

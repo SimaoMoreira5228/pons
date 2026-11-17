@@ -30,13 +30,14 @@ def test_manifest_declares_the_supported_subset():
         "external",
         "internal",
         "adjacent",
+        "untagged",
     ]
     assert capabilities["direction_split"] is True
     assert capabilities["provides"] is True
     assert capabilities["custom_auth"] is False
     assert capabilities["flattened"] is False
     assert capabilities["wide_integers"] is True
-    assert capabilities["opaque"] is False
+    assert capabilities["opaque"] is True
     assert capabilities["object_openness"] == [
         "reject",
         "preserve_typed",
@@ -47,6 +48,8 @@ def test_manifest_declares_the_supported_subset():
     assert validation["backends"] == ["builtin"]
     assert validation["capabilities"]["validation.scalars"] == "exact"
     assert validation["capabilities"]["validation.formats"] == "exact"
+    assert validation["capabilities"]["validation.enum.untagged"] == "exact"
+    assert validation["capabilities"]["validation.opaque"] == "exact"
     assert "validation.stream" not in validation["capabilities"]
 
 

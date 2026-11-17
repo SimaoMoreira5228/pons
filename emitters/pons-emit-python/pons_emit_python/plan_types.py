@@ -12,7 +12,9 @@ from .document import Field, TypeDef, TypeRef, _decode_field, decode_type_ref
 if TYPE_CHECKING:
     from .analysis import Analysis
 
-SUPPORTED_ENUMS = frozenset({"string", "external", "internal", "adjacent"})
+SUPPORTED_ENUMS = frozenset(
+    {"string", "external", "internal", "adjacent", "untagged"}
+)
 
 
 @dataclass(slots=True)
@@ -438,12 +440,9 @@ class TypePlanner:
         if kind == "any":
             return True
         if kind == "opaque":
-            self.analysis.add(
-                UNSUPPORTED,
-                subject,
-                f"{label} uses the opaque codec {raw.get('codec')!r}, which this emitter does not implement",
-            )
-            return False
+            self.analysis.uses_opaque = True
+            self.analysis.opaque.add(subject)
+            return True
         if kind == "nullable":
             inner = raw.get("inner")
             if inner is None:

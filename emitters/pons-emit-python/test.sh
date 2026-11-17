@@ -28,12 +28,22 @@ assert manifest["capabilities"]["enum_reprs"] == [
     "external",
     "internal",
     "adjacent",
+    "untagged",
 ], manifest
 assert manifest["capabilities"]["pagination"] == [
     "pagination.cursor",
     "pagination.offset",
 ], manifest
+assert manifest["capabilities"]["opaque"] is True, manifest
 assert manifest["capabilities"]["validation"]["backends"] == ["builtin"], manifest
+assert (
+    manifest["capabilities"]["validation"]["capabilities"]["validation.enum.untagged"]
+    == "exact"
+), manifest
+assert (
+    manifest["capabilities"]["validation"]["capabilities"]["validation.opaque"]
+    == "exact"
+), manifest
 PY
 
 cargo build -q --manifest-path "$root/../../Cargo.toml" -p pons-cli
@@ -49,6 +59,11 @@ test -f "$work/client/pons_client/client.py"
 "$pons" emit --target python "$root/../../spec/fixtures/paginated.json" "$work/paginated"
 test -f "$work/paginated/pons_client/client.py"
 grep -q "def list_all(" "$work/paginated/pons_client/client.py"
+
+"$pons" emit --target python "$root/tests/fixtures/untagged_opaque.json" "$work/untagged_opaque"
+test -f "$work/untagged_opaque/pons_client/types.py"
+grep -q "def decode_Shape(" "$work/untagged_opaque/pons_client/types.py"
+grep -q "from typing import Any" "$work/untagged_opaque/pons_client/types.py"
 
 cat > "$work/pons.toml" <<EOF
 [project]

@@ -200,7 +200,7 @@ def test_invalid_openness_is_still_refused():
     assert "invalid object openness" in response["error"]
 
 
-def test_untagged_is_still_refused():
+def test_untagged_enum_emits(tmp_path):
     document = support.base_document()
     document["types"]["Broken"] = {
         "kind": "enum",
@@ -209,6 +209,25 @@ def test_untagged_is_still_refused():
         "repr": {"kind": "untagged"},
         "variants": [{"wire": "a", "ident": ["a"], "payload": {"kind": "unit"}}],
     }
+    response = emit_package(document)
+    assert response["coverage"]["unsupported"] == []
+    support.write_files(response, tmp_path)
+    compiled(tmp_path)
+    types = (tmp_path / "pons_client" / "types.py").read_text()
+    assert "class BrokenA:" in types
+    assert "Broken = BrokenA" in types
+    assert "def decode_Broken(" in types
+
+
+def test_unknown_enum_representation_is_refused():
+    document = support.base_document()
+    document["types"]["Broken"] = {
+        "kind": "enum",
+        "name": ["broken"],
+        "direction": "output",
+        "repr": {"kind": "mystery"},
+        "variants": [{"wire": "a", "ident": ["a"], "payload": {"kind": "unit"}}],
+    }
     response = support.emit(document)
     assert response["files"] == []
-    assert "untagged" in response["error"]
+    assert "mystery" in response["error"]

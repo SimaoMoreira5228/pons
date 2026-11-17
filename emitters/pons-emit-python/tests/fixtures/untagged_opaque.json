@@ -1,0 +1,48 @@
+{
+  "ir_version": "0.3",
+  "info": {"title": "Untagged and opaque", "version": "1"},
+  "types": {
+    "Shape": {
+      "kind": "enum",
+      "name": ["shape"],
+      "direction": "output",
+      "repr": {"kind": "untagged"},
+      "variants": [
+        {
+          "wire": "none",
+          "ident": ["none"],
+          "payload": {"kind": "unit"}
+        },
+        {
+          "wire": "note",
+          "ident": ["note"],
+          "payload": {
+            "kind": "struct",
+            "fields": [
+              {
+                "wire": "text",
+                "ident": ["text"],
+                "ty": {"kind": "opaque", "codec": "custom", "wire": "text"},
+                "presence": "required"
+              }
+            ]
+          }
+        }
+      ]
+    }
+  },
+  "auth_schemes": {},
+  "common_errors": [],
+  "operations": [
+    {
+      "id": [["shapes"], ["get"]],
+      "method": "GET",
+      "path": [{"lit": "shapes"}],
+      "responses": [
+        {"status": 200, "content": "json", "body": {"ref": "Shape"}}
+      ],
+      "auth": {"alternatives": [], "optional": false},
+      "semantics": {"safe": true, "idempotent": true}
+    }
+  ]
+}

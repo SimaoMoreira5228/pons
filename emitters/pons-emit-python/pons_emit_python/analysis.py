@@ -31,7 +31,9 @@ class Analysis:
         self.package = options.package
         self.problems: list[Problem] = []
         self.unsupported: set[str] = set()
+        self.opaque: set[str] = set()
         self.uses_decimal = False
+        self.uses_opaque = False
         self.type_planner = TypePlanner(self)
         self.type_planner.build()
         self.type_names = self.type_planner.type_names
@@ -73,42 +75,70 @@ class Analysis:
         subjects = {f"types.{type_id}" for type_id in self.document.types}
         subjects.update(f"operations.{plan.id}" for plan in self.operations)
         unsupported = set(self.unsupported)
-        self.propagate(unsupported)
-        exact = sorted(subjects - unsupported)
+        self.propagate_unsupported(unsupported)
+        opaque = set(self.opaque)
+        self.propagate_opaque(opaque)
+        opaque -= unsupported
+        exact = sorted(subjects - unsupported - opaque)
         return {
             "exact": exact,
-            "opaque": [],
+            "opaque": sorted(opaque),
             "lossy": [],
             "unsupported": sorted(unsupported),
         }
 
-    def propagate(self, unsupported: set[str]) -> None:
+    def propagate_unsupported(self, unsupported: set[str]) -> None:
         unsupported_types = {
             subject[len("types.") :]
             for subject in unsupported
             if subject.startswith("types.")
         }
+        self.propagate_types(
+            unsupported_types,
+            lambda type_id: unsupported.add(f"types.{type_id}"),
+        )
+        self.propagate_operations(
+            unsupported_types,
+            unsupported,
+            lambda subject: unsupported.add(subject),
+        )
+
+    def propagate_opaque(self, opaque: set[str]) -> None:
+        opaque_types = {
+            subject[len("types.") :]
+            for subject in opaque
+            if subject.startswith("types.")
+        }
+        self.propagate_types(
+            opaque_types, lambda type_id: opaque.add(f"types.{type_id}")
+        )
+        self.propagate_operations(
+            opaque_types, opaque, lambda subject: opaque.add(subject)
+        )
+
+    def propagate_types(self, marked: set[str], mark) -> None:
         changed = True
         while changed:
             changed = False
             for type_id, definition in self.document.types.items():
-                if type_id in unsupported_types:
+                if type_id in marked:
                     continue
                 if any(
-                    ref.id in unsupported_types
-                    for ref in self.definition_refs(definition)
+                    ref.id in marked for ref in self.definition_refs(definition)
                 ):
-                    unsupported_types.add(type_id)
-                    unsupported.add(f"types.{type_id}")
+                    marked.add(type_id)
+                    mark(type_id)
                     changed = True
+
+    def propagate_operations(
+        self, type_ids: set[str], subjects: set[str], mark
+    ) -> None:
         for plan in self.operations:
             subject = f"operations.{plan.id}"
-            if subject in unsupported:
+            if subject in subjects:
                 continue
-            if any(
-                ref.id in unsupported_types for ref in self.operation_refs(plan)
-            ):
-                unsupported.add(subject)
+            if any(ref.id in type_ids for ref in self.operation_refs(plan)):
+                mark(subject)
 
     def definition_refs(self, definition: TypeDef) -> list[TypeRef]:
         references: list[TypeRef] = []
