@@ -1,11 +1,13 @@
+mod containers;
 mod enums;
 mod objects;
 mod patterns;
 mod scalars;
+mod wire;
 
-pub(crate) use self::scalars::{Place, WireForm};
+pub(crate) use self::wire::{Place, WireForm};
 
-use pons_ir::{EnumRepr, TypeDef, TypeKind, TypeRef};
+use pons_ir::{EnumRepr, InlineType, TypeDef, TypeKind, TypeRef};
 use serde_json::{Map, Value, json};
 
 use crate::{Builder, EmitError};
@@ -95,6 +97,55 @@ impl<'a> Builder<'a> {
                 Ok(reference(&self.schema_names[&named.id]))
             }
             TypeRef::Inline(ty) => self.inline_schema(ty),
+        }
+    }
+
+    fn inline_schema(&self, ty: &InlineType) -> Result<Value, EmitError> {
+        match ty {
+            InlineType::Bool => Ok(json!({"type":"boolean"})),
+            InlineType::Int {
+                bits,
+                signed,
+                wire,
+                minimum,
+                maximum,
+                multiple_of,
+            } => scalars::integer_schema(*bits, *signed, wire, minimum, maximum, multiple_of),
+            InlineType::Float {
+                bits,
+                minimum,
+                maximum,
+                exclusive_minimum,
+                exclusive_maximum,
+                multiple_of,
+            } => Ok(scalars::float_schema(
+                *bits,
+                minimum,
+                maximum,
+                exclusive_minimum,
+                exclusive_maximum,
+                multiple_of,
+            )),
+            InlineType::Decimal { wire } => scalars::decimal_schema(wire),
+            InlineType::String {
+                format,
+                min_length,
+                max_length,
+                pattern,
+            } => scalars::string_schema(format, min_length, max_length, pattern),
+            InlineType::Bytes { encoding } => scalars::bytes_schema(encoding),
+            InlineType::Null => Ok(json!({"type":"null"})),
+            InlineType::Any => Ok(json!({})),
+            InlineType::Opaque { codec, wire, .. } => Ok(scalars::opaque_schema(codec, wire)),
+            InlineType::Nullable { inner } => self.nullable_schema(inner),
+            InlineType::Array { item, unique } => self.array_schema(item, unique),
+            InlineType::Map { key, value } => self.map_schema(key, value),
+            InlineType::Tuple { items } => self.tuple_schema(items),
+            InlineType::Struct {
+                fields,
+                flattened,
+                openness,
+            } => self.inline_struct_schema(fields, flattened, openness),
         }
     }
 }

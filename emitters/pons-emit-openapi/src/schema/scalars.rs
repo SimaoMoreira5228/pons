@@ -1,11 +1,8 @@
-use pons_ir::{
-    ByteEncoding, DecimalWire, EnumRepr, InlineType, IntegerWire, TypeKind, TypeRef, VariantPayload,
-};
+use pons_ir::{ByteEncoding, DecimalWire, FieldFormat, IntegerWire, OpaqueWire};
 use serde_json::{Value, json};
 
-use super::objects::fields_schema_with;
 use super::patterns::stated_pattern;
-use crate::{Builder, EmitError};
+use crate::EmitError;
 
 const BASE64_PATTERN: &str = r"^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$";
 const BASE64URL_PATTERN: &str =
@@ -15,306 +12,146 @@ const DECIMAL_PATTERN: &str = r"^-?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?$";
 const SIGNED_INTEGER_PATTERN: &str = "^-?(0|[1-9][0-9]*)$";
 const UNSIGNED_INTEGER_PATTERN: &str = "^(0|[1-9][0-9]*)$";
 
-impl<'a> Builder<'a> {
-    pub(super) fn inline_schema(&self, ty: &InlineType) -> Result<Value, EmitError> {
-        Ok(match ty {
-            InlineType::Bool => json!({"type":"boolean"}),
-            InlineType::Int {
-                bits,
-                signed,
-                wire,
-                minimum,
-                maximum,
-                multiple_of,
-            } => {
-                if *wire == IntegerWire::String {
-                    let pattern = if *signed {
-                        SIGNED_INTEGER_PATTERN
-                    } else {
-                        UNSIGNED_INTEGER_PATTERN
-                    };
-                    json!({
-                        "type":"string",
-                        "pattern":stated_pattern(pattern)?,
-                        "x-pons-integer":{
-                            "bits":bits,
-                            "signed":signed,
-                            "wire":"string",
-                            "minimum":minimum,
-                            "maximum":maximum,
-                            "multiple_of":multiple_of
-                        }
-                    })
-                } else {
-                    let mut schema = json!({"type":"integer"});
-                    match (*bits, *signed) {
-                        (32, true) => schema["format"] = json!("int32"),
-                        (64, true) => schema["format"] = json!("int64"),
-                        _ => {}
-                    }
-                    schema["x-pons-integer"] = json!({"bits":bits,"signed":signed,"wire":"number"});
-                    if let Some((minimum, maximum)) = integer_bounds(*bits, *signed) {
-                        schema["minimum"] = minimum;
-                        schema["maximum"] = maximum;
-                    }
-                    if let Some(minimum) = minimum {
-                        schema["minimum"] = minimum.clone();
-                    }
-                    if let Some(maximum) = maximum {
-                        schema["maximum"] = maximum.clone();
-                    }
-                    if let Some(multiple_of) = multiple_of {
-                        schema["multipleOf"] = multiple_of.clone();
-                    }
-                    schema
-                }
-            }
-            InlineType::Float {
-                bits,
-                minimum,
-                maximum,
-                exclusive_minimum,
-                exclusive_maximum,
-                multiple_of,
-            } => {
-                let mut schema =
-                    json!({"type":"number","format":if *bits == 32 {"float"} else {"double"}});
-                if *bits == 32 {
-                    schema["minimum"] = json!(-(f32::MAX as f64));
-                    schema["maximum"] = json!(f32::MAX as f64);
-                }
-                if let Some(minimum) = minimum {
-                    schema["minimum"] = minimum.clone();
-                }
-                if let Some(maximum) = maximum {
-                    schema["maximum"] = maximum.clone();
-                }
-                if let Some(minimum) = exclusive_minimum {
-                    schema["exclusiveMinimum"] = minimum.clone();
-                }
-                if let Some(maximum) = exclusive_maximum {
-                    schema["exclusiveMaximum"] = maximum.clone();
-                }
-                if let Some(multiple_of) = multiple_of {
-                    schema["multipleOf"] = multiple_of.clone();
-                }
-                schema
-            }
-            InlineType::Decimal { wire } => {
-                let mut schema = json!({
-                    "type":if *wire == DecimalWire::String {"string"} else {"number"},
-                });
-                if *wire == DecimalWire::String {
-                    schema["pattern"] = stated_pattern(DECIMAL_PATTERN)?;
-                }
-                schema["x-pons-decimal-wire"] = json!(wire);
-                schema
-            }
-            InlineType::String {
-                format,
-                min_length,
-                max_length,
-                pattern,
-            } => {
-                let mut schema = json!({"type":"string"});
-                if let Some(format) = format {
-                    schema["x-pons-format"] = json!(format);
-                }
-                if let Some(minimum) = min_length {
-                    schema["minLength"] = json!(minimum);
-                }
-                if let Some(maximum) = max_length {
-                    schema["maxLength"] = json!(maximum);
-                }
-                if let Some(pattern) = pattern {
-                    schema["pattern"] = stated_pattern(pattern)?;
-                }
-                schema
-            }
-            InlineType::Bytes { encoding } => match encoding {
-                ByteEncoding::Base64 => json!({
-                    "type":"string",
-                    "contentEncoding":"base64",
-                    "pattern":stated_pattern(BASE64_PATTERN)?,
-                }),
-                ByteEncoding::Base64url => json!({
-                    "type":"string",
-                    "contentEncoding":"base64url",
-                    "pattern":stated_pattern(BASE64URL_PATTERN)?,
-                }),
-                ByteEncoding::Hex => json!({
-                    "type":"string",
-                    "pattern":stated_pattern(HEX_PATTERN)?,
-                }),
-                ByteEncoding::Array => {
-                    json!({"type":"array","items":{"type":"integer","minimum":0,"maximum":255}})
-                }
-            },
-            InlineType::Null => json!({"type":"null"}),
-            InlineType::Any => json!({}),
-            InlineType::Opaque { codec, wire, .. } => {
-                let mut schema = json!({});
-                schema["x-pons-opaque"] = json!({"codec":codec,"wire":wire});
-                schema
-            }
-            InlineType::Nullable { inner } => {
-                json!({"anyOf":[self.type_schema(inner)?,{"type":"null"}]})
-            }
-            InlineType::Array { item, unique } => {
-                let mut schema = json!({"type":"array","items":self.type_schema(item)?});
-                if let Some(unique) = unique {
-                    schema["uniqueItems"] = json!(unique);
-                }
-                schema
-            }
-            InlineType::Map { key, value } => {
-                json!({
-                    "type":"object",
-                    "propertyNames":self.type_schema(key)?,
-                    "additionalProperties":self.type_schema(value)?
-                })
-            }
-            InlineType::Tuple { items } => {
-                json!({"type":"array","prefixItems":items.iter().map(|item| self.type_schema(item)).collect::<Result<Vec<_>,_>>()?,"minItems":items.len(),"maxItems":items.len(),"items":false})
-            }
-            InlineType::Struct {
-                fields,
-                flattened,
-                openness,
-            } => {
-                let mut all: Vec<&pons_ir::Field> = fields.iter().collect();
-                for member in flattened {
-                    let Some((inner, _)) = self.object_fields(member, &mut Vec::new())? else {
-                        return Err(EmitError(
-                            "an inline struct member cannot be flattened because it is not a struct"
-                                .into(),
-                        ));
-                    };
-                    all.extend(inner);
-                }
-                let mut object = fields_schema_with(self, all)?;
-                object["additionalProperties"] = self.openness_schema(openness)?;
-                object
-            }
-        })
-    }
-
-    pub(crate) fn wire_form(
-        &self,
-        ty: &TypeRef,
-        place: Place,
-    ) -> Result<Option<WireForm>, EmitError> {
-        self.wire_form_of(ty, place, &mut Vec::new())
-    }
-
-    fn wire_form_of(
-        &self,
-        ty: &TypeRef,
-        place: Place,
-        visiting: &mut Vec<String>,
-    ) -> Result<Option<WireForm>, EmitError> {
-        let inline = match ty {
-            TypeRef::Inline(inline) => inline,
-            TypeRef::Named(named) => {
-                let definition = self
-                    .document
-                    .types
-                    .get(&named.id)
-                    .ok_or_else(|| EmitError(format!("unknown type {}", named.id)))?;
-                if let Some(wire) = &named.variant {
-                    let TypeKind::Enum { variants, .. } = &definition.definition else {
-                        return Err(EmitError(format!("type {} is not an enum", named.id)));
-                    };
-                    let Some(variant) = variants.iter().find(|one| &one.wire == wire) else {
-                        return Err(EmitError(format!("unknown variant {wire}")));
-                    };
-                    return match &variant.payload {
-                        VariantPayload::Unit => Ok(Some(WireForm::Text)),
-                        VariantPayload::Newtype { ty } => self.wire_form_of(ty, place, visiting),
-                        VariantPayload::Struct { .. } | VariantPayload::Tuple { .. } => {
-                            Ok(Some(WireForm::Json))
-                        }
-                    };
-                }
-                if visiting.contains(&named.id) {
-                    return Err(EmitError(format!(
-                        "the type {} cannot be resolved because newtypes form a cycle",
-                        named.id
-                    )));
-                }
-                visiting.push(named.id.clone());
-                let result = match &definition.definition {
-                    TypeKind::Newtype { inner } => self.wire_form_of(inner, place, visiting),
-                    TypeKind::Struct { .. } => Ok(Some(WireForm::Json)),
-                    TypeKind::Enum { repr, .. } => Ok(match repr {
-                        EnumRepr::String => Some(WireForm::Text),
-
-                        EnumRepr::External => None,
-                        EnumRepr::Internal { .. }
-                        | EnumRepr::Adjacent { .. }
-                        | EnumRepr::Untagged => Some(WireForm::Json),
-                    }),
-                };
-                visiting.pop();
-                return result;
-            }
+pub(super) fn integer_schema(
+    bits: u16,
+    signed: bool,
+    wire: &IntegerWire,
+    minimum: &Option<Value>,
+    maximum: &Option<Value>,
+    multiple_of: &Option<Value>,
+) -> Result<Value, EmitError> {
+    if *wire == IntegerWire::String {
+        let pattern = if signed {
+            SIGNED_INTEGER_PATTERN
+        } else {
+            UNSIGNED_INTEGER_PATTERN
         };
-        Ok(Some(match inline {
-            InlineType::String { .. }
-            | InlineType::Int {
-                wire: IntegerWire::String,
-                ..
+        return Ok(json!({
+            "type":"string",
+            "pattern":stated_pattern(pattern)?,
+            "x-pons-integer":{
+                "bits":bits,
+                "signed":signed,
+                "wire":"string",
+                "minimum":minimum,
+                "maximum":maximum,
+                "multiple_of":multiple_of
             }
-            | InlineType::Decimal {
-                wire: DecimalWire::String,
-            }
-            | InlineType::Bytes {
-                encoding: ByteEncoding::Base64 | ByteEncoding::Base64url | ByteEncoding::Hex,
-            } => WireForm::Text,
-
-            InlineType::Bool
-            | InlineType::Int {
-                wire: IntegerWire::Number,
-                ..
-            }
-            | InlineType::Float { .. }
-            | InlineType::Decimal {
-                wire: DecimalWire::Number,
-            }
-            | InlineType::Any => match place {
-                Place::Header => WireForm::Text,
-                Place::Part { .. } => WireForm::Json,
-            },
-
-            InlineType::Opaque { .. } | InlineType::Null => return Ok(None),
-            InlineType::Nullable { inner } => {
-                return match place {
-                    Place::Part { required: true } => Ok(None),
-                    place => self.wire_form_of(inner, place, visiting),
-                };
-            }
-            InlineType::Array { .. }
-            | InlineType::Map { .. }
-            | InlineType::Tuple { .. }
-            | InlineType::Struct { .. } => WireForm::Json,
-
-            InlineType::Bytes {
-                encoding: ByteEncoding::Array,
-            } => WireForm::Json,
-        }))
+        }));
     }
+    let mut schema = json!({"type":"integer"});
+    match (bits, signed) {
+        (32, true) => schema["format"] = json!("int32"),
+        (64, true) => schema["format"] = json!("int64"),
+        _ => {}
+    }
+    schema["x-pons-integer"] = json!({"bits":bits,"signed":signed,"wire":"number"});
+    if let Some((minimum, maximum)) = integer_bounds(bits, signed) {
+        schema["minimum"] = minimum;
+        schema["maximum"] = maximum;
+    }
+    if let Some(minimum) = minimum {
+        schema["minimum"] = minimum.clone();
+    }
+    if let Some(maximum) = maximum {
+        schema["maximum"] = maximum.clone();
+    }
+    if let Some(multiple_of) = multiple_of {
+        schema["multipleOf"] = multiple_of.clone();
+    }
+    Ok(schema)
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum WireForm {
-    Text,
-    Json,
+pub(super) fn float_schema(
+    bits: u8,
+    minimum: &Option<Value>,
+    maximum: &Option<Value>,
+    exclusive_minimum: &Option<Value>,
+    exclusive_maximum: &Option<Value>,
+    multiple_of: &Option<Value>,
+) -> Value {
+    let mut schema = json!({"type":"number","format":if bits == 32 {"float"} else {"double"}});
+    if bits == 32 {
+        schema["minimum"] = json!(-(f32::MAX as f64));
+        schema["maximum"] = json!(f32::MAX as f64);
+    }
+    if let Some(minimum) = minimum {
+        schema["minimum"] = minimum.clone();
+    }
+    if let Some(maximum) = maximum {
+        schema["maximum"] = maximum.clone();
+    }
+    if let Some(minimum) = exclusive_minimum {
+        schema["exclusiveMinimum"] = minimum.clone();
+    }
+    if let Some(maximum) = exclusive_maximum {
+        schema["exclusiveMaximum"] = maximum.clone();
+    }
+    if let Some(multiple_of) = multiple_of {
+        schema["multipleOf"] = multiple_of.clone();
+    }
+    schema
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum Place {
-    Header,
-    Part { required: bool },
+pub(super) fn decimal_schema(wire: &DecimalWire) -> Result<Value, EmitError> {
+    let mut schema = json!({
+        "type":if *wire == DecimalWire::String {"string"} else {"number"},
+    });
+    if *wire == DecimalWire::String {
+        schema["pattern"] = stated_pattern(DECIMAL_PATTERN)?;
+    }
+    schema["x-pons-decimal-wire"] = json!(wire);
+    Ok(schema)
+}
+
+pub(super) fn string_schema(
+    format: &Option<FieldFormat>,
+    min_length: &Option<u64>,
+    max_length: &Option<u64>,
+    pattern: &Option<String>,
+) -> Result<Value, EmitError> {
+    let mut schema = json!({"type":"string"});
+    if let Some(format) = format {
+        schema["x-pons-format"] = json!(format);
+    }
+    if let Some(minimum) = min_length {
+        schema["minLength"] = json!(minimum);
+    }
+    if let Some(maximum) = max_length {
+        schema["maxLength"] = json!(maximum);
+    }
+    if let Some(pattern) = pattern {
+        schema["pattern"] = stated_pattern(pattern)?;
+    }
+    Ok(schema)
+}
+
+pub(super) fn bytes_schema(encoding: &ByteEncoding) -> Result<Value, EmitError> {
+    Ok(match encoding {
+        ByteEncoding::Base64 => json!({
+            "type":"string",
+            "contentEncoding":"base64",
+            "pattern":stated_pattern(BASE64_PATTERN)?,
+        }),
+        ByteEncoding::Base64url => json!({
+            "type":"string",
+            "contentEncoding":"base64url",
+            "pattern":stated_pattern(BASE64URL_PATTERN)?,
+        }),
+        ByteEncoding::Hex => json!({
+            "type":"string",
+            "pattern":stated_pattern(HEX_PATTERN)?,
+        }),
+        ByteEncoding::Array => {
+            json!({"type":"array","items":{"type":"integer","minimum":0,"maximum":255}})
+        }
+    })
+}
+
+pub(super) fn opaque_schema(codec: &str, wire: &OpaqueWire) -> Value {
+    let mut schema = json!({});
+    schema["x-pons-opaque"] = json!({"codec":codec,"wire":wire});
+    schema
 }
 
 fn integer_bounds(bits: u16, signed: bool) -> Option<(Value, Value)> {
@@ -343,19 +180,12 @@ fn integer_bounds(bits: u16, signed: bool) -> Option<(Value, Value)> {
 mod tests {
     use pons_ir::{
         ByteEncoding, DecimalWire, Direction, Field, FieldFormat, InlineType, IntegerWire,
-        NamedRef, ObjectOpenness, Presence, TypeDef, TypeKind, TypeRef,
+        ObjectOpenness, Presence, TypeDef, TypeKind, TypeRef,
     };
     use serde_json::{Value, json};
 
     fn fixture() -> pons_ir::Document {
         serde_json::from_str(include_str!("../../../../spec/fixtures/login.json")).unwrap()
-    }
-
-    fn named(id: &str) -> TypeRef {
-        TypeRef::Named(NamedRef {
-            id: id.into(),
-            variant: None,
-        })
     }
 
     fn string() -> TypeRef {
@@ -650,36 +480,6 @@ mod tests {
                 .is_valid(&instance),
             "a consumer that asserts formats must not read a constraint this emitter no longer states"
         );
-    }
-
-    #[test]
-    fn rejects_a_self_referential_newtype() {
-        let mut document = fixture();
-        document
-            .types
-            .insert("Loop".into(), newtype("loop", named("Loop")));
-        assert!(
-            crate::emit(&document)
-                .unwrap_err()
-                .0
-                .contains("the type Loop cannot be resolved because newtypes form a cycle")
-        );
-    }
-
-    #[test]
-    fn rejects_a_cycle_of_newtypes() {
-        let mut document = fixture();
-        document.types.insert("A".into(), newtype("a", named("B")));
-        document.types.insert("B".into(), newtype("b", named("A")));
-        let error = crate::emit(&document).unwrap_err();
-        for member in ["A", "B"] {
-            let expected =
-                format!("the type {member} cannot be resolved because newtypes form a cycle");
-            if error.0.contains(&expected) {
-                return;
-            }
-        }
-        panic!("{}", error.0);
     }
 
     #[test]
