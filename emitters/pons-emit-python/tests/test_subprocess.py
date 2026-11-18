@@ -44,7 +44,7 @@ def test_emit_reads_a_request_from_stdin():
 
 
 def test_emit_returns_an_error_response_for_an_unsupported_document():
-    payload = support.request(support.load_spec("login.json"), mode="lossy")
+    payload = support.request(support.load_spec("unsupported.json"), mode="lossy")
     result = run("emit", payload)
     assert result.returncode == 0, result.stderr
     response = json.loads(result.stdout)

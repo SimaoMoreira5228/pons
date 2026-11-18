@@ -141,24 +141,29 @@ def test_package_option_changes_the_import_name(tmp_path):
     assert "'FailureLocked'" in init
 
 
-def test_login_fixture_is_refused_for_streams():
-    response = support.emit(support.load_spec("login.json"))
-    assert response["files"] == []
-    assert response["error"]
-    messages = " ".join(item["message"] for item in response["diagnostics"])
-    assert "streams" in messages
-    assert "closed objects" not in messages
-    assert set(support.coverage_subjects(response)) == support.subjects(
-        support.load_spec("login.json")
+def test_login_fixture_emits_an_sse_stream():
+    document = support.load_spec("login.json")
+    response = support.emit(document, mode="lossy")
+    assert response.get("error") is None, response.get("error")
+    assert set(support.coverage_subjects(response)) == support.subjects(document)
+    paths = {file["path"] for file in response["files"]}
+    assert "pons_client/streams.py" in paths
+    client = next(
+        file["content"]
+        for file in response["files"]
+        if file["path"].endswith("client.py")
     )
+    assert "def watch(" in client
+    assert "_wire.sse_events" in client
 
 
 def test_failure_reports_every_subject_once():
     document = support.load("client.json")
     document["types"]["Profile"]["openness"] = "preserve_opaque"
     document["operations"][0]["stream"] = {
-        "kind": "sse",
-        "events": [{"event": "thing", "data": {"ref": "Session"}}],
+        "kind": "websocket",
+        "client": {"kind": "string"},
+        "server": {"ref": "Session"},
     }
     response = support.emit(document)
     subjects = support.coverage_subjects(response)

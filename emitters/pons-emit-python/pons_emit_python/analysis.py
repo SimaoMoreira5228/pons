@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
+from . import naming
 from .document import Document, Field, TypeDef, TypeRef, _decode_field, decode_type_ref
 from .plan_operations import OperationPlan, OperationPlanner
 from .plan_types import TypePlan, TypePlanner
@@ -39,6 +40,9 @@ class Analysis:
         self.type_names = self.type_planner.type_names
         self.types: list[TypePlan] = self.type_planner.types
         self.type_by_id = self.type_planner.by_id
+        self.stream_names = naming.NameRegistry(
+            {name for plan in self.types for name in plan.export_names()}
+        )
         self.operation_planner = OperationPlanner(self)
         self.operation_planner.build()
         self.operations: list[OperationPlan] = self.operation_planner.operations
@@ -201,6 +205,10 @@ class Analysis:
             references.append(plan.success.body)
             for header in plan.success.headers:
                 references.append(header.ty)
+        if plan.stream is not None:
+            references.extend(event.ty for event in plan.stream.events)
+            if plan.stream.item is not None:
+                references.append(plan.stream.item)
         for error in plan.errors:
             if error.body is not None:
                 references.append(error.body)

@@ -34,6 +34,7 @@ VALIDATION_CAPABILITIES = {
     "validation.recursion": "exact",
     "validation.variant_narrowing": "exact",
     "validation.headers": "exact",
+    "validation.stream": "exact",
 }
 
 
@@ -44,7 +45,7 @@ def build_manifest() -> dict:
         "protocol": {"min": "3.0", "max": "3.0"},
         "ir_version": {"min": "0.3", "max": "0.3"},
         "capabilities": {
-            "streaming": [],
+            "streaming": ["sse", "ndjson", "bytes"],
             "pagination": ["pagination.cursor", "pagination.offset"],
             "enum_reprs": [
                 "string",

@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from urllib.parse import quote
 
 from . import naming
 from .analysis import Analysis
@@ -18,6 +17,15 @@ from .render_client_runtime import (
     render_schemes,
 )
 from .render_pagination import render_iterator
+from .render_request import request_setup
+from .render_streams import render_stream_operation
+from .render_signature import (
+    alternatives_text,
+    operation_summary,
+    path_expression,
+    return_hint,
+    signature,
+)
 
 
 @dataclass
@@ -59,7 +67,7 @@ def render_imports(analysis: Analysis) -> list[str]:
     errors = ["ConfigurationError", "DecodeError", "PonsError", "TransportError", "UnexpectedStatusError"]
     errors.extend(analysis.errors[key].name for key in analysis.error_order)
     paginated = any(plan.pagination is not None for plan in analysis.operations)
-    collection_names = "Callable, Iterator, Mapping" if paginated else "Callable, Mapping"
+    collection_names = "Callable, Iterable, Iterator, Mapping"
     lines = [
         "from __future__ import annotations",
         "",
@@ -87,6 +95,8 @@ def render_imports(analysis: Analysis) -> list[str]:
     for name in errors:
         lines.append(f"    {name},")
     lines.append(")")
+    if any(plan.stream is not None for plan in analysis.operations):
+        lines.append("from . import streams as _streams")
     return lines
 
 
@@ -179,12 +189,14 @@ def render_client_class(
             "        headers: Mapping[str, str] | None = None,",
             "        timeout: float = 10.0,",
             "        transport: Transport | None = None,",
+            "        stream_transport: StreamTransport | None = None,",
             "    ) -> None:",
             "        self.base_url = base_url.rstrip(\"/\")",
             "        self.credentials = credentials if credentials is not None else {}",
             "        self.headers = dict(headers or {})",
             "        self.timeout = timeout",
             "        self.transport = transport or _urllib_transport",
+            "        self.stream_transport = stream_transport or _urllib_stream_transport",
             "        self._auth = dict(auth or {})",
             "        self._auth_adapters = dict(auth_adapters or {})",
             "        self._expirations: dict[str, object] = {}",
@@ -202,7 +214,10 @@ def render_client_class(
     lines.extend(render_client_helpers())
     for plan in root.methods:
         lines.append("")
-        lines.extend(render_operation(analysis, plan, "self", provides))
+        if plan.stream is not None:
+            lines.extend(render_stream_operation(analysis, plan, provides))
+        else:
+            lines.extend(render_operation(analysis, plan, "self", provides))
     return lines
 
 
@@ -228,7 +243,10 @@ def render_namespace(
         lines.append(f"        return self._{child.names[-1]}_namespace")
     for plan in node.methods:
         lines.append("")
-        lines.extend(render_operation(analysis, plan, "self._client", provides))
+        if plan.stream is not None:
+            lines.extend(render_stream_operation(analysis, plan, provides))
+        else:
+            lines.extend(render_operation(analysis, plan, "self._client", provides))
     return lines
 
 
@@ -254,90 +272,8 @@ def render_operation(
     return lines
 
 
-def signature(analysis: Analysis, plan: OperationPlan) -> str:
-    parts = ["self"]
-    for param in plan.params:
-        if param.kind == "path":
-            parts.append(f"{param.name}: {analysis.wire.client_hint(param.ty)}")
-    keywords: list[str] = []
-    if plan.query is not None:
-        keywords.append(f"query: _types.{plan.query.name} | None = None")
-    for param in plan.params:
-        if param.kind != "header":
-            continue
-        hint = analysis.wire.client_hint(param.ty)
-        if param.optional:
-            keywords.append(f"{param.name}: {hint} | None = None")
-        else:
-            keywords.append(f"{param.name}: {hint}")
-    if plan.body is not None:
-        hint = analysis.wire.client_hint(plan.body.ty)
-        if plan.body.required:
-            keywords.append(f"body: {hint}")
-        else:
-            keywords.append(f"body: {hint} | None = None")
-    if keywords:
-        parts.append("*")
-        parts.extend(keywords)
-    return ", ".join(parts)
-
-
-def return_hint(analysis: Analysis, plan: OperationPlan) -> str:
-    body = analysis.wire.client_hint(plan.success.body)
-    if plan.success.headers:
-        return f"Response[{body}]"
-    return body
-
-
-def operation_summary(plan: OperationPlan) -> str | None:
-    if plan.doc is None:
-        return None
-    summary = plan.doc.get("summary")
-    if isinstance(summary, str) and summary:
-        return " ".join(summary.split())
-    return None
-
-
 def render_request(analysis: Analysis, plan: OperationPlan) -> list[str]:
-    lines = ["        headers: dict[str, str] = {}"]
-    lines.append(
-        f"        headers[\"Accept\"] = {literal(plan.success.media)}"
-    )
-    for param in plan.params:
-        if param.kind != "header":
-            continue
-        text = analysis.wire.scalar_text(param.ty, param.name)
-        if param.optional:
-            lines.append(f"        if {param.name} is not None:")
-            lines.append(
-                f"            headers[{literal(param.wire)}] = {text}"
-            )
-        else:
-            lines.append(
-                f"        headers[{literal(param.wire)}] = {text}"
-            )
-    if plan.query is not None:
-        lines.append(
-            f"        pairs: list[tuple[str, str]] = {plan.query_function}(query) if query is not None else []"
-        )
-    else:
-        lines.append("        pairs: list[tuple[str, str]] = []")
-    if plan.body is None:
-        lines.append("        payload: bytes | None = None")
-    elif plan.body.required:
-        lines.append(f"        headers[\"Content-Type\"] = {literal(plan.body.media)}")
-        encoded = analysis.wire.encode_expr(plan.body.ty, "body")
-        lines.append(
-            f"        payload = json.dumps({encoded}, separators=(\",\", \":\"), ensure_ascii=False).encode(\"utf-8\")"
-        )
-    else:
-        lines.append("        payload: bytes | None = None")
-        lines.append("        if body is not None:")
-        lines.append(f"            headers[\"Content-Type\"] = {literal(plan.body.media)}")
-        encoded = analysis.wire.encode_expr(plan.body.ty, "body")
-        lines.append(
-            f"            payload = json.dumps({encoded}, separators=(\",\", \":\"), ensure_ascii=False).encode(\"utf-8\")"
-        )
+    lines = request_setup(analysis, plan)
     lines.append(
         "        status, response_headers, response_body = client._perform("
     )
@@ -350,24 +286,6 @@ def render_request(analysis: Analysis, plan: OperationPlan) -> list[str]:
     lines.append(f"            required={plan.required_auth},")
     lines.append("        )")
     return lines
-
-
-def alternatives_text(plan: OperationPlan) -> str:
-    return "[" + ", ".join(literal(alternative) for alternative in plan.alternatives) + "]"
-
-
-def path_expression(analysis: Analysis, plan: OperationPlan) -> str:
-    pieces: list[str] = []
-    for kind, value, ref in plan.path:
-        if kind == "lit":
-            pieces.append(literal("/" + quote(value, safe="")))
-        else:
-            assert ref is not None
-            text = analysis.wire.scalar_text(ref, value)
-            pieces.append("\"/\" + _wire.path_segment(" + text + ")")
-    if not pieces:
-        return literal("/")
-    return " + ".join(pieces)
 
 
 def render_success(

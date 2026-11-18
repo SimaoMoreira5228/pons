@@ -19,6 +19,7 @@ from .render import literal, start
 from .render_client import render_client
 from .render_errors import render_errors
 from .render_types import render_types
+from .render_streams import render_event_classes
 from .render_validation import render_validators
 from .render_wire import render_wire
 
@@ -64,6 +65,8 @@ def generated_files(analysis: Analysis) -> list[tuple[str, str]]:
         (f"{package}/client.py", render_client(analysis)),
         (f"{package}/_wire.py", render_wire()),
     ]
+    if any(plan.stream is not None for plan in analysis.operations):
+        files.append((f"{package}/streams.py", render_event_classes(analysis)))
     if analysis.validation_plan is not None:
         files.append(
             (f"{package}/validators.py", render_validators(analysis))
@@ -76,9 +79,20 @@ def generated_files(analysis: Analysis) -> list[tuple[str, str]]:
 
 def render_init(analysis: Analysis) -> str:
     lines = [start(f"Generated Python client for {analysis.document.title}.")]
-    lines.append("from .client import Client, Request, Response")
+    lines.append("from .client import Client, Request, Response, StreamResponse")
     lines.append("from .client import AuthAdapter, AuthAttachment, AuthContext")
     lines.append("from ._wire import MISSING, Missing")
+    stream_events = [
+        event
+        for plan in analysis.operations
+        if plan.stream is not None
+        for event in plan.stream.events
+    ]
+    if stream_events:
+        lines.append("from .streams import (")
+        for event in stream_events:
+            lines.append(f"    {event.class_name},")
+        lines.append(")")
     error_names = [analysis.errors[key].name for key in analysis.error_order]
     lines.append("from .errors import (")
     for name in [
@@ -113,12 +127,14 @@ def render_init(analysis: Analysis) -> str:
         "PonsError",
         "Request",
         "Response",
+        "StreamResponse",
         "TransportError",
         "UnexpectedStatusError",
     ]
     exported.extend(error_names)
     for plan in analysis.types:
         exported.extend(plan.export_names())
+    exported.extend(event.class_name for event in stream_events)
     lines.append("__all__ = [")
     for name in sorted(set(exported)):
         lines.append(f"    {literal(name)},")

@@ -7,7 +7,7 @@ import binascii
 import json
 import math
 import re
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Iterable, Iterator, Mapping
 from decimal import Decimal, InvalidOperation
 from typing import Any
 from urllib.parse import quote
@@ -450,3 +450,62 @@ def provide_value(
     if not isinstance(value, str):
         raise DecodeError("the provided credential is not a string", path=locator[1])
     return value
+
+
+def _stream_text(chunks: Iterable[bytes]) -> Iterator[str]:
+    for chunk in chunks:
+        yield chunk.decode("utf-8")
+
+
+def sse_events(chunks: Iterable[bytes]) -> Iterator[tuple[str, object]]:
+    event = ""
+    data: list[str] = []
+    buffer = ""
+    for text in _stream_text(chunks):
+        buffer += text
+        while "\n" in buffer:
+            line, buffer = buffer.split("\n", 1)
+            line = line.rstrip("\r")
+            if not line:
+                if data:
+                    yield event or "message", _stream_json("\n".join(data), "event")
+                    event = ""
+                    data = []
+                continue
+            if line.startswith(":"):
+                continue
+            field, _, value = line.partition(":")
+            if value.startswith(" "):
+                value = value[1:]
+            if field == "event":
+                event = value
+            elif field == "data":
+                data.append(value)
+    if buffer.strip():
+        field, _, value = buffer.partition(":")
+        if value.startswith(" "):
+            value = value[1:]
+        if field == "data":
+            data.append(value)
+    if data:
+        yield event or "message", _stream_json("\n".join(data), "event")
+
+
+def ndjson(chunks: Iterable[bytes]) -> Iterator[object]:
+    buffer = ""
+    for text in _stream_text(chunks):
+        buffer += text
+        while "\n" in buffer:
+            line, buffer = buffer.split("\n", 1)
+            line = line.strip()
+            if line:
+                yield _stream_json(line, "item")
+    if buffer.strip():
+        yield _stream_json(buffer.strip(), "item")
+
+
+def _stream_json(text: str, path: str) -> object:
+    try:
+        return json.loads(text)
+    except (ValueError, UnicodeDecodeError) as error:
+        raise DecodeError(str(error), path=path) from error

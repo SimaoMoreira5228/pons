@@ -96,8 +96,8 @@ def compiled(directory):
 
 def test_open_structs_emit_extra_fields_and_codecs(generated):
     assert generated.response["coverage"] == {
-        "exact": ["types.Count", "types.Opaque", "types.Typed"],
-        "opaque": [],
+        "exact": ["types.Count"],
+        "opaque": ["types.Opaque", "types.Typed"],
         "lossy": [],
         "unsupported": [],
     }

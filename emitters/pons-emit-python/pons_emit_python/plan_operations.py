@@ -17,6 +17,7 @@ from .document import (
 )
 from .plan_auth import CredentialPlanner
 from .plan_pagination import PaginationPlan, build_pagination
+from .plan_stream import StreamPlan, build_stream
 from .plan_types import TypePlan, is_nullable
 
 if TYPE_CHECKING:
@@ -97,7 +98,7 @@ class OperationPlan:
     provides: Provides | None
     pagination: PaginationPlan | None
     doc: dict[str, Any] | None
-    stream: bool
+    stream: StreamPlan | None
     namespace_path: list[str] = field(default_factory=list)
     method_name: str = ""
 
@@ -169,6 +170,13 @@ def ref_signature_ref(value: object) -> str:
         return "invalid"
 
 
+def plan_stream_media(operation: Operation) -> str | None:
+    stream = operation.stream
+    if stream is None:
+        return None
+    return stream.media or stream.content_type
+
+
 class OperationPlanner:
     def __init__(self, analysis: Analysis) -> None:
         self.analysis = analysis
@@ -212,7 +220,7 @@ class OperationPlanner:
             provides=operation.provides,
             pagination=None,
             doc=operation.doc,
-            stream=operation.stream,
+            stream=None,
         )
         if operation.method not in {
             "GET",
@@ -228,12 +236,7 @@ class OperationPlanner:
                 subject,
                 f"the operation uses the unsupported HTTP method {operation.method!r}",
             )
-        if operation.stream:
-            self.analysis.add(
-                UNSUPPORTED,
-                subject,
-                "the operation streams responses, which this emitter does not support",
-            )
+        plan.stream = build_stream(self.analysis, operation.stream, operation, subject)
         params = naming.NameRegistry(naming.parameter_reserved())
         self.build_path(plan, operation, params, subject)
         self.build_query(plan, operation, params, subject)
@@ -430,6 +433,8 @@ class OperationPlanner:
         plan.body = BodyPlan(name, body.ty, body.required, media_text(body.media))
 
     def build_success(self, operation: Operation, subject: str) -> SuccessPlan | None:
+        if operation.stream is not None:
+            return self.build_stream_success(operation, subject)
         if len(operation.responses) != 1:
             self.analysis.add(
                 UNSUPPORTED,
@@ -486,6 +491,53 @@ class OperationPlanner:
         status = response.status
         assert isinstance(status, int)
         return SuccessPlan(status, response.body, media_text(response.media), headers)
+
+    def build_stream_success(
+        self, operation: Operation, subject: str
+    ) -> SuccessPlan | None:
+        if len(operation.responses) != 1:
+            self.analysis.add(
+                UNSUPPORTED,
+                subject,
+                "the streaming operation needs exactly one success response",
+            )
+            return None
+        response = operation.responses[0]
+        if not is_exact_success(response.status):
+            self.analysis.add(
+                UNSUPPORTED,
+                subject,
+                f"the stream success status {status_key(response.status)} is not exact",
+            )
+            return None
+        if response.content != "stream":
+            self.analysis.add(
+                UNSUPPORTED,
+                subject,
+                f"the streaming response content is {response.content!r}",
+            )
+            return None
+        declared = media_text(response.media) if response.media is not None else ""
+        media = declared or plan_stream_media(operation) or ""
+        headers: list[ResponseHeaderPlan] = []
+        for header in response.headers:
+            if is_nullable(header.ty) or not self.analysis.type_planner.is_scalar(header.ty):
+                self.analysis.add(
+                    UNSUPPORTED,
+                    subject,
+                    f"the stream response header {header.wire} is not a scalar",
+                )
+                continue
+            if not self.analysis.type_planner.validate_ref(
+                header.ty, subject, f"the stream response header {header.wire}"
+            ):
+                continue
+            headers.append(
+                ResponseHeaderPlan(header.wire, header.ty, header.presence == "optional")
+            )
+        return SuccessPlan(
+            int(response.status), TypeRef(kind="any"), media, headers
+        )
 
     def build_errors(
         self, plan: OperationPlan, operation: Operation, subject: str

@@ -25,11 +25,12 @@ def assert_refused(document, *, marker=None, mode="strict"):
 def test_stream_is_refused():
     def change(value):
         value["operations"][0]["stream"] = {
-            "kind": "sse",
-            "events": [{"event": "thing", "data": {"ref": "Thing"}}],
+            "kind": "websocket",
+            "client": {"kind": "string"},
+            "server": {"ref": "Thing"},
         }
 
-    assert_refused(document_with(change), marker="streams")
+    assert_refused(document_with(change), marker="WebSocket")
 
 
 @pytest.mark.parametrize("content", ["multipart", "form", "text", "bytes"])

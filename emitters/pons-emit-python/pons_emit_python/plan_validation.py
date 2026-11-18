@@ -119,6 +119,11 @@ class ValidationPlanner:
         self.build_types()
         for plan in self.analysis.operations:
             self.register_ref(plan.success.body)
+            if plan.stream is not None:
+                for event in plan.stream.events:
+                    self.register_ref(event.ty)
+                if plan.stream.item is not None:
+                    self.register_ref(plan.stream.item)
             for header in plan.success.headers:
                 self.register_header(header.ty)
             for error in plan.errors:
@@ -263,10 +268,12 @@ class ValidationPlanner:
         return None
 
     def operation_capability(self, plan: object) -> str | None:
-        if getattr(plan, "stream", False):
-            return "validation.stream"
         references = [plan.success.body]
         references.extend(header.ty for header in plan.success.headers)
+        if plan.stream is not None:
+            references.extend(event.ty for event in plan.stream.events)
+            if plan.stream.item is not None:
+                references.append(plan.stream.item)
         for error in plan.errors:
             if error.body is not None:
                 references.append(error.body)

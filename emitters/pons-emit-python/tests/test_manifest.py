@@ -20,7 +20,7 @@ def test_manifest_declares_the_python_target():
 
 def test_manifest_declares_the_supported_subset():
     capabilities = build_manifest()["capabilities"]
-    assert capabilities["streaming"] == []
+    assert capabilities["streaming"] == ["sse", "ndjson", "bytes"]
     assert capabilities["pagination"] == [
         "pagination.cursor",
         "pagination.offset",
@@ -50,7 +50,7 @@ def test_manifest_declares_the_supported_subset():
     assert validation["capabilities"]["validation.formats"] == "exact"
     assert validation["capabilities"]["validation.enum.untagged"] == "exact"
     assert validation["capabilities"]["validation.opaque"] == "exact"
-    assert "validation.stream" not in validation["capabilities"]
+    assert validation["capabilities"]["validation.stream"] == "exact"
 
 
 def test_default_package_option_is_used():

@@ -205,6 +205,23 @@ class Pagination:
 
 
 @dataclass(slots=True)
+class StreamMessage:
+    event: str
+    data: TypeRef
+
+
+@dataclass(slots=True)
+class Stream:
+    kind: str
+    media: str = ""
+    events: list[StreamMessage] = field(default_factory=list)
+    item: TypeRef | None = None
+    content_type: str = ""
+    client: TypeRef | None = None
+    server: TypeRef | None = None
+
+
+@dataclass(slots=True)
 class Operation:
     id: list[list[str]]
     method: str
@@ -215,7 +232,7 @@ class Operation:
     responses: list[ResponseDef]
     errors: list[ErrorDef]
     errors_inherit: bool
-    stream: bool
+    stream: Stream | None
     auth: AuthRequirement
     provides: Provides | None
     pagination: Pagination | None
@@ -517,7 +534,9 @@ def _decode_operation(value: object, path: str) -> Operation:
         responses=responses,
         errors=errors,
         errors_inherit=_flag(data.get("errors_inherit"), f"{path}.errors_inherit", default=True),
-        stream=data.get("stream") is not None,
+        stream=None
+        if data.get("stream") is None
+        else _decode_stream(data["stream"], f"{path}.stream"),
         auth=AuthRequirement(
             alternatives=alternatives,
             optional=_flag(auth_data.get("optional"), f"{path}.auth.optional"),
@@ -530,6 +549,42 @@ def _decode_operation(value: object, path: str) -> Operation:
         else _decode_pagination(semantics["pagination"], f"{path}.semantics.pagination"),
         doc=_mapping(doc, f"{path}.doc") if doc is not None else None,
     )
+
+
+def _decode_stream(value: object, path: str) -> Stream:
+    data = _mapping(value, path)
+    kind = _text(data.get("kind"), f"{path}.kind")
+    if kind == "sse":
+        events = []
+        for index, item in enumerate(_sequence(data.get("events"), f"{path}.events")):
+            event_path = f"{path}.events[{index}]"
+            event = _mapping(item, event_path)
+            events.append(
+                StreamMessage(
+                    event=_text(event.get("event"), f"{event_path}.event"),
+                    data=decode_type_ref(event.get("data"), f"{event_path}.data"),
+                )
+            )
+        return Stream("sse", media="text/event-stream", events=events)
+    if kind == "ndjson":
+        return Stream(
+            "ndjson",
+            media="application/x-ndjson",
+            item=decode_type_ref(data.get("item"), f"{path}.item"),
+        )
+    if kind == "bytes":
+        return Stream(
+            "bytes",
+            media=_text(data.get("content_type"), f"{path}.content_type"),
+            content_type=_text(data.get("content_type"), f"{path}.content_type"),
+        )
+    if kind == "websocket":
+        return Stream(
+            "websocket",
+            client=decode_type_ref(data.get("client"), f"{path}.client"),
+            server=decode_type_ref(data.get("server"), f"{path}.server"),
+        )
+    raise IrError(f"{path}.kind is {kind!r}", f"{path}.kind")
 
 
 def _decode_scheme(value: object, path: str) -> AuthScheme:

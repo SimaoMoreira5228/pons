@@ -92,11 +92,16 @@ assert "types.User" in coverage["exact"], coverage
 assert "operations.events.watch" in coverage["exact"], coverage
 PY
 
-if "$pons" emit --target python "$root/../../spec/fixtures/login.json" "$work/login" --lossy > "$work/login.out" 2> "$work/login.err"; then
-    echo "login.json must be refused" >&2
+"$pons" emit --target python "$root/../../spec/fixtures/login.json" "$work/streams" --lossy
+test -f "$work/streams/pons_client/streams.py"
+grep -q "def watch(" "$work/streams/pons_client/client.py"
+grep -q "_wire.sse_events" "$work/streams/pons_client/client.py"
+
+if "$pons" emit --target python "$root/../../spec/fixtures/unsupported.json" "$work/unsupported" --lossy > "$work/unsupported.out" 2> "$work/unsupported.err"; then
+    echo "unsupported.json must be refused" >&2
     exit 1
 fi
-test ! -d "$work/login" || test -z "$(ls -A "$work/login")"
-grep -q "streams" "$work/login.err" "$work/login.out"
+test ! -d "$work/unsupported" || test -z "$(ls -A "$work/unsupported")"
+grep -q "WebSocket" "$work/unsupported.err" "$work/unsupported.out"
 
 echo "python emitter ok"

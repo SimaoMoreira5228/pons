@@ -147,6 +147,8 @@ class TypePlanner:
                 f"the struct {plan.id} uses flattened members, which this emitter does not support",
             )
         openness = self.openness(definition.openness)
+        if openness in {"preserve_typed", "preserve_opaque"}:
+            self.analysis.opaque.add(subject)
         if openness == "invalid":
             self.analysis.add(
                 UNSUPPORTED,

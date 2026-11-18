@@ -502,18 +502,30 @@ def test_invalid_validation_options_are_refused(options, marker):
 
 def test_validation_gap_refuses_strict_mode():
     document = support.base_document()
-    document["operations"][0]["stream"] = {
-        "kind": "sse",
-        "events": [{"event": "thing", "data": {"ref": "Thing"}}],
+    document["types"]["Other"] = {
+        "kind": "struct",
+        "name": ["other"],
+        "direction": "output",
+        "openness": "reject",
+        "fields": [
+            {
+                "wire": "value",
+                "ident": ["value"],
+                "ty": {"kind": "string"},
+                "presence": "required",
+            }
+        ],
     }
+    document["types"]["Thing"]["flattened"] = [{"ref": "Other"}]
     response = support.emit(
         document, options={"validation": {"backend": "builtin"}}
     )
     assert response["files"] == []
     assert "validation backend cannot validate" in response["error"]
-    assert "validation.stream" in response["error"]
+    assert "validation.object" in response["error"]
     assert response["validation_coverage"]["unsupported"] == [
-        "operations.things.get"
+        "operations.things.get",
+        "types.Thing",
     ]
 
     lossy = support.emit(
@@ -522,5 +534,6 @@ def test_validation_gap_refuses_strict_mode():
         options={"validation": {"backend": "builtin"}},
     )
     assert lossy["validation_coverage"]["unsupported"] == [
-        "operations.things.get"
+        "operations.things.get",
+        "types.Thing",
     ]
