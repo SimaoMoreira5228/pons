@@ -96,8 +96,10 @@ def render_stream_operation(
         from_wire = codec_expr(analysis, stream.server)
         lines.append("        connection = client._open_websocket(request)")
         validator = validator_expr(analysis, stream.server)
+        client_binary = binary_message(analysis, stream.client)
+        server_binary = binary_message(analysis, stream.server)
         lines.append(
-            f"        return TypedWebSocket(connection, lambda value: {to_wire}, {from_wire}, {validator})"
+            f"        return TypedWebSocket(connection, lambda value: {to_wire}, {from_wire}, {validator}, {client_binary}, {server_binary})"
         )
         return lines
     path = path_expression(analysis, plan)
@@ -207,3 +209,18 @@ def header_validator(analysis: Analysis, ref: object) -> str | None:
         return None
     name = analysis.validation_plan.header_for(ref)
     return None if name is None else f"_validators.{name}"
+
+
+def binary_message(analysis: Analysis, ref: object) -> bool:
+    if getattr(ref, "id", None):
+        definition = analysis.document.types.get(ref.id)
+        if definition is not None and definition.kind == "newtype" and definition.inner is not None:
+            return binary_message(analysis, definition.inner)
+        return False
+    kind = getattr(ref, "kind", None)
+    raw = getattr(ref, "raw", {})
+    if kind == "bytes":
+        return True
+    if kind == "opaque":
+        return raw.get("wire") == "bytes"
+    return False

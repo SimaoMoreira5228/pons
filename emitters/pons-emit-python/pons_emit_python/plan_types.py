@@ -140,12 +140,6 @@ class TypePlanner:
 
     def build_struct(self, plan: TypePlan, subject: str) -> None:
         definition = plan.definition
-        if definition.flattened:
-            self.analysis.add(
-                UNSUPPORTED,
-                subject,
-                f"the struct {plan.id} uses flattened members, which this emitter does not support",
-            )
         openness = self.openness(definition.openness)
         if openness in {"preserve_typed", "preserve_opaque"}:
             self.analysis.opaque.add(subject)
@@ -171,6 +165,15 @@ class TypePlanner:
             )
             if field_plan is not None:
                 plan.fields.append(field_plan)
+        self.merge_flattened(
+            plan,
+            definition,
+            subject,
+            names,
+            wires,
+            {plan.id},
+            definition.direction,
+        )
         if openness == "preserve_opaque":
             plan.openness = openness
             plan.extra_name = names.claim("extra")
@@ -184,6 +187,68 @@ class TypePlanner:
             ):
                 plan.extra = None
             plan.extra_name = names.claim("extra")
+
+    def merge_flattened(
+        self,
+        plan: TypePlan,
+        definition: TypeDef,
+        subject: str,
+        names: naming.NameRegistry,
+        wires: set[str],
+        visited: set[str],
+        direction: str,
+    ) -> None:
+        for ref in definition.flattened:
+            if ref.id is None:
+                self.analysis.add(
+                    UNSUPPORTED,
+                    subject,
+                    f"the struct {plan.id} flattens a member that is not a named struct",
+                )
+                continue
+            if ref.id in visited:
+                self.analysis.add(
+                    DOCUMENT,
+                    subject,
+                    f"the struct {plan.id} flattens {ref.id} in a cycle",
+                )
+                continue
+            target = self.analysis.document.types.get(ref.id)
+            if target is None or target.kind != "struct":
+                self.analysis.add(
+                    UNSUPPORTED,
+                    subject,
+                    f"the struct {plan.id} flattens {ref.id}, which is not a struct",
+                )
+                continue
+            if self.openness(target.openness) != "reject":
+                self.analysis.add(
+                    UNSUPPORTED,
+                    subject,
+                    f"the struct {plan.id} flattens the open struct {ref.id}",
+                )
+                continue
+            nested = visited | {ref.id}
+            self.merge_flattened(
+                plan,
+                target,
+                subject,
+                names,
+                wires,
+                nested,
+                direction,
+            )
+            for field in target.fields:
+                field_plan = self.build_field(
+                    field,
+                    subject,
+                    f"the flattened struct {ref.id}",
+                    names,
+                    wires,
+                    direction,
+                )
+                if field_plan is not None:
+                    plan.fields.append(field_plan)
 
     def preserve_value(
         self, raw: object, subject: str, label: str

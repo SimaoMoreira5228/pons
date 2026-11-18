@@ -40,16 +40,25 @@ def socket_api(tmp_path):
 
 
 class FakeConnection:
-    def __init__(self, incoming=None):
+    def __init__(self, incoming=None, binary_incoming=None):
         self.sent = []
+        self.sent_binary = []
         self.incoming = list(incoming or [])
+        self.binary_incoming = list(binary_incoming or [])
         self.closed = False
 
     def send_text(self, text):
         self.sent.append(text)
 
-    def recv_text(self):
-        return self.incoming.pop(0) if self.incoming else None
+    def send_binary(self, payload):
+        self.sent_binary.append(payload)
+
+    def recv_message(self):
+        if self.incoming:
+            return False, self.incoming.pop(0).encode("utf-8")
+        if self.binary_incoming:
+            return True, self.binary_incoming.pop(0)
+        return None
 
     def close(self):
         self.closed = True
@@ -168,3 +177,57 @@ def recv(connection, count):
         chunks.append(chunk)
         remaining -= len(chunk)
     return b"".join(chunks)
+
+
+def test_websocket_binary_messages(tmp_path):
+    document = support.load_spec("unsupported.json")
+    document["operations"][1]["stream"]["client"] = {"kind": "bytes", "encoding": "array"}
+    document["operations"][1]["stream"]["server"] = {"kind": "bytes", "encoding": "array"}
+    generated = Generated(tmp_path, document, "binary_api")
+    try:
+        api = generated.api
+        connection = FakeConnection(binary_incoming=[b"\x00\x01"])
+        instance = api.Client(
+            "https://api.test",
+            credentials=tenant(),
+            websocket_transport=lambda request: connection,
+        )
+        websocket = instance.events.watch("c")
+        websocket.send(b"abc")
+        assert connection.sent_binary == [b"abc"]
+        assert websocket.recv() == b"\x00\x01"
+    finally:
+        generated.close()
+
+
+def test_socket_connection_frames_binary(socket_api):
+    client_module = importlib.import_module(socket_api.package + ".client")
+    left, right = socket.socketpair()
+    connection = client_module._SocketConnection(left)
+    received = {}
+
+    def peer():
+        try:
+            first, second = recv(right, 2)
+            length = second & 0x7F
+            mask = recv(right, 4)
+            payload = bytes(
+                byte ^ mask[index % 4]
+                for index, byte in enumerate(recv(right, length))
+            )
+            received["opcode"] = first & 0x0F
+            received["payload"] = payload
+            body = b"\x00\x01"
+            right.sendall(bytes([0x82, len(body)]) + body)
+        finally:
+            right.close()
+
+    thread = threading.Thread(target=peer)
+    thread.start()
+    try:
+        connection.send_binary(b"abc")
+        assert connection.recv_message() == (True, b"\x00\x01")
+        connection.close()
+    finally:
+        thread.join(5)
+    assert received == {"opcode": 2, "payload": b"abc"}

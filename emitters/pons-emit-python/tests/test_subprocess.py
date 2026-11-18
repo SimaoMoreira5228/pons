@@ -45,21 +45,9 @@ def test_emit_reads_a_request_from_stdin():
 
 def test_emit_returns_an_error_response_for_an_unsupported_document():
     document = support.base_document()
-    document["types"]["Other"] = {
-        "kind": "struct",
-        "name": ["other"],
-        "direction": "output",
-        "openness": "reject",
-        "fields": [
-            {
-                "wire": "value",
-                "ident": ["value"],
-                "ty": {"kind": "string"},
-                "presence": "required",
-            }
-        ],
-    }
-    document["types"]["Thing"]["flattened"] = [{"ref": "Other"}]
+    document["types"]["Thing"]["flattened"] = [
+        {"kind": "map", "key": {"kind": "string"}, "value": {"kind": "string"}}
+    ]
     payload = support.request(document, mode="lossy")
     result = run("emit", payload)
     assert result.returncode == 0, result.stderr

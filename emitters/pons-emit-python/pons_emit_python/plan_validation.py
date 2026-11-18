@@ -186,8 +186,6 @@ class ValidationPlanner:
 
     def definition_capability(self, definition: TypeDef) -> str | None:
         if definition.kind == "struct":
-            if definition.flattened:
-                return "validation.object"
             for field in definition.fields:
                 capability = self.ref_capability(field.ty)
                 if capability is not None:

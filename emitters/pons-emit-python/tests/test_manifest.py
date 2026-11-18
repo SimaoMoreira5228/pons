@@ -35,7 +35,7 @@ def test_manifest_declares_the_supported_subset():
     assert capabilities["direction_split"] is True
     assert capabilities["provides"] is True
     assert capabilities["custom_auth"] is True
-    assert capabilities["flattened"] is False
+    assert capabilities["flattened"] is True
     assert capabilities["wide_integers"] is True
     assert capabilities["opaque"] is True
     assert capabilities["object_openness"] == [

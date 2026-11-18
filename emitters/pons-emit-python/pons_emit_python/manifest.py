@@ -57,7 +57,7 @@ def build_manifest() -> dict:
             "direction_split": True,
             "provides": True,
             "custom_auth": True,
-            "flattened": False,
+            "flattened": True,
             "wide_integers": True,
             "opaque": True,
             "object_openness": ["reject", "preserve_typed", "preserve_opaque"],

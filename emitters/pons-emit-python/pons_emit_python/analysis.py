@@ -50,6 +50,8 @@ class Analysis:
         self.error_order = self.operation_planner.error_order
         self.query_types = self.operation_planner.query_types
         self.query_functions = self.operation_planner.query_functions
+        self.multipart_types = self.operation_planner.multipart_types
+        self.multipart_functions = self.operation_planner.multipart_functions
         self.wire = WireSyntax(self)
         self.validation_plan: ValidationPlan | None = None
         if options.validation is not None:

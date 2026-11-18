@@ -55,6 +55,10 @@ def render_client(analysis: Analysis) -> str:
     if query_lines:
         lines.append("")
         lines.extend(query_lines)
+    multipart_lines = render_multipart(analysis)
+    if multipart_lines:
+        lines.append("")
+        lines.extend(multipart_lines)
     lines.append("")
     lines.extend(render_client_class(analysis, root, provides))
     for node in walk_namespaces(root):
@@ -201,6 +205,7 @@ def render_client_class(
             "        auth: Mapping[str, object] | None = None,",
             "        auth_adapters: Mapping[str, AuthAdapter] | None = None,",
             "        credentials: dict[str, object] | None = None,",
+            "        codecs: Mapping[str, object] | None = None,",
             "        headers: Mapping[str, str] | None = None,",
             "        timeout: float = 10.0,",
             "        transport: Transport | None = None,",
@@ -209,6 +214,8 @@ def render_client_class(
             "    ) -> None:",
             "        self.base_url = base_url.rstrip(\"/\")",
             "        self.credentials = credentials if credentials is not None else {}",
+            "        self.codecs = dict(codecs or {})",
+            "        _wire.set_codecs(self.codecs)",
             "        self.headers = dict(headers or {})",
             "        self.timeout = timeout",
             "        self.transport = transport or _urllib_transport",
@@ -432,3 +439,48 @@ def render_error_case(
             )
         lines.append(f"{indent}raise {error.name}(status, response_headers, None)")
     return lines
+
+
+def render_multipart(analysis: Analysis) -> list[str]:
+    lines: list[str] = []
+    for type_id in sorted(analysis.multipart_types):
+        plan = analysis.multipart_types[type_id]
+        function = analysis.multipart_functions[type_id]
+        lines.append(
+            f"def {function}(body: _types.{plan.name}) -> tuple[str, bytes]:"
+        )
+        lines.append('    boundary = "----pons" + os.urandom(12).hex()')
+        lines.append("    parts: list[bytes] = []")
+        for field in plan.fields:
+            indent = "    "
+            if field.optional:
+                lines.append(f"    if body.{field.name} is not None:")
+                indent = "        "
+            wire = literal(field.wire)
+            value = f"body.{field.name}"
+            if is_bytes_ref(analysis, field.ty):
+                lines.append(
+                    f"{indent}parts.append(_wire.multipart_field(boundary, {wire}, {value}, {wire}))"
+                )
+                continue
+            text = analysis.wire.scalar_text(field.ty, value)
+            lines.append(
+                f"{indent}parts.append(_wire.multipart_field(boundary, {wire}, {text}))"
+            )
+        lines.append(
+            '    parts.append(("--" + boundary + "--\\r\\n").encode("utf-8"))'
+        )
+        lines.append(
+            '    return f"multipart/form-data; boundary={boundary}", b"".join(parts)'
+        )
+        lines.append("")
+    return lines
+
+
+def is_bytes_ref(analysis: Analysis, ref: TypeRef) -> bool:
+    if ref.id:
+        definition = analysis.document.types.get(ref.id)
+        if definition is not None and definition.kind == "newtype" and definition.inner is not None:
+            return is_bytes_ref(analysis, definition.inner)
+        return False
+    return ref.kind == "bytes"

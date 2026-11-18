@@ -269,6 +269,55 @@ def decimal_to(value: Decimal) -> str:
     return str(value)
 
 
+def multipart_field(
+    boundary: str, name: str, value: object, filename: str | None = None
+) -> bytes:
+    header = f'--{boundary}\r\nContent-Disposition: form-data; name="{name}"'
+    if filename is not None:
+        header += f'; filename="{filename}"\r\nContent-Type: application/octet-stream'
+        payload = raw_bytes(value)
+    else:
+        payload = str(value).encode("utf-8")
+    return header.encode("utf-8") + b"\r\n\r\n" + payload + b"\r\n"
+
+
+_CODECS: dict[str, object] = {}
+
+
+def set_codecs(codecs: Mapping[str, object]) -> None:
+    _CODECS.clear()
+    _CODECS.update(codecs)
+
+
+def codec_decode(codec_id: str, value: object, path: str) -> object:
+    codec = _CODECS.get(codec_id)
+    if codec is None:
+        return value
+    try:
+        return codec.decode(value)
+    except Exception as error:
+        raise DecodeError(f"codec {codec_id!r} failed: {error}", path=path) from error
+
+
+def codec_encode(codec_id: str, value: object) -> object:
+    codec = _CODECS.get(codec_id)
+    if codec is None:
+        return value
+    try:
+        return codec.encode(value)
+    except Exception as error:
+        raise DecodeError(f"codec {codec_id!r} failed: {error}") from error
+
+
+def raw_bytes(value: object) -> bytes:
+    if isinstance(value, (bytes, bytearray)):
+        return bytes(value)
+    inner = getattr(value, "value", None)
+    if isinstance(inner, (bytes, bytearray)):
+        return bytes(inner)
+    raise DecodeError("expected raw bytes")
+
+
 def bytes_to(value: bytes, encoding: str) -> object:
     if encoding == "array":
         return list(value)

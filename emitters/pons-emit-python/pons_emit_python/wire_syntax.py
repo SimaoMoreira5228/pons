@@ -85,7 +85,9 @@ class WireSyntax:
             return f"_wire.str_of({value}, {path})"
         if kind == "bytes":
             return f"_wire.bytes_of({value}, {path}, {raw.get('encoding')!r})"
-        if kind in {"any", "opaque"}:
+        if kind == "opaque":
+            return f"_wire.codec_decode({raw.get('codec')!r}, {value}, {path})"
+        if kind == "any":
             return f"_wire.any_of({value}, {path})"
         if kind == "nullable":
             inner = self.decode_expr(self._ref(raw["inner"]), "v", "p")
@@ -125,7 +127,9 @@ class WireSyntax:
         raw = ref.raw
         if kind == "int" and raw.get("wire") == "string":
             return f"str({value})"
-        if kind in {"bool", "int", "float", "string", "any", "opaque"}:
+        if kind == "opaque":
+            return f"_wire.codec_encode({raw.get('codec')!r}, {value})"
+        if kind in {"bool", "int", "float", "string", "any"}:
             return value
         if kind == "decimal":
             return f"_wire.decimal_to({value})"

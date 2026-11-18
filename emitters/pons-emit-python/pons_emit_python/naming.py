@@ -35,7 +35,7 @@ _TYPE_RESERVED = frozenset(
 _FIELD_RESERVED = frozenset({"self", "cls"})
 _PARAMETER_RESERVED = frozenset({"self", "cls", "query", "body"})
 _CLIENT_RESERVED = frozenset(
-    {"auth_adapters", "base_url", "credentials", "timeout", "transport", "headers"}
+    {"auth_adapters", "base_url", "codecs", "credentials", "timeout", "transport", "headers"}
 )
 _NAMESPACE_RESERVED = frozenset({"_client"})
 

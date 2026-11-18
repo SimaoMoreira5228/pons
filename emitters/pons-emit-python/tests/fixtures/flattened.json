@@ -26,27 +26,13 @@
       ],
       "flattened": [
         {
-          "ref": "Other"
-        }
-      ]
-    },
-    "Other": {
-      "kind": "struct",
-      "name": [
-        "other"
-      ],
-      "direction": "output",
-      "openness": "reject",
-      "fields": [
-        {
-          "wire": "value",
-          "ident": [
-            "value"
-          ],
-          "ty": {
+          "kind": "map",
+          "key": {
             "kind": "string"
           },
-          "presence": "required"
+          "value": {
+            "kind": "string"
+          }
         }
       ]
     }

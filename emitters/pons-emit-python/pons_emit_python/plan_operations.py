@@ -16,6 +16,7 @@ from .document import (
     decode_type_ref,
 )
 from .plan_auth import CredentialPlanner
+from .plan_bodies import BodyPlan, BodyPlanner, is_json_media, media_text
 from .plan_pagination import PaginationPlan, build_pagination
 from .plan_stream import StreamPlan, build_stream
 from .plan_types import TypePlan, is_nullable
@@ -49,14 +50,6 @@ class ParamPlan:
     wire: str
     ty: TypeRef
     optional: bool
-
-
-@dataclass(slots=True)
-class BodyPlan:
-    name: str
-    ty: TypeRef
-    required: bool
-    media: str
 
 
 @dataclass(slots=True)
@@ -124,21 +117,6 @@ def is_exact_success(status: object) -> bool:
     return isinstance(status, int) and 200 <= status <= 299
 
 
-def is_json_media(media: Media | None) -> bool:
-    if media is None:
-        return True
-    if media.codec is not None:
-        return False
-    if media.type.lower() != "application":
-        return False
-    subtype = media.subtype.lower()
-    return subtype == "json" or subtype.endswith("+json")
-
-
-def media_text(media: Media | None) -> str:
-    return media.text() if media is not None else "application/json"
-
-
 def ref_signature(ref: TypeRef) -> str:
     if ref.id:
         return "ref:" + ref.id + "#" + (ref.variant or "")
@@ -181,11 +159,14 @@ class OperationPlanner:
     def __init__(self, analysis: Analysis) -> None:
         self.analysis = analysis
         self.credentials = CredentialPlanner(analysis)
+        self.bodies = BodyPlanner(self)
         self.operations: list[OperationPlan] = []
         self.errors: dict[str, ErrorPlan] = {}
         self.error_order: list[str] = []
         self.query_types: dict[str, TypePlan] = {}
         self.query_functions: dict[str, str] = {}
+        self.multipart_types: dict[str, TypePlan] = {}
+        self.multipart_functions: dict[str, str] = {}
 
     def build(self) -> None:
         for operation in self.analysis.document.operations:
@@ -241,7 +222,7 @@ class OperationPlanner:
         self.build_path(plan, operation, params, subject)
         self.build_query(plan, operation, params, subject)
         self.build_headers(plan, operation, params, subject)
-        self.build_body(plan, operation, params, subject)
+        self.bodies.build(plan, operation, params, subject)
         success = self.build_success(operation, subject)
         if success is not None:
             plan.success = success
@@ -393,44 +374,6 @@ class OperationPlanner:
             plan.params.append(
                 ParamPlan("header", name, header.wire, header.ty, optional)
             )
-
-    def build_body(
-        self,
-        plan: OperationPlan,
-        operation: Operation,
-        params: naming.NameRegistry,
-        subject: str,
-    ) -> None:
-        body = operation.body
-        if body is None:
-            return
-        if body.content != "json":
-            self.analysis.add(
-                UNSUPPORTED,
-                subject,
-                f"the request body content {body.content!r} is not supported; this emitter reads JSON bodies",
-            )
-            return
-        if not is_json_media(body.media):
-            self.analysis.add(
-                UNSUPPORTED,
-                subject,
-                f"the request body uses the media type {media_text(body.media)!r}; this emitter writes JSON",
-            )
-            return
-        if not body.required and is_nullable(body.ty):
-            self.analysis.add(
-                UNSUPPORTED,
-                subject,
-                "the optional request body is nullable, which this emitter does not support",
-            )
-            return
-        if not self.analysis.type_planner.validate_ref(
-            body.ty, subject, "the request body"
-        ):
-            return
-        name = params.claim("body")
-        plan.body = BodyPlan(name, body.ty, body.required, media_text(body.media))
 
     def build_success(self, operation: Operation, subject: str) -> SuccessPlan | None:
         if operation.stream is not None:

@@ -22,39 +22,6 @@ def assert_refused(document, *, marker=None, mode="strict"):
     return response
 
 
-def test_flattened_struct_is_refused():
-    def change(value):
-        value["types"]["Other"] = {
-            "kind": "struct",
-            "name": ["other"],
-            "direction": "output",
-            "openness": "reject",
-            "fields": [
-                {
-                    "wire": "value",
-                    "ident": ["value"],
-                    "ty": {"kind": "string"},
-                    "presence": "required",
-                }
-            ],
-        }
-        value["types"]["Thing"]["flattened"] = [{"ref": "Other"}]
-
-    assert_refused(document_with(change), marker="flattened")
-
-
-@pytest.mark.parametrize("content", ["multipart", "form", "text", "bytes"])
-def test_non_json_request_body_is_refused(content):
-    def change(value):
-        value["operations"][0]["body"] = {
-            "ty": {"kind": "string"},
-            "content": content,
-            "required": True,
-        }
-
-    assert_refused(document_with(change), marker=content)
-
-
 def test_non_json_success_content_is_refused():
     def change(value):
         value["operations"][0]["responses"][0] = {
@@ -108,27 +75,6 @@ def test_preserve_typed_without_a_value_is_refused():
         value["types"]["Thing"]["openness"] = {"preserve_typed": {}}
 
     assert_refused(document_with(change), marker="without a value type")
-
-
-def test_flattened_member_is_refused():
-    def change(value):
-        value["types"]["Other"] = {
-            "kind": "struct",
-            "name": ["other"],
-            "direction": "output",
-            "openness": "reject",
-            "fields": [
-                {
-                    "wire": "other",
-                    "ident": ["other"],
-                    "ty": {"kind": "string"},
-                    "presence": "required",
-                }
-            ],
-        }
-        value["types"]["Thing"]["flattened"] = [{"ref": "Other"}]
-
-    assert_refused(document_with(change), marker="flattened")
 
 
 def test_optional_nullable_field_is_supported():

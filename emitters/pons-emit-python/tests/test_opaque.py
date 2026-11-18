@@ -206,3 +206,72 @@ def test_any_is_imported_only_when_opaque_is_used():
         if file["path"].endswith("types.py")
     )
     assert "from typing import Any" in opaque_types
+
+
+class JsonCodec:
+    def __init__(self):
+        self.decoded = []
+        self.encoded = []
+
+    def decode(self, value):
+        if value == "bad":
+            raise ValueError("cannot decode")
+        self.decoded.append(value)
+        return ("decoded", value)
+
+    def encode(self, value):
+        self.encoded.append(value)
+        return value[1]
+
+
+def test_a_codec_transforms_an_opaque_value(opaque):
+    api = opaque.api
+    codec = JsonCodec()
+    envelope = api.Client(
+        "https://api.test",
+        transport=json_transport(envelope_payload()),
+        codecs={"custom-json": codec},
+    ).envelopes.get()
+    assert envelope.json == ("decoded", {"nested": [1, "two", None]})
+    assert envelope.text == "hello"
+    wire = envelope.to_wire()
+    assert wire["json"] == {"nested": [1, "two", None]}
+    assert codec.encoded == [("decoded", {"nested": [1, "two", None]})]
+
+
+def test_a_codec_failure_raises_with_the_path(opaque):
+    api = opaque.api
+
+    class Broken:
+        def decode(self, value):
+            raise ValueError("bad payload")
+
+        def encode(self, value):
+            return value
+
+    with pytest.raises(api.DecodeError) as caught:
+        api.Client(
+            "https://api.test",
+            transport=json_transport({**envelope_payload(), "json": "bad"}),
+            codecs={"custom-json": Broken()},
+        ).envelopes.get()
+    assert caught.value.path == "json"
+    assert "bad payload" in caught.value.message
+
+
+def test_an_inline_opaque_body_uses_its_codec(opaque):
+    api = opaque.api
+
+    class Raw:
+        def decode(self, value):
+            return ("raw", value)
+
+        def encode(self, value):
+            return value[1]
+
+    body = api.Client(
+        "https://api.test",
+        transport=json_transport({"inline": True}),
+        codecs={"custom-raw": Raw()},
+    ).raw.get()
+    assert body == ("raw", {"inline": True})
