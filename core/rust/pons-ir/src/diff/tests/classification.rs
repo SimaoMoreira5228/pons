@@ -405,7 +405,15 @@ fn oauth_flow_changes_are_classified() {
 
 #[test]
 fn pagination_descriptors_are_classified_when_added_removed_or_rewritten() {
-    let old: Document = serde_json::from_value(fixture()).unwrap();
+    let mut old: Document = serde_json::from_value(fixture()).unwrap();
+    for operation in &mut old.operations {
+        if operation.stream.is_some() {
+            operation.stream = None;
+            operation.responses[0].content = crate::ContentKind::Json;
+            operation.responses[0].body =
+                Some(serde_json::from_value(serde_json::json!({"ref": "User"})).unwrap());
+        }
+    }
     let mut added = old.clone();
     let operation = added
         .operations

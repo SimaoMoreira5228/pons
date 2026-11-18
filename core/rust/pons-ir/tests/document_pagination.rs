@@ -284,3 +284,23 @@ fn a_pagination_field_can_live_on_the_request_body() {
     }
     document.validate().unwrap();
 }
+
+#[test]
+fn a_streaming_operation_cannot_declare_pagination() {
+    let mut document = paginated(
+        json!({"ref": "EventQuery"}),
+        json!({
+            "request": {"kind": "cursor", "field": "cursor"},
+            "items": "/items",
+            "next": "/next"
+        }),
+    );
+    document.operations[0].stream = Some(
+        serde_json::from_value(json!({
+            "kind": "sse",
+            "events": [{"event": "tick", "data": {"kind": "string"}}]
+        }))
+        .unwrap(),
+    );
+    refuses(&document, "a streaming operation cannot declare pagination");
+}

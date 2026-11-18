@@ -27,6 +27,8 @@ class StreamPlan:
     events: list[StreamEventPlan] = field(default_factory=list)
     item: TypeRef | None = None
     content_type: str = ""
+    client: TypeRef | None = None
+    server: TypeRef | None = None
 
 
 def build_stream(
@@ -35,12 +37,20 @@ def build_stream(
     if stream is None:
         return None
     if stream.kind == "websocket":
-        analysis.add(
-            UNSUPPORTED,
-            subject,
-            "the operation upgrades to a WebSocket; this emitter does not implement a WebSocket client",
+        if stream.client is None or stream.server is None:
+            analysis.add(
+                UNSUPPORTED, subject, "the WebSocket stream has no message types"
+            )
+            return None
+        if not analysis.type_planner.validate_ref(
+            stream.client, subject, "the WebSocket client message"
+        ) or not analysis.type_planner.validate_ref(
+            stream.server, subject, "the WebSocket server message"
+        ):
+            return None
+        return StreamPlan(
+            "websocket", "", client=stream.client, server=stream.server
         )
-        return None
     if stream.kind == "sse":
         events: list[StreamEventPlan] = []
         for item in stream.events:

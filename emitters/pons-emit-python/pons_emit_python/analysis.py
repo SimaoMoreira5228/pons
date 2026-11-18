@@ -209,6 +209,10 @@ class Analysis:
             references.extend(event.ty for event in plan.stream.events)
             if plan.stream.item is not None:
                 references.append(plan.stream.item)
+            if plan.stream.client is not None:
+                references.append(plan.stream.client)
+            if plan.stream.server is not None:
+                references.append(plan.stream.server)
         for error in plan.errors:
             if error.body is not None:
                 references.append(error.body)

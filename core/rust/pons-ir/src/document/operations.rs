@@ -187,6 +187,12 @@ impl Document {
                 message,
             });
         }
+        if operation.stream.is_some() && operation.semantics.pagination.is_some() {
+            errors.push(ValidationError::InvalidValue {
+                path: owner.clone(),
+                message: "a streaming operation cannot declare pagination, because a stream has no page body".into(),
+            });
+        }
 
         self.validate_operation_auth(&owner, operation, errors);
         self.validate_responses(&owner, operation, errors);

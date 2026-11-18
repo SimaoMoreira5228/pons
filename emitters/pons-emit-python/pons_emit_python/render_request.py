@@ -8,10 +8,14 @@ from .render import literal
 
 
 def request_setup(
-    analysis: Analysis, plan: OperationPlan, indent: str = "        "
+    analysis: Analysis,
+    plan: OperationPlan,
+    indent: str = "        ",
+    accept: bool = True,
 ) -> list[str]:
     lines = [indent + "headers: dict[str, str] = {}"]
-    lines.append(f"{indent}headers[\"Accept\"] = {literal(plan.success.media)}")
+    if accept:
+        lines.append(f"{indent}headers[\"Accept\"] = {literal(plan.success.media)}")
     for param in plan.params:
         if param.kind != "header":
             continue

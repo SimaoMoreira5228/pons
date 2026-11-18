@@ -24,6 +24,11 @@ def stream_hint(analysis: Analysis, plan: OperationPlan) -> str:
     if stream.kind == "ndjson":
         assert stream.item is not None
         return f"Iterator[{analysis.wire.client_hint(stream.item)}]"
+    if stream.kind == "websocket":
+        assert stream.client is not None and stream.server is not None
+        client = analysis.wire.client_hint(stream.client)
+        server = analysis.wire.client_hint(stream.server)
+        return f"TypedWebSocket[{client}, {server}]"
     return "Iterator[bytes]"
 
 
@@ -65,7 +70,36 @@ def render_stream_operation(
     if summary:
         lines.append(f"        {literal(summary)}")
     lines.append("        client = self._client")
-    lines.extend(request_setup(analysis, plan))
+    lines.extend(request_setup(analysis, plan, accept=stream.kind != "websocket"))
+    if stream.kind == "websocket":
+        path = path_expression(analysis, plan)
+        lines.append(f"        url = client._ws_url({path}, pairs)")
+        lines.append(
+            f"        auth_headers, auth_pairs = client._authorize("
+        )
+        lines.append(
+            f"            {literal(plan.method)}, url, {alternatives_text(plan)}, {plan.required_auth}, headers"
+        )
+        lines.append("        )")
+        lines.append("        headers.update(auth_headers)")
+        lines.append("        if auth_pairs:")
+        lines.append("            pairs.extend(auth_pairs)")
+        lines.append(f"            url = client._ws_url({path}, pairs)")
+        lines.append(
+            "        request = Request(method="
+            f"{literal(plan.method)}, url=url, headers=headers, body=payload, timeout=client.timeout)"
+        )
+        from .render_client import codec_expr, validator_expr
+
+        assert stream.client is not None and stream.server is not None
+        to_wire = analysis.wire.encode_expr(stream.client, "value")
+        from_wire = codec_expr(analysis, stream.server)
+        lines.append("        connection = client._open_websocket(request)")
+        validator = validator_expr(analysis, stream.server)
+        lines.append(
+            f"        return TypedWebSocket(connection, lambda value: {to_wire}, {from_wire}, {validator})"
+        )
+        return lines
     path = path_expression(analysis, plan)
     lines.append(f"        url = client._url({path}, pairs)")
     lines.append(

@@ -97,11 +97,15 @@ test -f "$work/streams/pons_client/streams.py"
 grep -q "def watch(" "$work/streams/pons_client/client.py"
 grep -q "_wire.sse_events" "$work/streams/pons_client/client.py"
 
-if "$pons" emit --target python "$root/../../spec/fixtures/unsupported.json" "$work/unsupported" --lossy > "$work/unsupported.out" 2> "$work/unsupported.err"; then
-    echo "unsupported.json must be refused" >&2
+"$pons" emit --target python "$root/../../spec/fixtures/unsupported.json" "$work/websocket" --lossy
+test -f "$work/websocket/pons_client/client.py"
+grep -q "TypedWebSocket" "$work/websocket/pons_client/client.py"
+
+if "$pons" emit --target python "$root/tests/fixtures/flattened.json" "$work/unsupported" --lossy > "$work/unsupported.out" 2> "$work/unsupported.err"; then
+    echo "flattened.json must be refused" >&2
     exit 1
 fi
 test ! -d "$work/unsupported" || test -z "$(ls -A "$work/unsupported")"
-grep -q "WebSocket" "$work/unsupported.err" "$work/unsupported.out"
+grep -q "flattened" "$work/unsupported.err" "$work/unsupported.out"
 
 echo "python emitter ok"

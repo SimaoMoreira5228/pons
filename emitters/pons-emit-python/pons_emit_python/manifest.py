@@ -45,7 +45,7 @@ def build_manifest() -> dict:
         "protocol": {"min": "3.0", "max": "3.0"},
         "ir_version": {"min": "0.3", "max": "0.3"},
         "capabilities": {
-            "streaming": ["sse", "ndjson", "bytes"],
+            "streaming": ["sse", "ndjson", "bytes", "websocket"],
             "pagination": ["pagination.cursor", "pagination.offset"],
             "enum_reprs": [
                 "string",

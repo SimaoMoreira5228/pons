@@ -20,7 +20,7 @@ def test_manifest_declares_the_python_target():
 
 def test_manifest_declares_the_supported_subset():
     capabilities = build_manifest()["capabilities"]
-    assert capabilities["streaming"] == ["sse", "ndjson", "bytes"]
+    assert capabilities["streaming"] == ["sse", "ndjson", "bytes", "websocket"]
     assert capabilities["pagination"] == [
         "pagination.cursor",
         "pagination.offset",

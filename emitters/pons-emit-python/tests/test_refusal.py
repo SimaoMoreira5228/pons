@@ -22,15 +22,25 @@ def assert_refused(document, *, marker=None, mode="strict"):
     return response
 
 
-def test_stream_is_refused():
+def test_flattened_struct_is_refused():
     def change(value):
-        value["operations"][0]["stream"] = {
-            "kind": "websocket",
-            "client": {"kind": "string"},
-            "server": {"ref": "Thing"},
+        value["types"]["Other"] = {
+            "kind": "struct",
+            "name": ["other"],
+            "direction": "output",
+            "openness": "reject",
+            "fields": [
+                {
+                    "wire": "value",
+                    "ident": ["value"],
+                    "ty": {"kind": "string"},
+                    "presence": "required",
+                }
+            ],
         }
+        value["types"]["Thing"]["flattened"] = [{"ref": "Other"}]
 
-    assert_refused(document_with(change), marker="WebSocket")
+    assert_refused(document_with(change), marker="flattened")
 
 
 @pytest.mark.parametrize("content", ["multipart", "form", "text", "bytes"])

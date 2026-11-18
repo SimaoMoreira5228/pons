@@ -65,7 +65,10 @@ def generated_files(analysis: Analysis) -> list[tuple[str, str]]:
         (f"{package}/client.py", render_client(analysis)),
         (f"{package}/_wire.py", render_wire()),
     ]
-    if any(plan.stream is not None for plan in analysis.operations):
+    if any(
+        plan.stream is not None and plan.stream.kind == "sse"
+        for plan in analysis.operations
+    ):
         files.append((f"{package}/streams.py", render_event_classes(analysis)))
     if analysis.validation_plan is not None:
         files.append(
@@ -79,7 +82,7 @@ def generated_files(analysis: Analysis) -> list[tuple[str, str]]:
 
 def render_init(analysis: Analysis) -> str:
     lines = [start(f"Generated Python client for {analysis.document.title}.")]
-    lines.append("from .client import Client, Request, Response, StreamResponse")
+    lines.append("from .client import Client, Request, Response, StreamResponse, TypedWebSocket")
     lines.append("from .client import AuthAdapter, AuthAttachment, AuthContext")
     lines.append("from ._wire import MISSING, Missing")
     stream_events = [
@@ -102,6 +105,8 @@ def render_init(analysis: Analysis) -> str:
         "PonsError",
         "TransportError",
         "UnexpectedStatusError",
+        "WebSocketClosed",
+        "WebSocketError",
     ]:
         lines.append(f"    {name},")
     for name in error_names:
@@ -129,7 +134,10 @@ def render_init(analysis: Analysis) -> str:
         "Response",
         "StreamResponse",
         "TransportError",
+        "TypedWebSocket",
         "UnexpectedStatusError",
+        "WebSocketClosed",
+        "WebSocketError",
     ]
     exported.extend(error_names)
     for plan in analysis.types:

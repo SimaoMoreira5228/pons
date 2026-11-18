@@ -64,7 +64,15 @@ def render_client(analysis: Analysis) -> str:
 
 
 def render_imports(analysis: Analysis) -> list[str]:
-    errors = ["ConfigurationError", "DecodeError", "PonsError", "TransportError", "UnexpectedStatusError"]
+    errors = [
+        "ConfigurationError",
+        "DecodeError",
+        "PonsError",
+        "TransportError",
+        "UnexpectedStatusError",
+        "WebSocketClosed",
+        "WebSocketError",
+    ]
     errors.extend(analysis.errors[key].name for key in analysis.error_order)
     paginated = any(plan.pagination is not None for plan in analysis.operations)
     collection_names = "Callable, Iterable, Iterator, Mapping"
@@ -72,6 +80,10 @@ def render_imports(analysis: Analysis) -> list[str]:
         "from __future__ import annotations",
         "",
         "import base64",
+        "import hashlib",
+        "import os",
+        "import socket",
+        "import ssl",
     ]
     if paginated:
         lines.append("import dataclasses")
@@ -83,7 +95,7 @@ def render_imports(analysis: Analysis) -> list[str]:
             "import urllib.request",
             f"from collections.abc import {collection_names}",
             "from dataclasses import dataclass, field",
-            "from typing import Any, Generic, TypeVar",
+            "from typing import Any, Generic, Protocol, TypeVar",
             "",
             "from . import _wire",
             "from . import types as _types",
@@ -95,7 +107,10 @@ def render_imports(analysis: Analysis) -> list[str]:
     for name in errors:
         lines.append(f"    {name},")
     lines.append(")")
-    if any(plan.stream is not None for plan in analysis.operations):
+    if any(
+        plan.stream is not None and plan.stream.kind == "sse"
+        for plan in analysis.operations
+    ):
         lines.append("from . import streams as _streams")
     return lines
 
@@ -190,6 +205,7 @@ def render_client_class(
             "        timeout: float = 10.0,",
             "        transport: Transport | None = None,",
             "        stream_transport: StreamTransport | None = None,",
+            "        websocket_transport: WebSocketTransport | None = None,",
             "    ) -> None:",
             "        self.base_url = base_url.rstrip(\"/\")",
             "        self.credentials = credentials if credentials is not None else {}",
@@ -197,6 +213,7 @@ def render_client_class(
             "        self.timeout = timeout",
             "        self.transport = transport or _urllib_transport",
             "        self.stream_transport = stream_transport or _urllib_stream_transport",
+            "        self.websocket_transport = websocket_transport or _urllib_websocket",
             "        self._auth = dict(auth or {})",
             "        self._auth_adapters = dict(auth_adapters or {})",
             "        self._expirations: dict[str, object] = {}",
