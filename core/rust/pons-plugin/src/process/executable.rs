@@ -155,6 +155,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[test]
     fn a_quoted_search_entry_is_still_searched() {
         let directory = tempfile::tempdir().unwrap();

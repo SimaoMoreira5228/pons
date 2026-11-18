@@ -102,7 +102,9 @@ fn run_bun(files: &[GeneratedFile], harness: &str) {
 }
 
 fn type_check(files: &[GeneratedFile]) {
-    let version = Command::new("tsc")
+    let compiler = support::type_check::tsc_command();
+    let version = Command::new(&compiler.program)
+        .args(&compiler.arguments)
         .arg("--version")
         .output()
         .expect("the TypeScript compiler is required for generated schema type checks");
@@ -115,7 +117,8 @@ fn type_check(files: &[GeneratedFile]) {
         format!(r#"{{"compilerOptions": {COMPILER_OPTIONS}, "include": ["**/*.ts"]}}"#),
     )
     .unwrap();
-    let output = Command::new("tsc")
+    let output = Command::new(&compiler.program)
+        .args(&compiler.arguments)
         .args(["--project", "tsconfig.json"])
         .current_dir(directory.path())
         .output()
