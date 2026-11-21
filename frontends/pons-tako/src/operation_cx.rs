@@ -33,7 +33,7 @@ impl OperationCx {
         ty
     }
 
-    pub(crate) fn request_header<T: Schema>(&mut self, wire: &str, presence: Presence) {
+    pub fn request_header<T: Schema>(&mut self, wire: &str, presence: Presence) {
         self.headers.push(HeaderParameter {
             wire: wire.to_owned(),
             ident: header_ident(wire),
@@ -67,7 +67,7 @@ impl OperationCx {
             .for_each(|response| response.headers.push(header.clone()));
     }
 
-    pub(crate) fn query_type<T: Schema>(&mut self) {
+    pub fn query_type<T: Schema>(&mut self) {
         let query = self.flat_carrier::<T>("query");
         if self.query.replace(query).is_some() {
             self.diagnostic(

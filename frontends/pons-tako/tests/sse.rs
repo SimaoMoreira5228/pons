@@ -4,9 +4,9 @@ use std::collections::BTreeMap;
 
 use futures_util::stream;
 use pons_core::Schema;
-use pons_ir::{ContentKind, ResponseStatus, StreamKind, TypeKind, TypeRef};
-use pons_tako::{DescribeResponse, Info, OperationCx, PonsSse, Router};
-use serde::Serialize;
+use pons_ir::{ContentKind, Presence, ResponseStatus, StreamKind, TypeKind, TypeRef};
+use pons_tako::{DescribeResponse, Info, OperationCx, OperationMeta, PonsSse, Router};
+use serde::{Deserialize, Serialize};
 use tako::responder::Responder;
 use tako::types::Response;
 
@@ -23,6 +23,12 @@ struct EnvelopeEvent {
 #[derive(Serialize, Schema)]
 struct LaggedEvent {
     dropped: u64,
+}
+
+#[derive(Deserialize, Schema)]
+#[serde(deny_unknown_fields)]
+struct StreamQuery {
+    pub channel_id: Option<String>,
 }
 
 struct MultipleEvents;
@@ -115,8 +121,20 @@ fn one_item_becomes_one_event() {
 
 #[test]
 fn a_stream_can_describe_multiple_typed_events() {
+    let query = StreamQuery { channel_id: None };
+    assert!(query.channel_id.is_none());
+
     let mut router = Router::new(info());
-    router.get("/events", multiple_events);
+    router.get_described_with(
+        "/events",
+        multiple_events,
+        OperationMeta::new("events.subscribe"),
+        |cx| {
+            cx.query_type::<StreamQuery>();
+            cx.request_header::<String>("last-event-id", Presence::Optional);
+            MultipleEvents::describe(cx);
+        },
+    );
     let document = router.into_document().unwrap();
     document.validate().unwrap();
 
@@ -129,6 +147,9 @@ fn a_stream_can_describe_multiple_typed_events() {
     };
     let names: Vec<_> = events.iter().map(|event| event.event.as_str()).collect();
     assert_eq!(names, ["envelope", "lagged"]);
+    assert!(operation.query.is_some());
+    assert_eq!(operation.headers[0].wire, "last-event-id");
+    assert_eq!(operation.headers[0].presence, Presence::Optional);
     assert_eq!(operation.responses.len(), 1);
     assert_eq!(operation.responses[0].content, ContentKind::Stream);
 }
