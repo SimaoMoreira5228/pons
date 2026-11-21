@@ -121,22 +121,53 @@ impl OperationCx {
 
     #[cfg(feature = "sse")]
     pub(crate) fn sse<T: Schema>(&mut self, event: &'static str) {
-        self.stream = Some(StreamDescription {
-            kind: StreamKind::Sse {
-                events: vec![StreamMessage {
-                    event: event.to_owned(),
-                    data: T::schema(&mut self.types, Direction::Output),
-                }],
-            },
+        self.sse_event::<T>(event);
+    }
+
+    #[cfg(feature = "sse")]
+    pub fn sse_event<T: Schema>(&mut self, event: impl Into<String>) {
+        let is_sse = self
+            .stream
+            .as_ref()
+            .is_none_or(|stream| matches!(&stream.kind, StreamKind::Sse { .. }));
+        if !is_sse {
+            self.diagnostic(
+                "PONS-E102",
+                "an operation cannot describe multiple stream formats",
+            );
+            return;
+        }
+
+        let event = StreamMessage {
+            event: event.into(),
+            data: T::schema(&mut self.types, Direction::Output),
+        };
+        if let Some(StreamDescription {
+            kind: StreamKind::Sse { events },
+        }) = &mut self.stream
+        {
+            events.push(event);
+        } else {
+            self.stream = Some(StreamDescription {
+                kind: StreamKind::Sse {
+                    events: vec![event],
+                },
+            });
+        }
+
+        let has_stream_response = self.responses.iter().any(|response| {
+            response.status == ResponseStatus::Exact(200) && response.content == ContentKind::Stream
         });
-        self.responses.push(Response {
-            status: ResponseStatus::Exact(200),
-            content: ContentKind::Stream,
-            media: None,
-            body: None,
-            headers: Vec::new(),
-            ext: Default::default(),
-        });
+        if !has_stream_response {
+            self.responses.push(Response {
+                status: ResponseStatus::Exact(200),
+                content: ContentKind::Stream,
+                media: None,
+                body: None,
+                headers: Vec::new(),
+                ext: Default::default(),
+            });
+        }
     }
 
     #[cfg(feature = "ndjson")]
